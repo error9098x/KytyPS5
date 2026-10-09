@@ -2841,10 +2841,12 @@ int KYTY_SYSV_ABI KernelAllocateDirectMemory(int64_t search_start, int64_t searc
                                              size_t alignment, int memory_type,
                                              int64_t* phys_addr_out) {
 	PRINT_NAME();
-	const auto start = std::chrono::steady_clock::now();
+	const bool timing = std::getenv("KYTY_MEMORY_TIMING") != nullptr;
+	const auto start = timing ? std::chrono::steady_clock::now()
+	                         : std::chrono::steady_clock::time_point {};
 	const int  result = AllocateDirectMemory(search_start, search_end, len, alignment, memory_type,
 	                                         phys_addr_out);
-	LogMemoryTiming("allocate", len, result, start);
+	if (timing) LogMemoryTiming("allocate", len, result, start);
 	return result;
 }
 
@@ -3228,9 +3230,11 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
                                         int64_t direct_memory_start, size_t alignment) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
-	const auto start = std::chrono::steady_clock::now();
+	const bool timing = std::getenv("KYTY_MEMORY_TIMING") != nullptr;
+	const auto start = timing ? std::chrono::steady_clock::now()
+	                         : std::chrono::steady_clock::time_point {};
 	const int  result = MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, "");
-	LogMemoryTiming("map", len, result, start);
+	if (timing) LogMemoryTiming("map", len, result, start);
 	return result;
 }
 
@@ -3238,9 +3242,11 @@ int KYTY_SYSV_ABI KernelMapDirectMemory2(void** addr, size_t len, int type, int 
                                          int64_t direct_memory_start, size_t alignment) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
-	const auto start = std::chrono::steady_clock::now();
+	const bool timing = std::getenv("KYTY_MEMORY_TIMING") != nullptr;
+	const auto start = timing ? std::chrono::steady_clock::now()
+	                         : std::chrono::steady_clock::time_point {};
 	const int  result = MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, "", type);
-	LogMemoryTiming("map2", len, result, start);
+	if (timing) LogMemoryTiming("map2", len, result, start);
 	return result;
 }
 
@@ -3291,9 +3297,11 @@ int KYTY_SYSV_ABI KernelMapNamedDirectMemory(void** addr, size_t len, int prot, 
 		return KERNEL_ERROR_ENAMETOOLONG;
 	}
 
-	const auto start = std::chrono::steady_clock::now();
+	const bool timing = std::getenv("KYTY_MEMORY_TIMING") != nullptr;
+	const auto start = timing ? std::chrono::steady_clock::now()
+	                         : std::chrono::steady_clock::time_point {};
 	const int  result = MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, name);
-	LogMemoryTiming("map_named", len, result, start);
+	if (timing) LogMemoryTiming("map_named", len, result, start);
 	return result;
 }
 

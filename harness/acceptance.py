@@ -23,6 +23,8 @@ def inspect(run):
             r"\[(?:crash|unimplemented|gpu_validation)\] [1-9]", scan
         ),
         "elapsed": float(meta.get("elapsed_seconds", 0)),
+        "timed_out": bool(meta.get("timed_out")),
+        "route": meta.get("route"),
     }
 
 
@@ -32,7 +34,10 @@ def main():
     parser.add_argument("--stage", type=int, required=True)
     args = parser.parse_args()
     records = [inspect(run) for run in args.runs]
-    passed = all(record["stage"] >= args.stage and record["clean"] for record in records)
+    passed = all(record["stage"] >= args.stage and record["clean"] and
+                 (args.stage < 3 or
+                  (record["timed_out"] and record["elapsed"] >= 600 and
+                   record["route"] == "gameplay")) for record in records)
     print("[acceptance] stage=%d runs=%d result=%s" %
           (args.stage, len(records), "PASS" if passed else "FAIL"))
     for record in records:
