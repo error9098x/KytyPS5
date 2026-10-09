@@ -15,7 +15,8 @@ long input-delay reports remain in progress.
 - Input-driven probes `audio-probe-order` and `audio-probe-reverb` captured
   nonzero NGS2 and SDL samples after startup (SDL RMS 0.106–0.283, peaks up to
   0.56). Title-only probes remain silent. The opt-in harness now reports these
-  streams separately; speaker audibility is still unconfirmed.
+  streams separately. The host was also muted at zero output volume; it has now
+  been restored to 50% and unmuted.
 - macOS default output is HyperX Cloud Stinger 2 Wireless. Kyty now supports
   selecting `MacBook Air Speakers` explicitly and logs the resolved device,
   paused state, queued bytes, and converted-byte availability; both tested
@@ -28,6 +29,13 @@ long input-delay reports remain in progress.
 - Three focused input probes now measure both host-to-guest-poll and
   host-to-next-present timing. The worst observed p95 was 118.49 ms, with no
   one-second sample; visible-state response remains unmeasured.
+- The deterministic input probe reproduces roughly one-second host-to-poll and
+  host-to-present samples only during the title-to-gameplay transition, where
+  first-use shader compilation blocks input polling and presentation. Three warm
+  immediate-present runs measured host-to-present p95 of 22.68–27.34 ms and
+  maxima of 28.62–35.00 ms. Visible-state response is still unmeasured, so this
+  does not by itself prove perceptual input lag; the transition hitch remains
+  open for a prewarm or asynchronous shader-compilation fix.
 - Frame pacing probe: median 16.91 ms / 59.12 FPS, p95 33.37 ms; startup guest
   initialization produced a 2.96 s outlier.
 - Three Immediate-present probes measured 60.31–60.71 FPS median and 19.83–20.34
@@ -62,10 +70,10 @@ long input-delay reports remain in progress.
 
 ## Remaining work
 
-- Measure visible-state response with a focused keyboard or SDL controller route;
-  host-to-guest-poll and host-to-present timing are now measured, but they do not
-  explain the user’s reported one-second cases.
-- Confirm audible output on the user's selected macOS playback device.
+- Measure visible-state response and reduce the title-to-gameplay warm-up hitch;
+  deterministic host-to-guest-poll and host-to-present timing is now available.
+- Confirm the user can hear output after the host mute was cleared; telemetry
+  already proves the emulator reaches the selected playback device.
 - Compare fixed-point screenshots against a reference and remove major visual defects.
 - Reduce the startup guest/host initialization hitch and measure sustained gameplay performance.
 - Resolve the remaining 108 load-time imports only when a call trace proves they matter.

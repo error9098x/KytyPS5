@@ -79,10 +79,12 @@ converted-byte queue on all three runs.
 600 seconds, exit 0, no fatal/unimplemented/GPU errors, and gameplay audio/input
 evidence in each run.
 
-**Step 3 — Measure latency.** With an unlocked focused window and a real SDL
-controller, run three Immediate probes with `KYTY_INPUT_STATS=1` and
-`KYTY_FRAME_TIMING=1`. Pass: at least 30 matched controller events per run and
-stable median/p95 next-present delays.
+**Step 3 — Measure latency.** Use `KYTY_INPUT_PROBE=1` with
+`KYTY_INPUT_STATS=1` and `KYTY_FRAME_TIMING=1`; this follows the same host-input
+path without requiring a focused window. Three 35-second warm probes reached
+stable median/p95 next-present delays below 11/28 ms. The first title-to-gameplay
+input still exposes a shader-compilation hitch and needs a prewarm or asynchronous
+solution before this item is closed.
 
 **Step 4 — Visual gate.** Capture the same fixed gameplay points on three runs and
 compare against a reference capture with `harness/image_diff.py`, recording image

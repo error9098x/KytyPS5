@@ -237,6 +237,34 @@ library. No game-specific diagnosis is valid until this is resolved.
   appeared in these controlled probes; visible-state/gameplay response remains
   the unresolved part of the user’s report.
 
+## Deterministic input probe — 2026-10-10
+
+- Added opt-in `KYTY_INPUT_PROBE=1`. It injects a keyboard press/release through
+  the same `HostInputKey` path as a real SDL event, so latency probes do not
+  depend on a focused window, a connected controller, or an unlocked desktop.
+  `KYTY_INPUT_PROBE_KEY`, `KYTY_INPUT_PROBE_START_MS`,
+  `KYTY_INPUT_PROBE_INTERVAL_MS`, and `KYTY_INPUT_PROBE_HOLD_MS` tune it; the
+  default key is `J` and the first event is delayed by 2 seconds.
+- One 30-second immediate-present run with the default start contained
+  title-to-gameplay host-to-present samples of `1187.4`, `668.2`, and `232.2` ms.
+  Matching guest-poll samples were `1006.0`, `671.1`, and `486.8` ms. The first
+  transition loads and compiles a large shader batch, which is the concrete
+  source of the roughly one-second host-path samples.
+- Three 35-second runs with the first probe event delayed to 10 seconds measured
+  warm host-to-present median/p95/max of `8.94/22.68/28.62 ms`,
+  `9.12/26.16/32.93 ms`, and `10.46/27.34/35.00 ms`. Guest-poll p95 was
+  `19.19`, `18.64`, and `19.39 ms`; one run had a `225.54 ms` poll outlier.
+  No warm one-second delay reproduced.
+
+## Host audio check — 2026-10-10
+
+- The host was set to `output volume: 0` and `output muted: true`, while the
+  emulator telemetry showed nonzero NGS2 and SDL PCM on `MacBook Air Speakers`.
+  This explains inaudible playback without indicating a new emulator-side drop.
+- Restored the host output to 50% and unmuted it. The emulator still supports
+  selecting the exact playback device with `--audio-device` or
+  `KYTY_AUDIO_DEVICE` if the user wants the HyperX headset instead.
+
 ## Save backup — 2026-10-10
 
 - Copied `_SaveData/` to the ignored local backup

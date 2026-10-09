@@ -42,16 +42,22 @@ harness keeps these probes opt-in.
 
 The first frame-timing probe measured a 59.12 FPS median with a 33.37 ms p95 and
 a 2.96 s startup outlier. Three focused probes now measure host-to-guest-poll and
-host-to-present timing, but the user-reported one-second visible-state delay has
-not been reproduced.
+host-to-present timing. The deterministic probe reproduces roughly one-second
+host-path samples only
+while the first input transitions from the title to gameplay; the log shows a
+batch of first-use pixel-shader compilation in that window. Warm immediate-present
+runs stay below 35 ms host-to-present maximum, with one 225 ms guest-poll outlier.
+Prewarming or moving those first-use compilations off the input/render path remains
+unresolved.
 Controller, axis, mouse, and keyboard events are now timestamped. AudioOut2 also
 releases its state mutex before the potentially blocking SDL queue call.
 
-macOS currently defaults to `HyperX Cloud Stinger 2 Wireless`, while the built-in
-MacBook Air Speakers are not the default. Kyty logs the resolved SDL device and
-supports `--audio-device "MacBook Air Speakers"` (or `KYTY_AUDIO_DEVICE` in the
-harness). Both devices report `paused=0` and draining converted bytes in probes;
-the remaining question is which physical device the user is listening to.
+macOS currently exposes both `HyperX Cloud Stinger 2 Wireless` and `MacBook Air
+Speakers`. Kyty logs the resolved SDL device and supports `--audio-device
+"MacBook Air Speakers"` (or `KYTY_AUDIO_DEVICE` in the harness). Both devices
+report `paused=0` and draining converted bytes in probes. The host was found
+muted at zero output volume and was restored to 50% unmuted; the remaining check
+is the user's physical listening confirmation.
 
 ## Render-texture chain (title path closed; gameplay visual gate pending)
 
