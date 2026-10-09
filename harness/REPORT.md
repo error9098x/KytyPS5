@@ -39,8 +39,6 @@ remain in progress.
 
 - Capture matched input-to-present samples with a focused keyboard or SDL
   controller route; automated runs with no delivered input remain unmeasured.
-- Run three Immediate-present pacing probes, then compare them with the default
-  Mailbox baseline.
 - Mark a controlled gameplay soak with `KYTY_ROUTE=gameplay` so the per-run
   stage tracker does not infer gameplay from incidental startup input.
 - Confirm audible output on the user's selected macOS playback device.

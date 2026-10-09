@@ -44,74 +44,53 @@ input-to-present samples from a focused keyboard or controller route, and compar
 
 ---------------------------------------------------------------------------------------------------
 
-## 2. The narrowed failure band
+## 2. Current evidence and remaining failure band
 
-Measured facts that any explanation must satisfy:
+The original all-black presentation has a confirmed cause and fix: MoltenVK push
+descriptors left PPSA22520 resources unusable on Apple, while ordinary descriptor
+sets produce the Animal Well CRT title artwork. The workaround is title-gated and
+does not change other games.
 
-1. Draws are issued with valid geometry, valid vertex attributes (fmt/offset/stride correct),
-   GPU-side vertex buffers identical to guest memory, a correct atlas texture, valid scalar constants.
-2. The vertex shader SPIR-V is valid and its math is right (`pos=(2x/320-1, 1-2y/180, 0, 1)`).
-3. After the draws, the color target equals its **clear value exactly** (0,0,0,0 / 0,0,0,255 /
-   128,128,255,255), for every pixel-shader hash, including the final 4K pass.
-4. Forcing every pixel shader to output opaque magenta does **not** change that, and the presented
-   4K frames stay black. => No fragment from any draw reaches any attachment.
-5. Not caused by: viewport sign, clip guard, depth clamp, pixel kill, imports, lane fallback.
-6. MoltenVK enabled only: `KHR_maintenance1`, `KHR_portability_subset`, `KHR_push_descriptor`,
-   `KHR_swapchain`, `EXT_depth_clip_control`, `EXT_memory_budget`, `EXT_robustness2`. Dynamic
-   rendering is used via Vulkan 1.3 core. Pipeline cache is disabled ("dirty build").
-7. Anomaly: viewport depth is `[-1, 1]` for every draw (illegal Vulkan without
-   `VK_EXT_depth_range_unrestricted`). Clamping did not help, but it is a latent bug.
+The remaining work is outside the basic render path:
 
-Therefore the root cause is one of: (a) a pipeline/render-state element that makes Metal discard
-everything for these pipelines; (b) draws recorded to an attachment/image other than the one read
-back; (c) a MoltenVK/Metal translation or portability-subset issue; (d) the vertex shader's
-*runtime* outputs (position) not being what the SPIR-V implies. Section 3 is ordered to separate these.
+1. Input-driven routes generate nonzero NGS2 and SDL PCM. SDL opens successfully,
+   reports `paused=0`, and its converted-byte queue drains. The host default is
+   HyperX Cloud Stinger 2 Wireless; Kyty now accepts an exact `--audio-device`
+   override for users listening on another output.
+2. Mailbox timing measured 59.12 FPS median. Three Immediate runs measured
+   60.31–60.71 FPS median and 19.83–20.34 ms p95, but startup shader spikes remain
+   2.73–3.21 seconds. The clean Release pipeline cache is active.
+3. One controlled Cross-input gameplay soak reached 10 minutes cleanly. Two more
+   marked gameplay soaks are required for the stage gate.
+4. Matched input-to-present samples are still missing because the locked macOS
+   session did not deliver automated keyboard/controller events.
+5. Fixed-point screenshot/reference comparison is still needed for visual stage 4.
 
 ---------------------------------------------------------------------------------------------------
 
 ## 3. Next steps, in order (each has a pass/fail signal)
 
-**Step 1 - Turn on Vulkan validation and Metal diagnostics (cheap, may name the bug immediately).**
-* Install the LunarG Vulkan SDK for macOS (universal binaries incl. `VK_LAYER_KHRONOS_validation`),
-  put its layer on the loader path, run with `--vulkan-validation true` (the harness passes `false`
-  today; add `KYTY_VULKAN_VALIDATION=1` to `run.sh`). The x86-64 emulator needs an x86-64 slice.
-* Set `MVK_CONFIG_LOG_LEVEL=3` (or higher) and `MVK_CONFIG_TRACE_VULKAN_CALLS=1` for a short run to
-  surface MoltenVK warnings (unsupported state, invalid viewport, ignored dynamic state).
-* Pass: validation/MoltenVK names an invalid or unsupported state on the draw path (depth range,
-  portability subset, dynamic rendering, push descriptors, pipeline state).
+**Step 1 — Verify the selected output route.** Run three short gameplay routes with
+`KYTY_AUDIO_STATS=1 KYTY_AUDIO_DEVICE="MacBook Air Speakers"` (or the user’s
+chosen exact SDL name). Pass: nonzero SDL RMS, `paused=0`, and a draining
+converted-byte queue on all three runs.
 
-**Step 2 - Fullscreen-VS bisect (decides vertex-side vs raster/attachment-side).**
-* Add `KYTY_DEBUG_FULLSCREEN_VS=1` in `spirvEmitterFlow.cpp` next to `KYTY_DEBUG_SOLID_PS`: for vertex
-  shaders, overwrite `gl_Position` with a fullscreen triangle derived from `gl_VertexIndex`
-  (`(x,y) = ((i<<1)&2, i&2)*2-1`, z=0, w=1). Combine with `KYTY_DEBUG_SOLID_PS=1`.
-* Pass: magenta appears in render targets -> the VS's *runtime* position output/inputs are wrong
-  (go to Step 3). Still nothing -> the problem is raster/attachment/pipeline (go to Step 4).
+**Step 2 — Repeat the gameplay gate.** Run two additional 10-minute routes with
+`KYTY_ROUTE=gameplay`, preserving the existing save backup. Pass: timeout at
+600 seconds, exit 0, no fatal/unimplemented/GPU errors, and gameplay audio/input
+evidence in each run.
 
-**Step 3 - If Step 2 shows pixels: find why the real positions are lost.**
-* Output the VS's computed values to a debug target or compare `in_attr_0` as seen in the shader
-  (e.g. write `in_attr_0.xy/320` as color to a debug draw). Suspects: SPIRV-Cross handling of
-  `OpBitcast`/`OpSelect` on uint-packed floats, `ClipDistance` array of size 1 combined with
-  `PerVertex`, the always-true lane mask (`0xFFFFFFFF >> (v&31)`) mis-lowered, `vertexAttributeAccessBeyondStride`
-  portability limits.
+**Step 3 — Measure latency.** With an unlocked focused window and a real SDL
+controller, run three Immediate probes with `KYTY_INPUT_STATS=1` and
+`KYTY_FRAME_TIMING=1`. Pass: at least 30 matched controller events per run and
+stable median/p95 next-present delays.
 
-**Step 4 - If Step 2 shows nothing: audit the attachment/pipeline path.**
-* Check `RenderState` -> `vkCmdBeginRendering` for the target image/view (layer, mip, format,
-  `is_clear` flapping), and whether the image drawn into is the same `ImageId`/`VkImage` that is
-  later sampled and read back. Log `VkImage`/`VkImageView` handles for the draw attachment and for the
-  readback.
-* Try a minimal Kyty-internal draw (the `blitHelper.cpp` fullscreen-triangle pipeline) into the same
-  target with the same `BeginRendering` path: if it draws, the difference is in the game pipelines'
-  state (blend, color write mask via guest `cb_shader_mask`, depth/stencil, MSAA, rasterizer discard);
-  if not, `BeginRendering`/image state is wrong.
-* Print the full `VkGraphicsPipelineCreateInfo` for one sprite draw (rasterizer, blend, depth, MSAA,
-  dynamic states) and check it against the Metal limits listed under `VK_KHR_portability_subset`.
-* Capture one frame in Xcode (`MTL_CAPTURE_ENABLED=1`, GPU capture) and inspect the draw: vertex
-  output positions, rasterized fragments, load/store actions, attachment contents.
+**Step 4 — Visual gate.** Capture the same fixed gameplay points on three runs and
+compare against a reference capture, recording image diffs and any missing effects.
 
-**Step 5 - Fix the depth-range bug regardless.** Legalize the viewport depth for Metal
-(`dx_clip_space=0`, guest `[-1,1]`): either use `VK_EXT_depth_clip_control` semantics correctly
-(`negativeOneToOne` plus a legal `[0,1]` viewport range) or remap. Put it behind an Apple check; do
-not change other platforms without verification.
+**Step 5 — Startup stutter.** Keep the active Vulkan pipeline cache and profile the
+remaining shader compilation spike; retain a change only if the three-run p95/max
+startup metrics improve without reducing sustained FPS.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -128,7 +107,7 @@ Each item will likely reveal its own issue; handle them as a loop with the harne
    Check the audio path (NGS2/AudioOut) does not stall the game loop.
 3. **Stage 3 (10 min stability):** run 10-minute soak runs x3; watch memory growth, the 1024-call
    unresolved-stub log cap, GPU resource leaks, swapchain recovery, any now-reachable stubs
-   (resolve NIDs of the 109 imports and implement those the game actually hits).
+   (resolve NIDs of the 108 imports and implement those the game actually hits).
 4. **Stage 4 (visual correctness):** save reference PNGs at fixed points, add an image-diff check to the
    harness, compare internal targets (lighting, normals, bloom) for glitches.
 5. **Stage 5 (performance):** 4K output (3840x2160) is heavy on a base M-series GPU while the game
