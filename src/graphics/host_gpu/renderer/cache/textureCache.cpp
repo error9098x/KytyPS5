@@ -1845,10 +1845,15 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 		const char* value = std::getenv("KYTY_INTERNAL_FRAME_ADDRESS");
 		return value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull;
 	}();
+	static const uint64_t pixel_hash_filter = [] {
+		const char* value = std::getenv("KYTY_INTERNAL_FRAME_PIXEL_HASH");
+		return value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull;
+	}();
 	static uint32_t count = 0;
 	if (!enabled || count >= 100 || !id) return;
 	auto& image = m_slot_images[id];
 	if (address_filter != 0 && image.info.data.address != address_filter) return;
+	if (pixel_hash_filter != 0 && pixel_hash != pixel_hash_filter) return;
 	const auto sample = ++count;
 	const auto& backing = image.backing;
 	const bool rgba = backing.format == vk::Format::eR8G8B8A8Unorm ||
