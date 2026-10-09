@@ -983,7 +983,8 @@ static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo
 		return;
 	}
 
-	if (!draw.IsIndexed() && !Prospero::IsRectList(buffer.GetUserConfig().GetPrimType())) {
+	if (!draw.IsIndexed() && !Prospero::IsRectList(buffer.GetUserConfig().GetPrimType()) &&
+	    std::getenv("KYTY_DRAW_INPUT_STATS") == nullptr) {
 		return;
 	}
 

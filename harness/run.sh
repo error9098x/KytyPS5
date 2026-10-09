@@ -40,7 +40,9 @@ args = [exe, "--game", game,
         "--shader-log-direction", "File", "--shader-log-folder", str(out_dir / "shaders"),
         "--printf-direction", "File", "--printf-output-file", str(out_dir / "guest-printf.log"),
         "--vulkan-validation", "false",
-        "--graphics-debug-dump", os.environ.get("KYTY_GRAPHICS_DEBUG_DUMP", "false")]
+        "--graphics-debug-dump", os.environ.get("KYTY_GRAPHICS_DEBUG_DUMP", "false"),
+        "--command-buffer-dump", os.environ.get("KYTY_COMMAND_BUFFER_DUMP", "false"),
+        "--command-buffer-dump-folder", str(out_dir / "command-dumps")]
 started = time.time()
 with log.open("w") as stream:
     proc = subprocess.Popen(args, stdout=stream, stderr=subprocess.STDOUT,

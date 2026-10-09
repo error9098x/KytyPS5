@@ -43,7 +43,7 @@ properly where practical; every compatibility stub must be logged.
    exports were implemented from public ABI evidence.
 5. The first vertex pipeline then fails on MoltenVK's inability to compile a
    subgroup builtin in a vertex function. A PPSA22520-only Apple fallback uses
-   `gl_VertexIndex` as the subgroup lane value; three 30-second runs remain
+   `gl_VertexIndex` as the subgroup lane value in vertex stages; three 30-second runs remain
    alive past pipeline creation, pending visual confirmation.
 3. Upstream documentation identifies macOS as experimental and expects the
    x86-64/Rosetta + MoltenVK path.

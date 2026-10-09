@@ -55,3 +55,14 @@ library. No game-specific diagnosis is valid until this is resolved.
   missing AGC (PS5 GPU command) API, not only the vertex fallback. A/B the fallback second.
 - Harness now: stats always on; PNG dumps opt-in (`KYTY_FRAME_DUMP=1`, ~25 MB/4K frame);
   default MoltenVK path auto-set; stage line reports `content=yes|NO (all black)`.
+
+## Draw-path diagnostics — 2026-10-09
+
+- `command-stats-1` records many `draw_auto` commands and compute dispatches; the
+  game is submitting real graphics work.
+- `draw-debug-1` shows successful `BeginRendering`, `DrawComplete`, and pipeline
+  creation for the 4K video buffer at `0x0200450000`; sampled frames remain black.
+- No `Unresolved import stub called` entries were observed. The 109 unresolved
+  entries are load-time relocations only in these runs.
+- The lane-zero A/B (`lane-zero-1`) also produced 19/19 all-black samples, so
+  changing the vertex fallback lane value did not improve pixels.

@@ -58,6 +58,22 @@ static bool GraphicsRunDebugDumpEnabled() {
 	       Config::GetPrintfDirection() != Config::LogDirection::Silent;
 }
 
+static bool GraphicsCommandStatsEnabled() {
+	static const bool enabled = std::getenv("KYTY_COMMAND_STATS") != nullptr;
+	return enabled;
+}
+
+static void LogGraphicsCommand(const char* kind) {
+	if (!GraphicsCommandStatsEnabled()) {
+		return;
+	}
+	static std::atomic<uint32_t> count {0};
+	const auto n = count.fetch_add(1, std::memory_order_relaxed);
+	if (n < 512) {
+		LOGF("GraphicsCommandStats: %s count=%" PRIu32 "\n", kind, n + 1);
+	}
+}
+
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	GraphicsInitJmpTables();
@@ -849,6 +865,7 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 }
 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
+	LogGraphicsCommand("draw_index");
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
 		args.instance_count = m_num_instances;
@@ -978,6 +995,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
                                       uint32_t thread_group_z, uint32_t mode) {
+	LogGraphicsCommand("dispatch_direct");
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 
 	uint32_t frame_num = 0;
@@ -1008,6 +1026,7 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 }
 
 void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
+	LogGraphicsCommand("dispatch_indirect");
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
 	if ((mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
 		const auto* args = reinterpret_cast<const vk::DispatchIndirectCommand*>(args_addr);
@@ -1019,6 +1038,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
+	LogGraphicsCommand("draw_auto");
 	if (args.instance_count == 0) {
 		args.instance_count = m_num_instances;
 	}
