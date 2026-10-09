@@ -1,8 +1,8 @@
 # Animal Well on KytyPS5 — current report
 
-Status: gameplay is stable for the measured 10-minute soak; visual correctness,
-audio confirmation on the user's host output, and input-latency characterization
-remain in progress.
+Status: gameplay stability is met on three 10-minute runs. Visual correctness,
+physical speaker confirmation, and a visible-state explanation for the user's
+long input-delay reports remain in progress.
 
 ## Verified
 
@@ -24,7 +24,7 @@ remain in progress.
   pacing call; a matched latency run is still needed to quantify the effect.
 - Three focused input probes now measure both host-to-guest-poll and
   host-to-next-present timing. The worst observed p95 was 118.49 ms, with no
-  one-second sample; gameplay-state response still needs a controlled soak.
+  one-second sample; visible-state response remains unmeasured.
 - Frame pacing probe: median 16.91 ms / 59.12 FPS, p95 33.37 ms; startup shader
   compilation produced a 2.96 s outlier.
 - Three Immediate-present probes measured 60.31–60.71 FPS median and 19.83–20.34
@@ -45,9 +45,9 @@ remain in progress.
 
 ## Remaining work
 
-- Capture gameplay-state response samples with a focused keyboard or SDL
-  controller route; host-to-guest-poll and host-to-present timing are now
-  measured, but they do not explain the user’s reported one-second cases.
+- Measure visible-state response with a focused keyboard or SDL controller route;
+  host-to-guest-poll and host-to-present timing are now measured, but they do not
+  explain the user’s reported one-second cases.
 - Confirm audible output on the user's selected macOS playback device.
 - Compare fixed-point screenshots against a reference and remove major visual defects.
 - Reduce startup shader stutter and measure sustained gameplay performance.

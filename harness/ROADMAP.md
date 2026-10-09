@@ -20,8 +20,8 @@ Acceptance stages (from the mission): 1 first frame, 2 title/menu, 3 gameplay 10
 
 The original black-frame failure is fixed for PPSA22520 on Apple hosts by selecting ordinary
 descriptor sets instead of MoltenVK push descriptors. The remaining work is quality and
-measurement: repeat the gameplay soak, verify audio on the selected host device, obtain matched
-input-to-present samples from a focused keyboard or controller route, and compare screenshots.
+measurement: verify physical speaker audibility, measure visible-state input response, and
+compare fixed-point screenshots with an independent reference.
 
 ### Done, committed
 * Apple/MoltenVK device-feature gating (3 missing features made optional, with explicit errors).
@@ -33,10 +33,9 @@ input-to-present samples from a focused keyboard or controller route, and compar
 * Docs: `SPEC.md`, `LOG.md`, `BLOCKERS.md`, `ANALYSIS.md`, this file.
 
 ### Not done
-* Fixed-point visual comparisons and sustained performance work.
+* Fixed-point visual comparison against an independent reference and sustained performance work.
 * Audible confirmation on the user's selected macOS playback device.
-* A matched input-to-present route using the new keyboard, mouse, and SDL controller timestamps.
-* Three `KYTY_PRESENT_MODE=Immediate` pacing probes, compared with Mailbox.
+* Visible-state response measurement for the user's reported 40 ms–1 s delay.
 * The 108 unresolved imports (never called in the measured route) remain intentionally deferred.
 * Keep the local save backup at `harness/backups/animal-well-20261010/` intact;
   its `MANIFEST.sha256` covers the two save files. No separate repository or
