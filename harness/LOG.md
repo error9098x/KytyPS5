@@ -234,6 +234,11 @@ library. No game-specific diagnosis is valid until this is resolved.
   `2.967`, and `2.871 s` with median FPS `60.17`, `60.41`, and `60.44`, which
   is indistinguishable from the default path. The setting was rejected and is
   not enabled by Kyty.
+- Tested MoltenVK's documented `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0` as a
+  second environment-only A/B. Three title probes remained visually valid and
+  showed 2.62–2.87 s max gaps, but the matched gameplay probes produced a
+  394 ms host-to-present and 550 ms guest-poll outlier in one run. It was
+  rejected and the default argument-buffer path remains enabled for gameplay.
 
 ## Gameplay stability gate — 2026-10-10
 

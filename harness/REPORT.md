@@ -74,6 +74,9 @@ long input-delay reports remain in progress.
   synchronization workaround was retained.
 - MoltenVK command-buffer prefill was tested in three environment-only runs and
   rejected because it did not reduce the startup gap.
+- Disabling MoltenVK Metal argument buffers was also rejected: it preserved title
+  pixels but worsened gameplay latency tails, including 394 ms host-to-present
+  and 550 ms guest-poll samples.
 
 ## Remaining work
 
