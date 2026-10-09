@@ -208,6 +208,8 @@ library. No game-specific diagnosis is valid until this is resolved.
 - MacBook Air Speakers were selected explicitly. Nonzero SDL/NGS2 samples were
   observed in all three runs: SDL `1949/3368`, `2071/3357`, and `2131/3366`;
   NGS2 `648/1123`, `689/1119`, and `709/1122`.
+- `harness/acceptance.py --stage 3` reports `PASS` for all three gameplay runs;
+  the same check reports `PASS` for the three visual probe runs at stage 2.
 
 ## Visual consistency probes — 2026-10-10
 

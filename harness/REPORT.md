@@ -50,6 +50,8 @@ long input-delay reports remain in progress.
   no independent PS5/reference image is available, so Stage 4 remains pending.
 - The visual comparison is now reproducible with
   `python3 harness/image_diff.py <reference.png> <candidate.png> --stride 8`.
+- The staged groups are machine-checked with `harness/acceptance.py`: gameplay
+  Stage 3 and the three visual Stage 2 probes both pass their three-run checks.
 
 ## Kept fixes
 
