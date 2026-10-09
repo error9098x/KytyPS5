@@ -220,15 +220,28 @@ static void pad_fill_data(PadData* data, const ControllerState& state, bool conn
 	data->device_unique_data_len = 0;
 }
 
-static void LogInputPoll(const PadData& data) {
+static void LogInputPoll(const PadData& data, const char* api, int returned = 1) {
 	if (std::getenv("KYTY_INPUT_STATS") == nullptr) {
 		return;
 	}
 	static uint64_t sequence = 0;
 	const auto now = std::chrono::steady_clock::now().time_since_epoch();
 	const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
-	LOGF("InputPoll: seq=%" PRIu64 " buttons=0x%08" PRIx32 " connected=%d t_us=%" PRIu64 "\n",
-	     ++sequence, data.buttons, data.connected ? 1 : 0, static_cast<uint64_t>(micros));
+	LOGF("InputPoll: seq=%" PRIu64 " api=%s returned=%d buttons=0x%08" PRIx32
+	     " connected=%d sample_ts=%" PRIu64 " t_us=%" PRIu64 "\n",
+	     ++sequence, api, returned, data.buttons, data.connected ? 1 : 0, data.timestamp,
+	     static_cast<uint64_t>(micros));
+}
+
+static void LogInputState(uint32_t mask, bool down, uint32_t buttons, uint64_t sample_time) {
+	if (std::getenv("KYTY_INPUT_STATS") == nullptr) {
+		return;
+	}
+	const auto now = std::chrono::steady_clock::now().time_since_epoch();
+	const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+	LOGF("InputState: kind=button mask=0x%08" PRIx32 " down=%d buttons=0x%08" PRIx32
+	     " sample_ts=%" PRIu64 " t_us=%" PRIu64 "\n",
+	     mask, down ? 1 : 0, buttons, sample_time, static_cast<uint64_t>(micros));
 }
 
 // In cycle order, starting at the PS5 default.
@@ -523,6 +536,7 @@ void GameController::Button(int id, uint32_t button, bool down) {
 		m_state.time = LibKernel::KernelGetProcessTime();
 
 		m_state.buttons = down ? m_state.buttons | button : m_state.buttons & ~button;
+		LogInputState(button, down, m_state.buttons, m_state.time);
 
 		AddState();
 	}
@@ -1145,7 +1159,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	g_controller->ReadState(&state, &connected, &connected_count);
 
 	pad_fill_data(data, state, connected, connected_count);
-	LogInputPoll(*data);
+	LogInputPoll(*data, "read_state");
 
 	return OK;
 }
@@ -1179,7 +1193,7 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 	for (int i = 0; i < ret_num; i++) {
 		pad_fill_data(&data[i], states[i], connected, connected_count);
 	}
-	LogInputPoll(data[0]);
+	LogInputPoll(data[0], "read", ret_num);
 
 	return ret_num;
 }

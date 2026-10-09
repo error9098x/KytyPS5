@@ -325,13 +325,19 @@ library. No game-specific diagnosis is valid until this is resolved.
 ## Full input-path latency — 2026-10-10
 
 - Added `InputPoll` timestamps at the guest `PadRead`/`PadReadState` boundary.
-- Three 30-second focused probes delivered 24 controller events each. Their
-  input-to-next-present results were median/p95/max: `5.80/45.76/45.77` ms,
-  `11.51/118.49/118.50` ms, and `9.83/42.20/42.21` ms.
-- Input-to-guest-poll results were `11.01/33.62/33.62` ms,
-  `13.86/98.61/98.62` ms, and `10.61/25.79/25.80` ms. No one-second delay
-  appeared in these controlled probes; visible-state/gameplay response remains
-  the unresolved part of the user’s report.
+- `InputPoll` now records the API (`PadRead` or `PadReadState`), returned count,
+  button mask, and guest sample timestamp. `InputState` records the host-side
+  button update, allowing the harness to measure when the guest actually sees a
+  transition rather than only when it calls the pad API.
+- Three warm probes measured host-to-next-present median/p95/max of
+  `8.94/22.68/28.62`, `9.12/26.16/32.93`, and `10.46/27.34/35.00` ms. Their
+  guest-poll p95 values were `19.19`, `18.64`, and `19.39` ms, with one
+  `225.54` ms poll gap. These are the steady-state results after startup.
+- The short startup probe reproduced host-to-observed-button maxima of about
+  `945` ms and host-to-present maxima of about `1.07` s. The guest then drained
+  the queued button transitions in order. This points to the guest/render
+  thread being stalled during first-use GPU work, rather than the host input
+  mutex dropping events.
 
 ## Deterministic input probe — 2026-10-10
 
@@ -343,7 +349,9 @@ library. No game-specific diagnosis is valid until this is resolved.
   default key is `J` and the first event is delayed by 2 seconds.
 - One 30-second immediate-present run with the default start contained
   title-to-gameplay host-to-present samples of `1187.4`, `668.2`, and `232.2` ms.
-  Matching guest-poll samples were `1006.0`, `671.1`, and `486.8` ms. The first
+  Matching guest-poll samples were `1006.0`, `671.1`, and `486.8` ms. A fresh
+  trace with the new state telemetry measured a `945` ms maximum to the guest
+  observing the button and a `1.07` s maximum to the next present. The first
   transition loads and compiles a large shader batch, which is the concrete
   source of the roughly one-second host-path samples.
 - Three 35-second runs with the first probe event delayed to 10 seconds measured
