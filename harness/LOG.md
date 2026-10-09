@@ -192,6 +192,13 @@ library. No game-specific diagnosis is valid until this is resolved.
   compilation or queue synchronization; no behavior change was kept for this
   diagnostic.
 
+## Startup memory timing — 2026-10-10
+
+- `KYTY_MEMORY_TIMING=1` measured 1,172 direct-memory operations during an
+  8-second probe: 586 allocations and 586 named mappings, totaling 333 ms;
+  the slowest mapping was 15.96 ms. Direct-memory setup is therefore not the
+  primary source of the roughly 3-second first-use gap.
+
 ## Gameplay stability gate — 2026-10-10
 
 - `gameplay-gate-3-20261010`, `gameplay-gate-4-20261010`, and

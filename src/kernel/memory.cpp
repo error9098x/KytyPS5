@@ -14,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -50,6 +51,18 @@
 #endif
 
 namespace Libs::LibKernel::Memory {
+
+static void LogMemoryTiming(const char* operation, size_t len, int result,
+                            std::chrono::steady_clock::time_point start) {
+	if (std::getenv("KYTY_MEMORY_TIMING") == nullptr) {
+		return;
+	}
+	const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+	                         std::chrono::steady_clock::now() - start)
+	                         .count();
+	LOGF("MemoryTiming: op=%s len=0x%zx result=%d elapsed_us=%" PRId64 "\n", operation, len,
+	     result, static_cast<int64_t>(elapsed));
+}
 
 namespace VirtualMemory = Common::VirtualMemory;
 
@@ -2828,8 +2841,11 @@ int KYTY_SYSV_ABI KernelAllocateDirectMemory(int64_t search_start, int64_t searc
                                              size_t alignment, int memory_type,
                                              int64_t* phys_addr_out) {
 	PRINT_NAME();
-	return AllocateDirectMemory(search_start, search_end, len, alignment, memory_type,
-	                            phys_addr_out);
+	const auto start = std::chrono::steady_clock::now();
+	const int  result = AllocateDirectMemory(search_start, search_end, len, alignment, memory_type,
+	                                         phys_addr_out);
+	LogMemoryTiming("allocate", len, result, start);
+	return result;
 }
 
 int KYTY_SYSV_ABI KernelAllocateMainDirectMemory(size_t len, size_t alignment, int memory_type,
@@ -3212,14 +3228,20 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
                                         int64_t direct_memory_start, size_t alignment) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
-	return MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, "");
+	const auto start = std::chrono::steady_clock::now();
+	const int  result = MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, "");
+	LogMemoryTiming("map", len, result, start);
+	return result;
 }
 
 int KYTY_SYSV_ABI KernelMapDirectMemory2(void** addr, size_t len, int type, int prot, int flags,
                                          int64_t direct_memory_start, size_t alignment) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
-	return MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, "", type);
+	const auto start = std::chrono::steady_clock::now();
+	const int  result = MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, "", type);
+	LogMemoryTiming("map2", len, result, start);
+	return result;
 }
 
 int MapAutomaticMemory(uint64_t vaddr, size_t size, int type, int prot) {
@@ -3269,7 +3291,10 @@ int KYTY_SYSV_ABI KernelMapNamedDirectMemory(void** addr, size_t len, int prot, 
 		return KERNEL_ERROR_ENAMETOOLONG;
 	}
 
-	return MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, name);
+	const auto start = std::chrono::steady_clock::now();
+	const int  result = MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, name);
+	LogMemoryTiming("map_named", len, result, start);
+	return result;
 }
 
 int KYTY_SYSV_ABI KernelIsAddressSanitizerEnabled() {
