@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -188,7 +189,17 @@ void GuestGpu::SuspendPoint() {
 	EXIT_IF(IsGpuThread() || CommandScheduler::InDeferredOperation());
 	// Do not hold a queue lock while waiting: asynchronous work may be needed to
 	// finish the preceding graphics frame. The first point returns immediately.
+	const bool timing = std::getenv("KYTY_SUSPEND_TIMING") != nullptr;
+	const auto wait_start = timing ? std::chrono::steady_clock::now()
+	                              : std::chrono::steady_clock::time_point {};
 	m_suspend_point_ready->acquire();
+	if (timing) {
+		const auto wait_us = std::chrono::duration_cast<std::chrono::microseconds>(
+		                         std::chrono::steady_clock::now() - wait_start)
+		                         .count();
+		LOGF("SuspendTiming: wait_us=%" PRId64 " done=%d\n", static_cast<int64_t>(wait_us),
+		     m_done_num.load(std::memory_order_relaxed));
+	}
 	Submission submission;
 	submission.type = SubmissionType::SuspendPoint;
 	Enqueue(std::move(submission));
