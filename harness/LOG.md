@@ -166,6 +166,13 @@ library. No game-specific diagnosis is valid until this is resolved.
   uncapped pacing probe; the default remains Mailbox.
 - Controlled soak runs can set `KYTY_ROUTE=gameplay`; `run.json` preserves that
   marker so Stage 3 is never awarded from a long title-only run by accident.
+- Three Immediate-present probes completed without crashes: median FPS
+  `60.71`, `60.42`, and `60.31`; p95 frame times were `20.34`, `20.32`, and
+  `19.83` ms. Each retained a single startup shader spike between `2.73` and
+  `3.21` seconds.
+- A clean Release build now loads `_PipelineCache/PPSA22520.bin` (1,144,892
+  bytes) on all three follow-up probes. The cache is active, but it does not
+  remove the initial shader-compilation spike.
 
 ## Save backup — 2026-10-10
 

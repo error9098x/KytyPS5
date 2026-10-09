@@ -16,7 +16,7 @@ Acceptance stages (from the mission): 1 first frame, 2 title/menu, 3 gameplay 10
 | 2. Title / menu visible | **Reached** | Captured 3840x2160 frame visibly shows Animal Well CRT title artwork |
 | 3. Gameplay stability | **Measured once** | One 10-minute Cross-input soak ended cleanly; repeat twice |
 | 4. Visual correctness | **Pending** | Need fixed-point reference captures and image diffs |
-| 5. Performance | **Baseline only** | 59.12 FPS median in one Mailbox timing run; startup and p95 spikes remain |
+| 5. Performance | **Baseline only** | Mailbox median 59.12 FPS; three Immediate runs 60.31–60.71 FPS; startup spikes remain |
 
 The original black-frame failure is fixed for PPSA22520 on Apple hosts by selecting ordinary
 descriptor sets instead of MoltenVK push descriptors. The remaining work is quality and
@@ -133,9 +133,9 @@ Each item will likely reveal its own issue; handle them as a loop with the harne
    harness, compare internal targets (lighting, normals, bloom) for glitches.
 5. **Stage 5 (performance):** 4K output (3840x2160) is heavy on a base M-series GPU while the game
    renders 320x180 internally: add a resolution/present scale option, disable diagnostics
-   (`KYTY_FRAME_STATS=0`; the readbacks stall the GPU), enable the Vulkan pipeline cache and a
-   persistent shader cache (62 shaders compile at startup; "Vulkan pipeline cache: disabled (dirty
-   build)"), profile the CPU side (Rosetta) and the per-draw descriptor/upload costs. Target: >=30 FPS
+   (`KYTY_FRAME_STATS=0`; the readbacks stall the GPU), keep the Vulkan pipeline cache enabled and
+   investigate persistent shader compilation (62 shaders still compile at startup), profile the CPU
+   side (Rosetta) and the per-draw descriptor/upload costs. Target: >=30 FPS
    average with no stutter above an agreed budget (set it with the user; the mission left [N] unset).
 
 ---------------------------------------------------------------------------------------------------

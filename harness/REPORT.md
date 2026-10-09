@@ -24,6 +24,9 @@ remain in progress.
   pacing call; a matched latency run is still needed to quantify the effect.
 - Frame pacing probe: median 16.91 ms / 59.12 FPS, p95 33.37 ms; startup shader
   compilation produced a 2.96 s outlier.
+- Three Immediate-present probes measured 60.31–60.71 FPS median and 19.83–20.34
+  ms p95. Startup spikes remained 2.73–3.21 s. The clean Release build now
+  loads and saves the PPSA22520 Vulkan pipeline cache.
 
 ## Kept fixes
 
