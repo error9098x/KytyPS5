@@ -273,6 +273,16 @@ library. No game-specific diagnosis is valid until this is resolved.
   tail than the default path. The switch was rejected and reverted; Kyty keeps
   its active cache for the validated behavior.
 
+## Isolated MoltenVK #2863 build — 2026-10-10
+
+- Built an isolated universal MoltenVK dylib from upstream with the #2863
+  per-shader pipeline-cache locking patch:
+  [KhronosGroup/MoltenVK#2863](https://github.com/KhronosGroup/MoltenVK/issues/2863).
+- Three Kyty startup probes using only `SDL_VULKAN_LIBRARY` redirection measured
+  max gaps of `5.117`, `2.924`, and `2.958 s`. The first run regressed badly and
+  the other two were indistinguishable from the bundled 1.4.2 path. The custom
+  dylib is not selected by the harness; the bundled runtime remains validated.
+
 ## Gameplay stability gate — 2026-10-10
 
 - `gameplay-gate-3-20261010`, `gameplay-gate-4-20261010`, and
