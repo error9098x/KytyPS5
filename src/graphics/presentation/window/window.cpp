@@ -740,6 +740,41 @@ void WindowContext::Run() {
 	constexpr uint64_t title_interval_ms = 1000;
 	auto               title_time        = SDL_GetTicks();
 	auto               title_frames      = loop.presented_frames.load(std::memory_order_relaxed);
+	struct InputProbe {
+		bool        enabled = std::getenv("KYTY_INPUT_PROBE") != nullptr;
+		bool        down    = false;
+		SDL_Keycode key     = SDLK_J;
+		uint64_t    next_ms = 0;
+		uint64_t    start_ms = 2000;
+		uint64_t    interval_ms = 500;
+		uint64_t    hold_ms = 16;
+	};
+	InputProbe input_probe;
+	if (input_probe.enabled) {
+		const auto read_ms = [](const char* name, uint64_t fallback) {
+			const char* value = std::getenv(name);
+			if (value == nullptr || *value == '\0') {
+				return fallback;
+			}
+			char* end = nullptr;
+			const auto parsed = std::strtoull(value, &end, 10);
+			return end != value && *end == '\0' ? std::min<uint64_t>(parsed, 60000) : fallback;
+		};
+		input_probe.start_ms    = read_ms("KYTY_INPUT_PROBE_START_MS", input_probe.start_ms);
+		input_probe.interval_ms = read_ms("KYTY_INPUT_PROBE_INTERVAL_MS", input_probe.interval_ms);
+		input_probe.hold_ms     = read_ms("KYTY_INPUT_PROBE_HOLD_MS", input_probe.hold_ms);
+		input_probe.next_ms     = title_time + input_probe.start_ms;
+		if (const char* name = std::getenv("KYTY_INPUT_PROBE_KEY"); name != nullptr && *name != '\0') {
+			const auto key = SDL_GetKeyFromName(name);
+			if (key != SDLK_UNKNOWN) {
+				input_probe.key = key;
+			}
+		}
+		LOGF("InputProbe: enabled key=%s first_ms=%" PRIu64 " interval_ms=%" PRIu64
+		     " hold_ms=%" PRIu64 "\n",
+		     SDL_GetKeyName(input_probe.key), input_probe.start_ms, input_probe.interval_ms,
+		     input_probe.hold_ms);
+	}
 
 	while (!loop.need_exit) {
 		if (loop.paused.load(std::memory_order_acquire)) {
@@ -762,11 +797,37 @@ void WindowContext::Run() {
 			title_time   = now;
 			title_frames = frames;
 		}
-		const auto wait_ms = static_cast<int>(title_interval_ms - (now - title_time));
+		if (input_probe.enabled && now >= input_probe.next_ms) {
+			EventKeyboard key {};
+			key.down              = !input_probe.down;
+			key.up                = input_probe.down;
+			key.pressed           = key.down;
+			key.released          = key.up;
+			key.key_code          = input_probe.key;
+			key.timestamp_seconds = timer.GetTimeS();
+			GameEventKeyboard(key);
+			input_probe.down    = !input_probe.down;
+			input_probe.next_ms = now + (input_probe.down ? input_probe.hold_ms
+			                                                : input_probe.interval_ms);
+		}
+		const auto title_wait_ms = title_interval_ms - (now - title_time);
+		const auto probe_wait_ms = input_probe.enabled && input_probe.next_ms > now
+		                               ? input_probe.next_ms - now
+		                               : 0;
+		const auto wait_ms = static_cast<int>(std::min(title_wait_ms, probe_wait_ms != 0
+		                                                               ? probe_wait_ms
+		                                                               : title_wait_ms));
 		if (!HostInputWaitEvent(&loop.event, wait_ms)) {
 			continue;
 		}
 		ProcessEvent(timer.GetTimeS());
+	}
+	if (input_probe.down) {
+		EventKeyboard key {};
+		key.up       = true;
+		key.released = true;
+		key.key_code = input_probe.key;
+		GameEventKeyboard(key);
 	}
 }
 
