@@ -10,7 +10,8 @@ properly where practical; every compatibility stub must be logged.
 
 ## Baseline environment
 
-- Validated KytyPS5 source baseline: `d3781f1c` (`codex/animal-well-compat`,
+- Validated KytyPS5 repository baseline: `d3781f1c` (`codex/animal-well-compat`,
+  latest source-changing commit `2b8de072`,
   2026-10-10)
 - Host: macOS 26.5.1, Apple Silicon `Mac17,3`, ARM64, 10 CPU cores, 16 GiB RAM
 - Intended build: x86-64 under Rosetta 2, Vulkan 1.3 through MoltenVK
