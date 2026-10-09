@@ -472,6 +472,8 @@ uint32_t BuiltInForInput(IR::StageInputKind kind) {
 }
 
 void DefineInputs(EmitterState& state) {
+	const bool vertex_subgroup_fallback =
+	    state.vertex_subgroup_fallback && state.program.stage == ShaderType::Vertex;
 	state.inputs.reserve(state.program.info.inputs.size());
 	for (const auto& input: state.program.info.inputs) {
 		state.inputs.push_back({input});
@@ -571,7 +573,7 @@ void DefineInputs(EmitterState& state) {
 			                            builtin);
 		}
 	}
-	if (state.program.info.subgroup_local_invocation_id) {
+	if (state.program.info.subgroup_local_invocation_id && !vertex_subgroup_fallback) {
 		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
 		                                              "gl_SubgroupInvocationID");
 		state.subgroup_local_invocation_id_variable = variable;
@@ -688,6 +690,8 @@ void DefineOutputs(EmitterState& state) {
 } // namespace
 
 void DefineModule(EmitterState& state) {
+	const bool vertex_subgroup_fallback =
+	    state.vertex_subgroup_fallback && state.program.stage == ShaderType::Vertex;
 	state.interface_variables.reserve(state.program.info.inputs.size() +
 	                                  state.program.info.outputs.size());
 	DefineInputs(state);
@@ -764,15 +768,16 @@ void DefineModule(EmitterState& state) {
 	if (state.program.info.image_gather_extended) {
 		state.builder.RequireCapability(spv::CapabilityImageGatherExtended);
 	}
-	if (state.lane_count == 2 || state.program.info.subgroup_barrier ||
+	if (!vertex_subgroup_fallback &&
+	    (state.lane_count == 2 || state.program.info.subgroup_barrier ||
 	    state.program.info.subgroup_ballot || state.program.info.subgroup_shuffle ||
-	    state.program.info.subgroup_local_invocation_id) {
+	    state.program.info.subgroup_local_invocation_id)) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
 	}
-	if (state.lane_count == 2 || state.program.info.subgroup_ballot) {
+	if (!vertex_subgroup_fallback && (state.lane_count == 2 || state.program.info.subgroup_ballot)) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformBallot);
 	}
-	if (state.program.info.subgroup_shuffle) {
+	if (!vertex_subgroup_fallback && state.program.info.subgroup_shuffle) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformShuffle);
 	}
 	if (state.program.info.compute_derivatives && state.program.stage == ShaderType::Compute) {

@@ -125,6 +125,10 @@ DppTargetLane EmitDppTargetLane(EmitterState& state, const IR::DppMoveFlags& fla
 }
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state) {
+	if (state.vertex_subgroup_fallback &&
+	    state.program.stage == ShaderType::Vertex) {
+		return EmitInputComponentU32(state, IR::StageInputKind::VertexIndex, 0);
+	}
 	if (state.subgroup_local_invocation_id_variable == 0) {
 		EXIT("SubgroupLocalInvocationId was not declared before SPIR-V function emission\n");
 	}
@@ -156,6 +160,14 @@ uint32_t EmitInputComponentU32(EmitterState& state, IR::StageInputKind kind, uin
 	const auto variable = InputVariableForKind(state, kind);
 	if (variable == 0) {
 		return ConstantU32(state, 0);
+	}
+	if (kind == IR::StageInputKind::VertexIndex || kind == IR::StageInputKind::InstanceIndex ||
+	    kind == IR::StageInputKind::InvocationId || kind == IR::StageInputKind::PrimitiveId) {
+		const auto value = state.builder.AllocateId();
+		const auto bits  = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLoad, TypeI32(state), value, variable);
+		state.builder.AddFunction(spv::OpBitcast, TypeU32(state), bits, value);
+		return bits;
 	}
 	const auto pointer = state.builder.AllocateId();
 	const auto value   = state.builder.AllocateId();

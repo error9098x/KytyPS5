@@ -356,6 +356,9 @@ struct PipelineCache::ProgramCache {
 		options.early_dump  = options.dump_ir;
 		options.dump_label  = label;
 		options.input_info  = stage_input;
+#if defined(__APPLE__)
+		options.vertex_subgroup_fallback = PipelineCacheTitleId() == "PPSA22520";
+#endif
 
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			options.user_data_base = 8;
@@ -369,6 +372,18 @@ struct PipelineCache::ProgramCache {
 		}
 		DumpShaderOriginal(stage_name, options.shader_hash, params.code);
 		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
+		if (translated.program.info.buffer_int64_atomics &&
+		    !graphics.shader_buffer_int64_atomics_enabled) {
+			EXIT("Shader 0x%016" PRIx64 " requires unsupported 64-bit buffer atomics\n",
+			     options.shader_hash);
+		}
+		if (std::ranges::any_of(translated.program.info.outputs, [](const auto& output) {
+			return output.kind == ShaderRecompiler::IR::StageOutputKind::CullDistance;
+		}) &&
+		    !graphics.shader_cull_distance_enabled) {
+			EXIT("Shader 0x%016" PRIx64 " requires unsupported cull distance\n",
+			     options.shader_hash);
+		}
 		if (entry == programs.end()) {
 			entry = programs.try_emplace(lookup_key,
 			    ShaderRecompiler::IR::ExtractResourcePlan(translated.program)).first;
@@ -398,7 +413,7 @@ struct PipelineCache::ProgramCache {
 		return permutation.handle;
 	}
 
-	explicit ProgramCache(vk::Device device): device(device) {
+	explicit ProgramCache(vk::Device device, GraphicContext& graphics): device(device), graphics(graphics) {
 		lookup_key.static_state.reserve(MaxStaticKeyWords);
 	}
 	~ProgramCache() {
@@ -413,11 +428,12 @@ struct PipelineCache::ProgramCache {
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
 	ProgramKey                                                  lookup_key;
 	vk::Device                                                  device;
+	GraphicContext&                                             graphics;
 	uint64_t                                                    next_shader_id = 0;
 };
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
-    : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics.device)) {
+    : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics.device, graphics)) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	InitializeDriverCache();
 }
