@@ -49,6 +49,13 @@ batch of first-use pixel-shader compilation in that window. Warm immediate-prese
 runs stay below 35 ms host-to-present maximum, with one 225 ms guest-poll outlier.
 Prewarming or moving those first-use compilations off the input/render path remains
 unresolved.
+
+The startup-only 2.88–2.99 s gap is separately characterized by a macOS process
+sample: MoltenVK/Metal command encoding (`beginRendering`, image clears, and draws)
+and timeline-semaphore waits dominate the host GPU thread while the guest executes.
+`AgcSuspendPoint` itself waits only 25.5 ms initially and 8–18 ms afterward. A
+guest barrier bypass is therefore not justified without a rendering-correctness
+test.
 Controller, axis, mouse, and keyboard events are now timestamped. AudioOut2 also
 releases its state mutex before the potentially blocking SDL queue call.
 

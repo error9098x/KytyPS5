@@ -214,6 +214,22 @@ library. No game-specific diagnosis is valid until this is resolved.
   the slowest mapping was 15.96 ms. Direct-memory setup is therefore not the
   primary source of the roughly 3-second first-use gap.
 
+## Startup host-GPU sample — 2026-10-10
+
+- A macOS `sample` captured during the exact 2–4 second startup gap. The active
+  Kyty graphics thread was in `vkQueueSubmit` → MoltenVK command encoding,
+  including `MVKCommandEncoder::beginRendering`, `MVKCmdClearImage`, and
+  `MVKCmdDraw`, while a companion thread waited in `vkWaitSemaphores` on a
+  MoltenVK timeline semaphore. The guest execution thread remained in the
+  normal `RuntimeLinker::Execute` path.
+- `KYTY_SUSPEND_TIMING=1` measured the first `AgcSuspendPoint` wait at `25.544 ms`
+  and subsequent waits at roughly `8–18 ms`; suspend-point semaphore waiting is
+  not the source of the full `2.88–2.99 s` startup gap.
+- No behavior change was retained from this sample. The remaining startup
+  blocker is host-side first-use Metal/MoltenVK command encoding and GPU
+  synchronization; changing guest barriers without a correctness proof would
+  risk rendering and gameplay stability.
+
 ## Gameplay stability gate — 2026-10-10
 
 - `gameplay-gate-3-20261010`, `gameplay-gate-4-20261010`, and

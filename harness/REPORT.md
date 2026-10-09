@@ -69,6 +69,9 @@ long input-delay reports remain in progress.
 - Opt-in frame timing, audio signal, and input-to-present telemetry.
 - Apple/PPSA22520 title-gated Immediate presentation when Mailbox is otherwise
   selected; `KYTY_PPSA22520_MAILBOX` retains Mailbox for comparison.
+- Startup profiling attributes the repeated 2.88–2.99 s gap to first-use
+  MoltenVK/Metal command encoding and timeline synchronization; no unsafe
+  synchronization workaround was retained.
 
 ## Remaining work
 
