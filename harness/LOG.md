@@ -174,6 +174,17 @@ library. No game-specific diagnosis is valid until this is resolved.
   bytes) on all three follow-up probes. The cache is active, but it does not
   remove the initial shader-compilation spike.
 
+## Full input-path latency — 2026-10-10
+
+- Added `InputPoll` timestamps at the guest `PadRead`/`PadReadState` boundary.
+- Three 30-second focused probes delivered 24 controller events each. Their
+  input-to-next-present results were median/p95/max: `5.80/45.76/45.77` ms,
+  `11.51/118.49/118.50` ms, and `9.83/42.20/42.21` ms.
+- Input-to-guest-poll results were `11.01/33.62/33.62` ms,
+  `13.86/98.61/98.62` ms, and `10.61/25.79/25.80` ms. No one-second delay
+  appeared in these controlled probes; visible-state/gameplay response remains
+  the unresolved part of the user’s report.
+
 ## Save backup — 2026-10-10
 
 - Copied `_SaveData/` to the ignored local backup

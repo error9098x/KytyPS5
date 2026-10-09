@@ -22,6 +22,9 @@ remain in progress.
   devices were active and draining.
 - AudioOut2 now releases its state mutex before the potentially blocking SDL
   pacing call; a matched latency run is still needed to quantify the effect.
+- Three focused input probes now measure both host-to-guest-poll and
+  host-to-next-present timing. The worst observed p95 was 118.49 ms, with no
+  one-second sample; gameplay-state response still needs a controlled soak.
 - Frame pacing probe: median 16.91 ms / 59.12 FPS, p95 33.37 ms; startup shader
   compilation produced a 2.96 s outlier.
 - Three Immediate-present probes measured 60.31–60.71 FPS median and 19.83–20.34
@@ -37,8 +40,9 @@ remain in progress.
 
 ## Remaining work
 
-- Capture matched input-to-present samples with a focused keyboard or SDL
-  controller route; automated runs with no delivered input remain unmeasured.
+- Capture gameplay-state response samples with a focused keyboard or SDL
+  controller route; host-to-guest-poll and host-to-present timing are now
+  measured, but they do not explain the user’s reported one-second cases.
 - Mark a controlled gameplay soak with `KYTY_ROUTE=gameplay` so the per-run
   stage tracker does not infer gameplay from incidental startup input.
 - Confirm audible output on the user's selected macOS playback device.

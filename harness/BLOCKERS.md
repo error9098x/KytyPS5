@@ -41,8 +41,9 @@ pacing remain the next measurement target; the harness has an opt-in monotonic
 timestamp probe.
 
 The first frame-timing probe measured a 59.12 FPS median with a 33.37 ms p95 and
-a 2.96 s startup outlier. A matched input-to-present sample still requires a
-focused emulator window or SDL controller event, so latency is not yet characterized.
+a 2.96 s startup outlier. Three focused probes now measure host-to-guest-poll and
+host-to-present timing, but the user-reported one-second visible-state delay has
+not been reproduced.
 Controller, axis, mouse, and keyboard events are now timestamped. AudioOut2 also
 releases its state mutex before the potentially blocking SDL queue call.
 
