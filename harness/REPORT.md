@@ -26,16 +26,18 @@ long input-delay reports remain in progress.
   telemetry samples. Physical audibility still cannot be verified by logs alone.
 - AudioOut2 now releases its state mutex before the potentially blocking SDL
   pacing call; a matched latency run is still needed to quantify the effect.
-- Three focused input probes now measure both host-to-guest-poll and
-  host-to-next-present timing. The worst observed p95 was 118.49 ms, with no
-  one-second sample; visible-state response remains unmeasured.
+- Three warm focused input probes now measure host-to-guest-poll,
+  host-to-observed-button, and host-to-next-present timing. Their warm
+  host-to-present maxima were 28.62–35.00 ms, with guest-poll p95 values below
+  20 ms; the harness also reports the count of samples over 40, 100, and 500 ms.
 - The deterministic input probe reproduces roughly one-second host-to-poll and
   host-to-present samples only during the title-to-gameplay transition, where
-  first-use shader compilation blocks input polling and presentation. Three warm
-  immediate-present runs measured host-to-present p95 of 22.68–27.34 ms and
-  maxima of 28.62–35.00 ms. Visible-state response is still unmeasured, so this
-  does not by itself prove perceptual input lag; the transition hitch remains
-  open for a prewarm or asynchronous shader-compilation fix.
+  first-use shader compilation blocks input polling and presentation. The new
+  state trace measured about 945 ms to the guest observing the button and about
+  1.07 s to the next present; the queued transitions are then drained in order.
+  This identifies the hitch as a guest/render-thread stall rather than a lost
+  host event. Visible-state response is still unmeasured, so the transition
+  hitch remains open for a prewarm or asynchronous shader-compilation fix.
 - Frame pacing probe: median 16.91 ms / 59.12 FPS, p95 33.37 ms; startup guest
   initialization produced a 2.96 s outlier.
 - Three Immediate-present probes measured 60.31–60.71 FPS median and 19.83–20.34
