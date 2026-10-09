@@ -77,6 +77,9 @@ long input-delay reports remain in progress.
 - Disabling MoltenVK Metal argument buffers was also rejected: it preserved title
   pixels but worsened gameplay latency tails, including 394 ms host-to-present
   and 550 ms guest-poll samples.
+- A native arm64 build probe was configured but deferred because the host fault
+  bridge and x64 instruction-emulator context are both x86-specific; the
+  validated target remains x86-64 under Rosetta.
 
 ## Remaining work
 
