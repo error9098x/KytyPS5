@@ -76,12 +76,20 @@ FrameDiag& Diag() {
 	return d;
 }
 
-void LogPresentTiming(const char* phase, uint64_t present, int64_t elapsed_us) {
-	if (std::getenv("KYTY_PRESENT_TIMING") == nullptr) {
+bool PresentTimingEnabled() {
+	static const bool enabled = std::getenv("KYTY_PRESENT_TIMING") != nullptr;
+	return enabled;
+}
+
+void LogPresentTiming(const char* phase, uint64_t present,
+                      std::chrono::steady_clock::time_point start) {
+	if (!PresentTimingEnabled()) {
 		return;
 	}
+	const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+	                            std::chrono::steady_clock::now() - start).count();
 	LOGF("PresentTiming: present=%" PRIu64 " phase=%s us=%" PRId64 "\n", present, phase,
-	     elapsed_us);
+	     static_cast<int64_t>(elapsed_us));
 }
 
 uint32_t Crc32(const uint8_t* data, size_t size, uint32_t crc = 0) {
@@ -1145,22 +1153,23 @@ void Presenter::Impl::Present() {
 	}
 	auto& diag = Diag();
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
-		const auto present_start = std::chrono::steady_clock::now();
+		const auto present_start = PresentTimingEnabled() ? std::chrono::steady_clock::now()
+		                                                : std::chrono::steady_clock::time_point {};
+		const auto timing_n = window.loop.presented_frames.load(std::memory_order_relaxed) + 1;
 		const uint64_t diag_n      = diag.enabled ? diag.presents + 1 : 0;
 		const bool     diag_sample = diag.enabled && diag.ShouldSample(diag_n);
 		Readback       rb;
 		uint64_t       rb_tick = 0;
-		const auto acquire_start = std::chrono::steady_clock::now();
+		const auto acquire_start = PresentTimingEnabled() ? std::chrono::steady_clock::now()
+		                                                : std::chrono::steady_clock::time_point {};
 		auto status = swapchain.AcquireNextImage();
-		LogPresentTiming("acquire", diag_n,
-		                 std::chrono::duration_cast<std::chrono::microseconds>(
-		                     std::chrono::steady_clock::now() - acquire_start)
-		                     .count());
+		LogPresentTiming("acquire", timing_n, acquire_start);
 		if (status != Swapchain::Status::Success) {
 			RecoverSwapchain(status);
 			continue;
 		}
-		const auto record_start = std::chrono::steady_clock::now();
+		const auto record_start = PresentTimingEnabled() ? std::chrono::steady_clock::now()
+		                                                : std::chrono::steady_clock::time_point {};
 		{
 			Common::LockGuard render_lock(renderer.GetMutex());
 			auto&             command = present_scheduler.BeginCommand();
@@ -1202,10 +1211,7 @@ void Presenter::Impl::Present() {
 				}
 			}
 		}
-		LogPresentTiming("record_submit", diag_n,
-		                 std::chrono::duration_cast<std::chrono::microseconds>(
-		                     std::chrono::steady_clock::now() - record_start)
-		                     .count());
+		LogPresentTiming("record_submit", timing_n, record_start);
 		if (rb.buffer != VK_NULL_HANDLE) {
 			present_scheduler.Wait(rb_tick);
 			vmaInvalidateAllocation(window.graphic_ctx.allocator, rb.allocation, 0, VK_WHOLE_SIZE);
@@ -1216,12 +1222,10 @@ void Presenter::Impl::Present() {
 			     layers[0].frame == nullptr ? "NO_SOURCE_FRAME (cleared to black)"
 			                                : "unsupported readback format");
 		}
-		const auto present_call_start = std::chrono::steady_clock::now();
+		const auto present_call_start = PresentTimingEnabled() ? std::chrono::steady_clock::now()
+		                                                : std::chrono::steady_clock::time_point {};
 		status = swapchain.Present();
-		LogPresentTiming("queue_present", diag_n,
-		                 std::chrono::duration_cast<std::chrono::microseconds>(
-		                     std::chrono::steady_clock::now() - present_call_start)
-		                     .count());
+		LogPresentTiming("queue_present", timing_n, present_call_start);
 		if (status != Swapchain::Status::Success) {
 			RecoverSwapchain(status);
 			continue;
@@ -1239,10 +1243,7 @@ void Presenter::Impl::Present() {
 			LOGF("FrameTiming: present=%" PRIu64 " t_us=%" PRIu64 "\n", window.loop.presented_frames.load(std::memory_order_relaxed),
 			     static_cast<uint64_t>(micros));
 		}
-		LogPresentTiming("total", diag_n,
-		                 std::chrono::duration_cast<std::chrono::microseconds>(
-		                     std::chrono::steady_clock::now() - present_start)
-		                     .count());
+		LogPresentTiming("total", timing_n, present_start);
 		return;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");

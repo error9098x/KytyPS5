@@ -220,17 +220,20 @@ static void pad_fill_data(PadData* data, const ControllerState& state, bool conn
 	data->device_unique_data_len = 0;
 }
 
-static void LogInputPoll(const PadData& data, const char* api, int returned = 1) {
+static void LogInputPoll(const PadData* data, const char* api, int returned = 1) {
 	if (std::getenv("KYTY_INPUT_STATS") == nullptr) {
 		return;
 	}
-	static uint64_t sequence = 0;
+	static std::atomic<uint64_t> sequence {0};
 	const auto now = std::chrono::steady_clock::now().time_since_epoch();
 	const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
-	LOGF("InputPoll: seq=%" PRIu64 " api=%s returned=%d buttons=0x%08" PRIx32
-	     " connected=%d sample_ts=%" PRIu64 " t_us=%" PRIu64 "\n",
-	     ++sequence, api, returned, data.buttons, data.connected ? 1 : 0, data.timestamp,
-	     static_cast<uint64_t>(micros));
+	const auto seq = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+	for (int i = 0; i < returned; ++i) {
+		LOGF("InputPoll: seq=%" PRIu64 " api=%s returned=%d index=%d buttons=0x%08" PRIx32
+		     " connected=%d sample_ts=%" PRIu64 " t_us=%" PRIu64 "\n",
+		     seq, api, returned, i, data[i].buttons, data[i].connected ? 1 : 0, data[i].timestamp,
+		     static_cast<uint64_t>(micros));
+	}
 }
 
 static void LogInputState(uint32_t mask, bool down, uint32_t buttons, uint64_t sample_time) {
@@ -1159,7 +1162,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	g_controller->ReadState(&state, &connected, &connected_count);
 
 	pad_fill_data(data, state, connected, connected_count);
-	LogInputPoll(*data, "read_state");
+	LogInputPoll(data, "read_state");
 
 	return OK;
 }
@@ -1193,7 +1196,7 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 	for (int i = 0; i < ret_num; i++) {
 		pad_fill_data(&data[i], states[i], connected, connected_count);
 	}
-	LogInputPoll(data[0], "read", ret_num);
+	LogInputPoll(data, "read", ret_num);
 
 	return ret_num;
 }

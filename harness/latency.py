@@ -22,7 +22,7 @@ poll_records = [
         r"InputPoll:.*?buttons=0x([0-9a-fA-F]+).*?sample_ts=(\d+) t_us=(\d+)", text
     )
 ]
-polls = [host for _, _, host in poll_records]
+polls = sorted(set(host for _, _, host in poll_records))
 if not polls:
     polls = [int(t) for t in re.findall(r"InputPoll:.*?t_us=(\d+)", text)]
 delays = []
@@ -66,23 +66,23 @@ if len(polls) > 1:
               (threshold, sum(gap > threshold for gap in poll_gaps)))
 
 # InputState is emitted at the point a host button changes the emulated pad.
-# Matching that bit against the first later PadRead sample measures when the
-# guest actually observes the transition, including any queued-state delay.
+# Match its guest timestamp as well as the button bit: a repeated press must
+# not accidentally match an older press still waiting in the pad history.
 states = [
-    (int(mask, 16), bool(int(down)), int(host))
-    for mask, down, host in re.findall(
-        r"InputState: kind=button mask=0x([0-9a-fA-F]+) down=(\d+).*?t_us=(\d+)",
+    (int(mask, 16), bool(int(down)), int(sample), int(host))
+    for mask, down, sample, host in re.findall(
+        r"InputState: kind=button mask=0x([0-9a-fA-F]+) down=(\d+).*?sample_ts=(\d+) t_us=(\d+)",
         text,
     )
 ]
 observed = []
 if states and poll_records:
-    for mask, down, host in states:
-        for buttons, _, poll_host in poll_records:
+    for mask, down, sample, host in states:
+        for buttons, poll_sample, poll_host in poll_records:
             if poll_host < host:
                 continue
             active = (buttons & mask) != 0
-            if active == down:
+            if poll_sample == sample and active == down:
                 observed.append((poll_host - host) / 1000.0)
                 break
 if observed:
@@ -93,3 +93,6 @@ if observed:
     for threshold in (40.0, 100.0, 500.0):
         print("[latency] host_to_observed_button_over_%gms=%d" %
               (threshold, sum(delay > threshold for delay in observed)))
+if states:
+    print("[latency] button_samples_unmatched=%d (latest-state reads may supersede transitions)" %
+          (len(states) - len(observed)))
