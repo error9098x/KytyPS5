@@ -275,8 +275,25 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 	desired.format   = SdlFormat(port->format);
 	desired.channels = static_cast<int>(OutputChannels(*port));
 
-	port->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired, nullptr,
-	                                         nullptr);
+	SDL_AudioDeviceID device = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+	const auto&        requested_device = Config::GetAudioOutputDevice();
+	if (!requested_device.empty()) {
+		int                device_count = 0;
+		SDL_AudioDeviceID* devices      = SDL_GetAudioPlaybackDevices(&device_count);
+		for (int i = 0; i < device_count; i++) {
+			const char* device_name = SDL_GetAudioDeviceName(devices[i]);
+			if (device_name != nullptr && requested_device == device_name) {
+				device = devices[i];
+				break;
+			}
+		}
+		SDL_free(devices);
+		if (device == SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK) {
+			LOGF("AudioOut: requested playback device not found: %s; using system default\n",
+			     requested_device.c_str());
+		}
+	}
+	port->stream = SDL_OpenAudioDeviceStream(device, &desired, nullptr, nullptr);
 	if (port->stream == nullptr) {
 		LOGF("AudioOut: SDL_OpenAudioDeviceStream failed: %s\n", SDL_GetError());
 		SDL_QuitSubSystem(SDL_INIT_AUDIO);
@@ -290,6 +307,16 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 
 	LOGF("AudioOut: opened SDL stream (%d Hz, %d ch, format 0x%04x)\n", desired.freq,
 	     desired.channels, static_cast<unsigned>(desired.format));
+	if (std::getenv("KYTY_AUDIO_STATS") != nullptr) {
+		const auto        device = SDL_GetAudioStreamDevice(port->stream);
+		const char*       name   = device != 0 ? SDL_GetAudioDeviceName(device) : nullptr;
+		const bool        paused = device == 0 || SDL_AudioDevicePaused(device);
+		const int         queued = SDL_GetAudioStreamQueued(port->stream);
+		const int         avail  = SDL_GetAudioStreamAvailable(port->stream);
+		LOGF("AudioDevice: id=%u name=%s paused=%d queued=%d available=%d\n",
+		     static_cast<unsigned>(device), name != nullptr ? name : "<unknown>", paused ? 1 : 0,
+		     queued, avail);
+	}
 	return true;
 }
 
@@ -436,9 +463,13 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 			}
 		}
 		const double rms = count != 0 ? std::sqrt(sum / static_cast<double>(count)) : 0.0;
-		LOGF("AudioStats: type=%d freq=%u channels=%u frames=%u rms=%.6f peak=%.6f queued=%d\n",
-		     port->type, port->freq, OutputChannels(*port), port->samples_num, rms, peak,
-		     SDL_GetAudioStreamQueued(port->stream));
+		const auto  device = SDL_GetAudioStreamDevice(port->stream);
+		const bool  paused = device == 0 || SDL_AudioDevicePaused(device);
+		const int   queued = SDL_GetAudioStreamQueued(port->stream);
+		const int   avail  = SDL_GetAudioStreamAvailable(port->stream);
+		LOGF("AudioStats: type=%d freq=%u channels=%u frames=%u rms=%.6f peak=%.6f queued=%d available=%d device=%u paused=%d\n",
+		     port->type, port->freq, OutputChannels(*port), port->samples_num, rms, peak, queued,
+		     avail, static_cast<unsigned>(device), paused ? 1 : 0);
 	}
 	// Unpaced priming must not advance the playback deadline into the future.
 	if (!port->queue_primed) {
