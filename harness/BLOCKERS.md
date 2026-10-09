@@ -52,18 +52,11 @@ supports `--audio-device "MacBook Air Speakers"` (or `KYTY_AUDIO_DEVICE` in the
 harness). Both devices report `paused=0` and draining converted bytes in probes;
 the remaining question is which physical device the user is listening to.
 
-## Internal render-texture chain
+## Render-texture chain (title path closed; gameplay visual gate pending)
 
-The final 4K video pass samples internal 320x180 render textures and completes
-without Vulkan errors. Pixel-kill and vertex-lane A/B experiments stayed fully
-black. The next investigation must read back or validate the internal texture
-after its producing pass, rather than adding more import stubs blindly.
-
-The readback proves that some intermediate 8-bit targets are non-black while the
-final video target is black. The next fix should trace the final composite source
-and image barriers/format handling, with a targeted non-black readback as the
-keep/revert gate.
-
-The first vertex shader's scalar descriptors are valid in guest memory; the binding
-path, rather than S_LOAD/component offset lowering, was the issue. Do not change
-S_LOAD/component offset lowering based on the earlier black-frame evidence.
+The earlier internal-target investigation established that the final black output
+was a descriptor-binding failure, not a missing import or shader-position issue.
+Ordinary descriptor sets now produce the title artwork. Keep the workaround
+PPSA22520/Apple-gated and use fixed-point gameplay screenshots for the remaining
+visual correctness gate. Do not revisit S_LOAD/component-offset lowering based
+on the historical black-frame evidence.
