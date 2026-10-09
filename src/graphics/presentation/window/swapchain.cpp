@@ -17,14 +17,154 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <vector>
+#include <vk_mem_alloc.h>
 #include <vulkan/vk_platform.h>
 
 // IWYU pragma: no_include <intrin.h>
 
 namespace Libs::Graphics {
+
+namespace {
+
+// Diagnostics only: KYTY_FRAME_STATS=1 logs presented-frame statistics, and
+// KYTY_FRAME_DUMP_DIR=<dir> also writes sampled frames as PNG. Neither changes emulation.
+struct FrameDiag {
+	bool        enabled = false;
+	std::string dump_dir;
+	uint64_t    presents      = 0;
+	uint64_t    blank_presents = 0;
+	FrameDiag() {
+		enabled = std::getenv("KYTY_FRAME_STATS") != nullptr ||
+		          std::getenv("KYTY_FRAME_DUMP_DIR") != nullptr;
+		if (const char* dir = std::getenv("KYTY_FRAME_DUMP_DIR")) {
+			dump_dir = dir;
+		}
+	}
+	[[nodiscard]] bool ShouldSample(uint64_t n) const { return n <= 10 || n % 60 == 0; }
+};
+
+FrameDiag& Diag() {
+	static FrameDiag d;
+	return d;
+}
+
+uint32_t Crc32(const uint8_t* data, size_t size, uint32_t crc = 0) {
+	crc = ~crc;
+	for (size_t i = 0; i < size; i++) {
+		crc ^= data[i];
+		for (int k = 0; k < 8; k++) {
+			crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+		}
+	}
+	return ~crc;
+}
+
+void PutBe32(std::vector<uint8_t>& v, uint32_t x) {
+	for (int s = 24; s >= 0; s -= 8) {
+		v.push_back(static_cast<uint8_t>(x >> s));
+	}
+}
+
+void PngChunk(std::vector<uint8_t>& out, const char* type, const std::vector<uint8_t>& body) {
+	PutBe32(out, static_cast<uint32_t>(body.size()));
+	std::vector<uint8_t> tb(type, type + 4);
+	tb.insert(tb.end(), body.begin(), body.end());
+	out.insert(out.end(), tb.begin(), tb.end());
+	PutBe32(out, Crc32(tb.data(), tb.size()));
+}
+
+// Writes an RGB PNG using stored (uncompressed) deflate blocks.
+void WriteRgbPng(const std::string& path, const std::vector<uint8_t>& rgb, uint32_t w, uint32_t h) {
+	std::vector<uint8_t> raw;
+	raw.reserve((static_cast<size_t>(w) * 3 + 1) * h);
+	for (uint32_t y = 0; y < h; y++) {
+		raw.push_back(0);
+		raw.insert(raw.end(), rgb.begin() + static_cast<size_t>(y) * w * 3,
+		           rgb.begin() + static_cast<size_t>(y + 1) * w * 3);
+	}
+	std::vector<uint8_t> z {0x78, 0x01};
+	for (size_t pos = 0; pos < raw.size();) {
+		const size_t n    = std::min<size_t>(65535, raw.size() - pos);
+		const bool   last = pos + n == raw.size();
+		z.push_back(last ? 1 : 0);
+		z.push_back(static_cast<uint8_t>(n & 0xFF));
+		z.push_back(static_cast<uint8_t>(n >> 8));
+		z.push_back(static_cast<uint8_t>(~n & 0xFF));
+		z.push_back(static_cast<uint8_t>((~n >> 8) & 0xFF));
+		z.insert(z.end(), raw.begin() + pos, raw.begin() + pos + n);
+		pos += n;
+	}
+	uint32_t a = 1, b = 0;
+	for (uint8_t c: raw) {
+		a = (a + c) % 65521;
+		b = (b + a) % 65521;
+	}
+	PutBe32(z, (b << 16) | a);
+
+	std::vector<uint8_t> out {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+	std::vector<uint8_t> ihdr;
+	PutBe32(ihdr, w);
+	PutBe32(ihdr, h);
+	ihdr.insert(ihdr.end(), {8, 2, 0, 0, 0});
+	PngChunk(out, "IHDR", ihdr);
+	PngChunk(out, "IDAT", z);
+	PngChunk(out, "IEND", {});
+	if (FILE* f = std::fopen(path.c_str(), "wb")) {
+		std::fwrite(out.data(), 1, out.size(), f);
+		std::fclose(f);
+	}
+}
+
+struct Readback {
+	VkBuffer      buffer     = VK_NULL_HANDLE;
+	VmaAllocation allocation = nullptr;
+	void*         mapped     = nullptr;
+	uint32_t      width = 0, height = 0;
+	vk::Format    format = vk::Format::eUndefined;
+};
+
+bool IsSupportedReadbackFormat(vk::Format f) {
+	return f == vk::Format::eB8G8R8A8Unorm || f == vk::Format::eB8G8R8A8Srgb ||
+	       f == vk::Format::eR8G8B8A8Unorm || f == vk::Format::eR8G8B8A8Srgb;
+}
+
+void AnalyzeReadback(Readback& rb, uint64_t n) {
+	const bool bgra = rb.format == vk::Format::eB8G8R8A8Unorm ||
+	                  rb.format == vk::Format::eB8G8R8A8Srgb;
+	const auto* src = static_cast<const uint8_t*>(rb.mapped);
+	const size_t pixels = static_cast<size_t>(rb.width) * rb.height;
+	std::vector<uint8_t> rgb(pixels * 3);
+	uint64_t sum = 0, nonblack = 0;
+	uint8_t  maxc = 0;
+	for (size_t i = 0; i < pixels; i++) {
+		const uint8_t r = src[i * 4 + (bgra ? 2 : 0)], g = src[i * 4 + 1],
+		              bl = src[i * 4 + (bgra ? 0 : 2)];
+		rgb[i * 3] = r;
+		rgb[i * 3 + 1] = g;
+		rgb[i * 3 + 2] = bl;
+		sum += r + g + bl;
+		nonblack += (r | g | bl) != 0;
+		maxc = std::max({maxc, r, g, bl});
+	}
+	LOGF("FrameStats: present=%" PRIu64 " %ux%u avg=%.2f max=%u nonblack=%.4f%% %s\n", n,
+	     rb.width, rb.height, pixels ? static_cast<double>(sum) / (pixels * 3) : 0.0, maxc,
+	     pixels ? 100.0 * static_cast<double>(nonblack) / pixels : 0.0,
+	     nonblack == 0 ? "ALL_BLACK" : "HAS_CONTENT");
+	const auto& dir = Diag().dump_dir;
+	if (!dir.empty()) {
+		char name[64];
+		std::snprintf(name, sizeof(name), "/frame_%06" PRIu64 ".png", n);
+		WriteRgbPng(dir + name, rgb, rb.width, rb.height);
+	}
+}
+
+} // namespace
 
 struct Presenter::Frame {
 	VulkanImage   image;
@@ -971,7 +1111,12 @@ void Presenter::Impl::Present() {
 	if (swapchain.NeedsResize()) {
 		RecoverSwapchain(Swapchain::Status::Recreate);
 	}
+	auto& diag = Diag();
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
+		const uint64_t diag_n      = diag.enabled ? diag.presents + 1 : 0;
+		const bool     diag_sample = diag.enabled && diag.ShouldSample(diag_n);
+		Readback       rb;
+		uint64_t       rb_tick = 0;
 		auto status = swapchain.AcquireNextImage();
 		if (status != Swapchain::Status::Success) {
 			RecoverSwapchain(status);
@@ -984,17 +1129,58 @@ void Presenter::Impl::Present() {
 			    overlay_visual.active && swapchain.PrepareSystemOverlay();
 			swapchain.RecordPresentCommands(command, layers[0].frame, layers[1],
 			                                draw_system_overlay);
+			if (diag_sample && layers[0].frame != nullptr &&
+			    IsSupportedReadbackFormat(layers[0].frame->image.format)) {
+				auto* f = layers[0].frame;
+				rb.width = f->image.extent.width;
+				rb.height = f->image.extent.height;
+				rb.format = f->image.format;
+				vk::BufferCreateInfo bi {};
+				bi.size  = static_cast<vk::DeviceSize>(rb.width) * rb.height * 4;
+				bi.usage = vk::BufferUsageFlagBits::eTransferDst;
+				VmaAllocationCreateInfo ai {};
+				ai.usage = VMA_MEMORY_USAGE_AUTO;
+				ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+				           VMA_ALLOCATION_CREATE_MAPPED_BIT;
+				VmaAllocationInfo info {};
+				if (vmaCreateBuffer(window.graphic_ctx.allocator,
+				                    static_cast<const VkBufferCreateInfo*>(bi), &ai, &rb.buffer,
+				                    &rb.allocation, &info) == VK_SUCCESS) {
+					rb.mapped = info.pMappedData;
+					vk::BufferImageCopy region {};
+					region.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+					region.imageExtent      = {rb.width, rb.height, 1};
+					command.Handle().copyImageToBuffer(f->image.image,
+					                                   vk::ImageLayout::eTransferSrcOptimal,
+					                                   rb.buffer, region);
+				}
+			}
 			const auto tick = swapchain.Submit(present_scheduler);
+			rb_tick = tick;
 			for (const auto& layer: layers) {
 				if (layer.frame != nullptr) {
 					layer.frame->present_tick = tick;
 				}
 			}
 		}
+		if (rb.buffer != VK_NULL_HANDLE) {
+			present_scheduler.Wait(rb_tick);
+			vmaInvalidateAllocation(window.graphic_ctx.allocator, rb.allocation, 0, VK_WHOLE_SIZE);
+			AnalyzeReadback(rb, diag_n);
+			vmaDestroyBuffer(window.graphic_ctx.allocator, rb.buffer, rb.allocation);
+		} else if (diag_sample) {
+			LOGF("FrameStats: present=%" PRIu64 " %s\n", diag_n,
+			     layers[0].frame == nullptr ? "NO_SOURCE_FRAME (cleared to black)"
+			                                : "unsupported readback format");
+		}
 		status = swapchain.Present();
 		if (status != Swapchain::Status::Success) {
 			RecoverSwapchain(status);
 			continue;
+		}
+		if (diag.enabled) {
+			diag.presents++;
+			diag.blank_presents += layers[0].frame == nullptr;
 		}
 
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
