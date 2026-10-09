@@ -20,6 +20,9 @@ long input-delay reports remain in progress.
   selecting `MacBook Air Speakers` explicitly and logs the resolved device,
   paused state, queued bytes, and converted-byte availability; both tested
   devices were active and draining.
+- The three gameplay gate runs explicitly selected MacBook Air Speakers and
+  recorded nonzero SDL samples in `1949/3368`, `2071/3357`, and `2131/3366`
+  telemetry samples. Physical audibility still cannot be verified by logs alone.
 - AudioOut2 now releases its state mutex before the potentially blocking SDL
   pacing call; a matched latency run is still needed to quantify the effect.
 - Three focused input probes now measure both host-to-guest-poll and
