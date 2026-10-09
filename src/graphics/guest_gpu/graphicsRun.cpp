@@ -40,6 +40,23 @@ static thread_local Pm4Execution*     g_current_execution = nullptr;
 static thread_local bool              g_gpu_thread        = false;
 static thread_local GuestGpu*         g_gpu_state         = nullptr;
 
+static uint32_t BlockedSubmissionRetryWaitMs() {
+	static const uint32_t wait_ms = [] {
+		constexpr uint32_t default_wait_ms = 100;
+		const char* value = std::getenv("KYTY_GPU_RETRY_WAIT_MS");
+		if (value == nullptr || *value == '\0') {
+			return default_wait_ms;
+		}
+		char* end = nullptr;
+		const auto parsed = std::strtoul(value, &end, 10);
+		if (end == value || *end != '\0') {
+			return default_wait_ms;
+		}
+		return static_cast<uint32_t>(std::clamp<unsigned long>(parsed, 1, 1000));
+	}();
+	return wait_ms;
+}
+
 struct DrawIndirectArgs {
 	uint32_t vertex_count_per_instance;
 	uint32_t instance_count;
@@ -506,7 +523,8 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex,
+					                             BlockedSubmissionRetryWaitMs());
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
 							queue.front().blocked = false;
