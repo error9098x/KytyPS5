@@ -178,6 +178,8 @@ library. No game-specific diagnosis is valid until this is resolved.
   invalidated the driver cache; the two subsequent cache-loaded Silent probes
   measured 60.17–60.44 FPS median with 2.93–3.60 s max gaps. Suppressing
   diagnostic dumps does not remove the first-use MoltenVK/scene stall.
+- `KYTY_PRINTF_DIRECTION=Silent` is now supported for performance probes and
+  still produces a normal scanner summary with empty guest-log diagnostics.
 
 ## Startup pipeline timing — 2026-10-10
 

@@ -7,6 +7,7 @@ game_dir=${KYTY_GAME_DIR:-$root/../Animal.Well-extracted-unar/[SuperPSX]-Animal.
 timeout_seconds=${KYTY_TIMEOUT_SECONDS:-30}
 run_id=${1:-$(date +%Y%m%d-%H%M%S)}
 out_dir=${KYTY_HARNESS_OUT:-$root/harness/runs/$run_id}
+printf_direction=${KYTY_PRINTF_DIRECTION:-File}
 mkdir -p "$out_dir/shaders"
 
 if [ ! -x "$build_dir/kyty_emulator" ]; then
@@ -40,10 +41,11 @@ import json, os, pathlib, signal, subprocess, sys, time
 
 exe, game, timeout_s, out_dir = sys.argv[1], sys.argv[2], float(sys.argv[3]), pathlib.Path(sys.argv[4])
 shader_log_direction = os.environ.get("KYTY_SHADER_LOG_DIRECTION", "Silent")
+printf_direction = os.environ.get("KYTY_PRINTF_DIRECTION", "File")
 log = out_dir / "kyty.log"
 args = [exe, "--game", game,
         "--shader-log-direction", shader_log_direction, "--shader-log-folder", str(out_dir / "shaders"),
-        "--printf-direction", "File", "--printf-output-file", str(out_dir / "guest-printf.log"),
+        "--printf-direction", printf_direction, "--printf-output-file", str(out_dir / "guest-printf.log"),
         "--vulkan-validation", "false",
         "--graphics-debug-dump", os.environ.get("KYTY_GRAPHICS_DEBUG_DUMP", "false"),
         "--command-buffer-dump", os.environ.get("KYTY_COMMAND_BUFFER_DUMP", "false"),
@@ -76,6 +78,11 @@ if os.environ.get("KYTY_ROUTE"):
 (out_dir / "run.json").write_text(json.dumps(metadata) + "\n")
 print("run_dir=%s exit=%d timeout=%s elapsed=%.3f" % (out_dir, rc, timed_out, elapsed))
 PY
+# Silent guest printf runs intentionally have no log stream; keep the scanner's
+# input stable so performance probes still emit a normal summary.
+if [ "$printf_direction" = "Silent" ]; then
+    : > "$out_dir/guest-printf.log"
+fi
 python3 "$root/harness/scan_log.py" "$out_dir/kyty.log" "$out_dir/guest-printf.log" > "$out_dir/scan.txt"
 python3 "$root/harness/stage.py" "$out_dir" >> "$out_dir/scan.txt"
 python3 "$root/harness/latency.py" "$out_dir" >> "$out_dir/scan.txt"
