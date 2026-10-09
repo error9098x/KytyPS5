@@ -14,7 +14,7 @@ Acceptance stages (from the mission): 1 first frame, 2 title/menu, 3 gameplay 10
 | Boot without crash, assets load, game logic runs | **Done** | 60-90 s runs, no crash; atlas readback perfect; sprites animate |
 | 1. First frame presented | **Done** | Three clean 20 s runs: 27 sampled frames each, 17 with content |
 | 2. Title / menu visible | **Reached** | Captured 3840x2160 frame visibly shows Animal Well CRT title artwork |
-| 3. Gameplay stability | **Measured once** | One 10-minute Cross-input soak ended cleanly; repeat twice |
+| 3. Gameplay stability | **Done** | Three marked 10-minute Cross-input soaks ended cleanly |
 | 4. Visual correctness | **Pending** | Need fixed-point reference captures and image diffs |
 | 5. Performance | **Baseline only** | Mailbox median 59.12 FPS; three Immediate runs 60.31–60.71 FPS; startup spikes remain |
 
@@ -33,7 +33,7 @@ input-to-present samples from a focused keyboard or controller route, and compar
 * Docs: `SPEC.md`, `LOG.md`, `BLOCKERS.md`, `ANALYSIS.md`, this file.
 
 ### Not done
-* Two more 10-minute gameplay soaks, fixed-point visual comparisons, and sustained performance work.
+* Fixed-point visual comparisons and sustained performance work.
 * Audible confirmation on the user's selected macOS playback device.
 * A matched input-to-present route using the new keyboard, mouse, and SDL controller timestamps.
 * Three `KYTY_PRESENT_MODE=Immediate` pacing probes, compared with Mailbox.

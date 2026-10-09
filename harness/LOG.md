@@ -174,6 +174,16 @@ library. No game-specific diagnosis is valid until this is resolved.
   bytes) on all three follow-up probes. The cache is active, but it does not
   remove the initial shader-compilation spike.
 
+## Gameplay stability gate — 2026-10-10
+
+- `gameplay-gate-3-20261010`, `gameplay-gate-4-20261010`, and
+  `gameplay-gate-5-20261010` each ran for 600 seconds with route marker
+  `gameplay`, exit code 0, and no fatal, unimplemented, or GPU-validation
+  errors.
+- MacBook Air Speakers were selected explicitly. Nonzero SDL/NGS2 samples were
+  observed in all three runs: SDL `1949/3368`, `2071/3357`, and `2131/3366`;
+  NGS2 `648/1123`, `689/1119`, and `709/1122`.
+
 ## Full input-path latency — 2026-10-10
 
 - Added `InputPoll` timestamps at the guest `PadRead`/`PadReadState` boundary.
