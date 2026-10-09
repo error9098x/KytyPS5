@@ -87,6 +87,18 @@ library. No game-specific diagnosis is valid until this is resolved.
 - Added `KYTY_INTERNAL_FRAME_ADDRESS` filtering for targeted follow-up runs.
 - Added NGS2 mastering/rack/port regression coverage; `ngs2_sampler` passes.
 
+## MoltenVK descriptor-set fix — 2026-10-10
+
+- MoltenVK push descriptors were the remaining draw-path fault. With the original
+  push-descriptor path, presented frames stayed black and GPU readback showed the
+  vertex shader's storage-buffer constants as zero even though guest memory held
+  `320.0, 180.0` and `1024, 2048`.
+- Forcing ordinary descriptor sets for title `PPSA22520` makes the original shaders
+  read their resources correctly. A 30-second run produced 29 sampled frames, 19
+  with content; the captured 3840x2160 frame shows Animal Well's CRT title artwork.
+- The workaround is title-gated in `pipeline/shaders.cpp`; no global push-descriptor
+  behavior changes. The remaining 10 black samples occur during startup/transition.
+
 ## Shader descriptor trace — 2026-10-09
 
 - The first VS descriptor trace reports valid readable scalar buffers:

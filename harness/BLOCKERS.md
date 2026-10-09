@@ -16,7 +16,15 @@ draw trace shows real draws and successful pipelines, so the causal role of thes
 is unproven. Resolve only imports that appear in a call trace before implementing them.
 See `harness/runs/flow-check/guest-printf.log` for the relocation list.
 
-## Internal render-texture chain is black
+## MoltenVK push descriptors (fixed for Animal Well)
+
+The black-frame blocker was reproduced as a descriptor-binding issue. MoltenVK's
+push-descriptor path left Animal Well's storage-buffer/image resources unusable in
+the guest shaders, while ordinary descriptor sets produced the expected title art.
+Kyty now selects ordinary descriptor sets only for `PPSA22520` on Apple hosts.
+Keep the workaround title-gated and validate other titles separately.
+
+## Internal render-texture chain
 
 The final 4K video pass samples internal 320x180 render textures and completes
 without Vulkan errors. Pixel-kill and vertex-lane A/B experiments stayed fully
@@ -28,6 +36,6 @@ final video target is black. The next fix should trace the final composite sourc
 and image barriers/format handling, with a targeted non-black readback as the
 keep/revert gate.
 
-The first vertex shader's scalar descriptors are now proven valid (320x180 and
-1024x2048 values). Do not change S_LOAD/component offset lowering; that theory
-is contradicted by runtime data and SPIR-V inspection.
+The first vertex shader's scalar descriptors are valid in guest memory; the binding
+path, rather than S_LOAD/component offset lowering, was the issue. Do not change
+S_LOAD/component offset lowering based on the earlier black-frame evidence.

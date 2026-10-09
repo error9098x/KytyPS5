@@ -17,9 +17,11 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
+#include "loader/systemContent.h"
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <limits>
 #include <span>
 #include <vector>
@@ -197,6 +199,17 @@ static void CreateDescriptorLayout(GraphicContext& graphics, PipelineCache::Pipe
 		descriptor_count += binding.descriptorCount;
 	}
 	pipeline.uses_push_descriptors = descriptor_count <= graphics.max_push_descriptors;
+#if defined(__APPLE__)
+	// Animal Well's buffer and image descriptors fail with MoltenVK push descriptors.
+	// Ordinary descriptor sets render correctly with the original guest shaders.
+	std::string title_id;
+	if (Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id) && title_id == "PPSA22520") {
+		pipeline.uses_push_descriptors = false;
+	}
+#endif
+	if (std::getenv("KYTY_DISABLE_PUSH_DESCRIPTORS") != nullptr) {
+		pipeline.uses_push_descriptors = false;
+	}
 
 	vk::DescriptorSetLayoutCreateInfo create {};
 	create.flags        = pipeline.uses_push_descriptors
