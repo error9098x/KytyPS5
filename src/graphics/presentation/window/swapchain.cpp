@@ -1189,6 +1189,12 @@ void Presenter::Impl::Present() {
 
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
 		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
+		if (std::getenv("KYTY_FRAME_TIMING") != nullptr) {
+			const auto now = std::chrono::steady_clock::now().time_since_epoch();
+			const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+			LOGF("FrameTiming: present=%" PRIu64 " t_us=%" PRIu64 "\n", window.loop.presented_frames.load(std::memory_order_relaxed),
+			     static_cast<uint64_t>(micros));
+		}
 		return;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");

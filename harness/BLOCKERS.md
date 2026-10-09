@@ -40,6 +40,10 @@ writeback fixes now produce nonzero NGS2 and SDL samples. Input latency and fram
 pacing remain the next measurement target; the harness has an opt-in monotonic
 timestamp probe.
 
+The first frame-timing probe measured a 59.12 FPS median with a 33.37 ms p95 and
+a 2.96 s startup outlier. A matched input-to-present sample still requires a
+focused emulator window, so latency is not yet characterized.
+
 ## Internal render-texture chain
 
 The final 4K video pass samples internal 320x180 render textures and completes

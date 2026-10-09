@@ -128,6 +128,9 @@ library. No game-specific diagnosis is valid until this is resolved.
 - The harness now appends a `[latency]` line per run. A focused window and at least
   one input event are required for matched samples; missing matches are reported
   explicitly rather than treated as zero latency.
+- `KYTY_FRAME_TIMING=1` adds per-present timestamps without frame readbacks;
+  `harness/fps.py` reports pacing. A 10-second probe measured median 16.91 ms
+  (59.12 FPS), p95 33.37 ms, with a 2.96 s startup/shader outlier.
 
 ## Shader descriptor trace — 2026-10-09
 
