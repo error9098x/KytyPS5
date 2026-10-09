@@ -28,10 +28,10 @@ long input-delay reports remain in progress.
 - Three focused input probes now measure both host-to-guest-poll and
   host-to-next-present timing. The worst observed p95 was 118.49 ms, with no
   one-second sample; visible-state response remains unmeasured.
-- Frame pacing probe: median 16.91 ms / 59.12 FPS, p95 33.37 ms; startup shader
-  compilation produced a 2.96 s outlier.
+- Frame pacing probe: median 16.91 ms / 59.12 FPS, p95 33.37 ms; startup guest
+  initialization produced a 2.96 s outlier.
 - Three Immediate-present probes measured 60.31–60.71 FPS median and 19.83–20.34
-  ms p95. Startup spikes remained 2.73–3.21 s. The clean Release build now
+  ms p95. Startup initialization gaps remained 2.73–3.21 s. The clean Release build now
   loads and saves the PPSA22520 Vulkan pipeline cache.
 - The harness now defaults shader logs to Silent. After one expected cache
   invalidation on the new revision, two cache-loaded Silent runs measured
@@ -63,5 +63,5 @@ long input-delay reports remain in progress.
   explain the user’s reported one-second cases.
 - Confirm audible output on the user's selected macOS playback device.
 - Compare fixed-point screenshots against a reference and remove major visual defects.
-- Reduce startup shader stutter and measure sustained gameplay performance.
+- Reduce the startup guest/host initialization hitch and measure sustained gameplay performance.
 - Resolve the remaining 108 load-time imports only when a call trace proves they matter.

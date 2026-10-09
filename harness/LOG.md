@@ -132,7 +132,7 @@ library. No game-specific diagnosis is valid until this is resolved.
   explicitly rather than treated as zero latency.
 - `KYTY_FRAME_TIMING=1` adds per-present timestamps without frame readbacks;
   `harness/fps.py` reports pacing. A 10-second probe measured median 16.91 ms
-  (59.12 FPS), p95 33.37 ms, with a 2.96 s startup/shader outlier.
+  (59.12 FPS), p95 33.37 ms, with a 2.96 s startup initialization outlier.
 - Controller buttons, controller axes, and mouse buttons now use the same
   monotonic `InputStats` clock. A follow-up automated keyboard probe produced
   no input events, so it correctly reported no matched samples rather than
@@ -168,7 +168,7 @@ library. No game-specific diagnosis is valid until this is resolved.
   marker so Stage 3 is never awarded from a long title-only run by accident.
 - Three Immediate-present probes completed without crashes: median FPS
   `60.71`, `60.42`, and `60.31`; p95 frame times were `20.34`, `20.32`, and
-  `19.83` ms. Each retained a single startup shader spike between `2.73` and
+  `19.83` ms. Each retained a single startup initialization gap between `2.73` and
   `3.21` seconds.
 - A clean Release build now loads `_PipelineCache/PPSA22520.bin` (1,144,892
   bytes) on all three follow-up probes. The cache is active, but it does not

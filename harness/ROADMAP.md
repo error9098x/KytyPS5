@@ -16,7 +16,7 @@ Acceptance stages (from the mission): 1 first frame, 2 title/menu, 3 gameplay 10
 | 2. Title / menu visible | **Reached** | Captured 3840x2160 frame visibly shows Animal Well CRT title artwork |
 | 3. Gameplay stability | **Done** | Three marked 10-minute Cross-input soaks ended cleanly |
 | 4. Visual correctness | **Pending external reference** | Three fixed-point captures are consistent; PS5/reference comparison remains |
-| 5. Performance | **Baseline only** | Mailbox median 59.12 FPS; three Immediate runs 60.31–60.71 FPS; startup spikes remain |
+| 5. Performance | **Baseline only** | Mailbox median 59.12 FPS; three Immediate runs 60.31–60.71 FPS; startup initialization gaps remain |
 
 The original black-frame failure is fixed for PPSA22520 on Apple hosts by selecting ordinary
 descriptor sets instead of MoltenVK push descriptors. The remaining work is quality and
@@ -57,7 +57,7 @@ The remaining work is outside the basic render path:
    HyperX Cloud Stinger 2 Wireless; Kyty now accepts an exact `--audio-device`
    override for users listening on another output.
 2. Mailbox timing measured 59.12 FPS median. Three Immediate runs measured
-   60.31–60.71 FPS median and 19.83–20.34 ms p95, but startup shader spikes remain
+   60.31–60.71 FPS median and 19.83–20.34 ms p95, but startup initialization gaps remain
    2.73–3.21 seconds. The clean Release pipeline cache is active.
 3. One controlled Cross-input gameplay soak reached 10 minutes cleanly. Two more
    marked gameplay soaks are required for the stage gate.
@@ -89,7 +89,7 @@ compare against a reference capture with `harness/image_diff.py`, recording imag
 diffs and any missing effects.
 
 **Step 5 — Startup stutter.** Keep the active Vulkan pipeline cache and profile the
-remaining shader compilation spike; retain a change only if the three-run p95/max
+remaining guest/host initialization hitch; retain a change only if the three-run p95/max
 startup metrics improve without reducing sustained FPS.
 
 The harness no longer enables shader IR dumps during ordinary performance runs;
@@ -119,7 +119,7 @@ Each item will likely reveal its own issue; handle them as a loop with the harne
 5. **Stage 5 (performance):** 4K output (3840x2160) is heavy on a base M-series GPU while the game
    renders 320x180 internally: add a resolution/present scale option, disable diagnostics
    (`KYTY_FRAME_STATS=0`; the readbacks stall the GPU), keep the Vulkan pipeline cache enabled and
-   investigate persistent shader compilation (62 shaders still compile at startup), profile the CPU
+   investigate persistent shader compilation and guest memory setup, profile the CPU
    side (Rosetta) and the per-draw descriptor/upload costs. Target: >=30 FPS
    average with no stutter above an agreed budget (set it with the user; the mission left [N] unset).
 
