@@ -37,7 +37,9 @@ input-to-present samples from a focused keyboard or controller route, and compar
 * Audible confirmation on the user's selected macOS playback device.
 * A matched input-to-present route using the new keyboard, mouse, and SDL controller timestamps.
 * The 108 unresolved imports (never called in the measured route) remain intentionally deferred.
-* Backups of saves/configs (`_SaveData/` is untracked; copy it before long runs).
+* Keep the local save backup at `harness/backups/animal-well-20261010/` intact;
+  its `MANIFEST.sha256` covers the two save files. No separate repository or
+  standard macOS application-support config was found.
 
 ---------------------------------------------------------------------------------------------------
 

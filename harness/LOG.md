@@ -145,6 +145,14 @@ library. No game-specific diagnosis is valid until this is resolved.
   the mutex and the backend call runs after unlock. This is a static contention
   fix; a matched input latency run is still required to quantify its effect.
 
+## Save backup — 2026-10-10
+
+- Copied `_SaveData/` to the ignored local backup
+  `harness/backups/animal-well-20261010/_SaveData/` before further gameplay
+  testing. `MANIFEST.sha256` records both save-file hashes. No separate Kyty
+  config file was present in the repository or the standard macOS application
+  support location.
+
 ## Shader descriptor trace — 2026-10-09
 
 - The first VS descriptor trace reports valid readable scalar buffers:
