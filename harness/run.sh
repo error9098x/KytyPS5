@@ -47,6 +47,12 @@ args = [exe, "--game", game,
         "--graphics-debug-dump", os.environ.get("KYTY_GRAPHICS_DEBUG_DUMP", "false"),
         "--command-buffer-dump", os.environ.get("KYTY_COMMAND_BUFFER_DUMP", "false"),
         "--command-buffer-dump-folder", str(out_dir / "command-dumps")]
+audio_device = os.environ.get("KYTY_AUDIO_DEVICE")
+if audio_device:
+    args += ["--audio-device", audio_device]
+present_mode = os.environ.get("KYTY_PRESENT_MODE")
+if present_mode:
+    args += ["--present-mode", present_mode]
 started = time.time()
 with log.open("w") as stream:
     proc = subprocess.Popen(args, stdout=stream, stderr=subprocess.STDOUT,

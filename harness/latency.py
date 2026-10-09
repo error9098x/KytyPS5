@@ -6,7 +6,11 @@ import statistics
 import sys
 
 text = (pathlib.Path(sys.argv[1]) / "guest-printf.log").read_text(errors="replace")
-inputs = [int(t) for t in re.findall(r"InputStats:.*?t_us=(\d+)", text)]
+inputs = [int(t) for t in re.findall(r"InputStats:.*?kind=controller_(?:button|axis).*?t_us=(\d+)", text)]
+if not inputs:
+    inputs = [int(t) for t in re.findall(r"InputStats:.*?kind=mouse_button.*?t_us=(\d+)", text)]
+if not inputs:
+    inputs = [int(t) for t in re.findall(r"InputStats:.*?key=\d+.*?t_us=(\d+)", text)]
 # FrameTiming is emitted for every present. FrameStats is an optional sparse
 # diagnostic, so only use it when the per-present stream is unavailable.
 frames = [int(t) for t in re.findall(r"FrameTiming: present=\d+ t_us=(\d+)", text)]
