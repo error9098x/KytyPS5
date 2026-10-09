@@ -261,6 +261,18 @@ library. No game-specific diagnosis is valid until this is resolved.
   the default path. The diagnostic code was reverted; no production behavior
   changed.
 
+## Shared Vulkan pipeline-cache experiment — 2026-10-10
+
+- Upstream [MoltenVK issue #2863](https://github.com/KhronosGroup/MoltenVK/issues/2863)
+  reports that a shared `VkPipelineCache` can
+  serialize SPIR-V-to-MSL conversion and Metal compilation. Kyty therefore
+  tested an opt-in path that passes no driver cache to pipeline creation.
+- Three title probes measured max gaps of `2.791`, `3.037`, and `2.918 s`, with
+  no consistent startup improvement. Three warm gameplay probes measured
+  host-to-present maxima of `46.34`, `35.97`, and `30.53 ms`, including a worse
+  tail than the default path. The switch was rejected and reverted; Kyty keeps
+  its active cache for the validated behavior.
+
 ## Gameplay stability gate — 2026-10-10
 
 - `gameplay-gate-3-20261010`, `gameplay-gate-4-20261010`, and

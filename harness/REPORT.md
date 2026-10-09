@@ -82,6 +82,9 @@ long input-delay reports remain in progress.
   validated target remains x86-64 under Rosetta.
 - An opt-in PM4 submission split was tested and reverted because three runs did
   not improve the startup gap consistently.
+- Omitting the shared Vulkan pipeline cache was tested against the upstream
+  MoltenVK serialization hypothesis and reverted because it did not improve
+  startup and worsened one warm gameplay latency tail to 46 ms.
 
 ## Remaining work
 
