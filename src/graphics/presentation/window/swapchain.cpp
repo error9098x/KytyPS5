@@ -14,6 +14,7 @@
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window/windowInternal.h"
+#include "loader/systemContent.h"
 
 #include <algorithm>
 #include <array>
@@ -33,6 +34,25 @@
 namespace Libs::Graphics {
 
 namespace {
+
+Config::PresentMode EffectivePresentMode() {
+	const auto requested = Config::GetPresentMode();
+#if defined(__APPLE__)
+	// Mailbox adds a presentation queueing interval on MoltenVK. Animal Well's
+	// measured warm input path is materially lower-latency with Immediate; keep
+	// the workaround title-gated and retain an escape hatch for comparisons.
+	if (requested == Config::PresentMode::Mailbox &&
+	    std::getenv("KYTY_PPSA22520_MAILBOX") == nullptr) {
+		std::string title_id;
+		if (Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id) &&
+		    title_id == "PPSA22520") {
+			LOGF("Present mode: using Immediate for PPSA22520 on Apple (set KYTY_PPSA22520_MAILBOX to keep Mailbox)\n");
+			return Config::PresentMode::Immediate;
+		}
+	}
+#endif
+	return requested;
+}
 
 // Diagnostics only: KYTY_FRAME_STATS=1 logs presented-frame statistics, and
 // KYTY_FRAME_DUMP_DIR=<dir> also writes sampled frames as PNG. Neither changes emulation.
@@ -561,7 +581,7 @@ void Swapchain::Create() {
 	create_info.imageSharingMode = vk::SharingMode::eExclusive;
 	create_info.preTransform     = transform;
 	create_info.compositeAlpha   = composite;
-	switch (Config::GetPresentMode()) {
+	switch (EffectivePresentMode()) {
 		case Config::PresentMode::Mailbox:
 			create_info.presentMode = vk::PresentModeKHR::eMailbox;
 			break;
