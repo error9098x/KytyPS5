@@ -99,6 +99,15 @@ library. No game-specific diagnosis is valid until this is resolved.
 - The workaround is title-gated in `pipeline/shaders.cpp`; no global push-descriptor
   behavior changes. The remaining 10 black samples occur during startup/transition.
 
+## Gameplay audio progression — 2026-10-10
+
+- Sending the mapped Cross key (`J`) advances beyond the title artwork and exercises
+  streamed NGS2 sampler audio.
+- The first soak exposed a normal `flags=0x4` block reset while the voice had stopped
+  accepting new blocks. Kyty rejected that reset before clearing the queue.
+- Allowing reset blocks in that state removes the fatal error. A 115-second run with
+  Cross input timed out cleanly (`exit=0`), with no unimplemented or GPU errors.
+
 ## Shader descriptor trace — 2026-10-09
 
 - The first VS descriptor trace reports valid readable scalar buffers:

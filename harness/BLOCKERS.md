@@ -24,6 +24,13 @@ the guest shaders, while ordinary descriptor sets produced the expected title ar
 Kyty now selects ordinary descriptor sets only for `PPSA22520` on Apple hosts.
 Keep the workaround title-gated and validate other titles separately.
 
+## NGS2 streamed-audio reset (fixed)
+
+Gameplay input reaches streamed audio. The game sends an NGS2 block reset
+(`flags=0x4`) after a voice stops accepting blocks; this is a valid queue reset,
+not an invalid block submission. Kyty now accepts that reset transition. A 115-second
+input run completed without a fatal error; repeat longer gameplay soaks next.
+
 ## Internal render-texture chain
 
 The final 4K video pass samples internal 320x180 render textures and completes

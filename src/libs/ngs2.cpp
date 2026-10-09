@@ -2524,7 +2524,8 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 							const Ngs2WaveformBlock* blocks;
 						};
 						const auto& blocks = *reinterpret_cast<const BlocksParam*>(param);
-						EXIT_NOT_IMPLEMENTED(!voice->accepts_blocks ||
+						const bool reset_blocks = (blocks.flags & 0x4u) != 0;
+						EXIT_NOT_IMPLEMENTED((!voice->accepts_blocks && !reset_blocks) ||
 						                     (blocks.flags & ~0x17u) != 0);
 						if ((blocks.flags & 0x4u) != 0) {
 							voice->blocks.clear();
