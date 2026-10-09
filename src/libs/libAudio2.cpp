@@ -404,28 +404,45 @@ static void audioout2_mix_object(AudioOut2ContextState&         context,
 }
 
 static void audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool blocking) {
-	// The backend consumes the buffers synchronously, but can block while pacing SDL's queue.
-	// Keep both PCM storage and port handles alive until it returns.
-	Common::LockGuard lock(g_audioout2_state_mutex);
-	auto*             context = audioout2_find_context_locked(ctx);
-	if (context == nullptr) {
-		return;
+	// Snapshot state before entering the backend. AudioOutOutputs can block while pacing
+	// SDL's queue; holding this mutex across that wait would stall input and port updates.
+	struct QueuedPort {
+		int                    handle = 0;
+		std::vector<uint8_t>   pcm;
+		std::array<float, 16>  gains {};
+	};
+	std::vector<QueuedPort> queued;
+	std::vector<float>      object_mix;
+	int                     object_handle = 0;
+	{
+		Common::LockGuard lock(g_audioout2_state_mutex);
+		auto*             context = audioout2_find_context_locked(ctx);
+		if (context == nullptr) {
+			return;
+		}
+		context->object_mix.clear();
+		queued.reserve(AudioInternal::OUT_PORTS_MAX);
+		for (const auto& state: g_audioout2_ports) {
+			if (!state.used || state.context != ctx || state.pcm_data.empty()) {
+				continue;
+			}
+			if (audioout2_port_type_is_object(state.port_type)) {
+				audioout2_mix_object(*context, state);
+			} else if (state.audio_handle > 0 && queued.size() < AudioInternal::OUT_PORTS_MAX) {
+				queued.push_back(QueuedPort {state.audio_handle, state.pcm_data, state.gains});
+			}
+		}
+		object_mix    = context->object_mix;
+		object_handle = context->object_audio_handle;
 	}
-	context->object_mix.clear();
+
 	std::vector<AudioInternal::OutputParam> params;
-	params.reserve(AudioInternal::OUT_PORTS_MAX);
-	for (const auto& state: g_audioout2_ports) {
-		if (!state.used || state.context != ctx || state.pcm_data.empty()) {
-			continue;
-		}
-		if (audioout2_port_type_is_object(state.port_type)) {
-			audioout2_mix_object(*context, state);
-		} else if (state.audio_handle > 0 && params.size() < AudioInternal::OUT_PORTS_MAX) {
-			params.push_back({state.audio_handle, state.pcm_data.data(), state.gains.data()});
-		}
+	params.reserve(queued.size() + (object_mix.empty() ? 0 : 1));
+	for (auto& port: queued) {
+		params.push_back({port.handle, port.pcm.data(), port.gains.data()});
 	}
-	if (!context->object_mix.empty() && params.size() < AudioInternal::OUT_PORTS_MAX) {
-		params.push_back({context->object_audio_handle, context->object_mix.data()});
+	if (!object_mix.empty() && params.size() < AudioInternal::OUT_PORTS_MAX) {
+		params.push_back({object_handle, object_mix.data()});
 	}
 	if (!params.empty()) {
 		(void)AudioInternal::AudioOutOutputs(params.data(), static_cast<uint32_t>(params.size()),
