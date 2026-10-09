@@ -10,8 +10,8 @@ properly where practical; every compatibility stub must be logged.
 
 ## Baseline environment
 
-- KytyPS5 commit: `4c8fc53a8582543200caa697acad2a9f09937cec` (main,
-  2026-10-09)
+- KytyPS5 commit: `666c92e25e0fbc32f50a91fdd86a7de5d0236c18` (`codex/animal-well-compat`,
+  2026-10-10)
 - Host: macOS 26.5.1, Apple Silicon `Mac17,3`, ARM64, 10 CPU cores, 16 GiB RAM
 - Intended build: x86-64 under Rosetta 2, Vulkan 1.3 through MoltenVK
 - Game package: extracted under `Animal.Well-extracted-unar/`, title ID
@@ -50,6 +50,25 @@ properly where practical; every compatibility stub must be logged.
 7. No Animal Well-specific KytyPS5 compatibility report was found in the
    initial upstream research.
 
+## Current failure chain
+
+1. The Apple/MoltenVK push-descriptor path makes Animal Well resources unusable;
+   the title-gated ordinary-descriptor workaround restores title and gameplay
+   pixels.
+2. NGS2 streamed audio now reaches SDL and the selected playback device. The
+   host was muted at zero volume during diagnosis and was restored to 50%,
+   unmuted; physical audibility still needs user-side confirmation.
+3. The first title-to-gameplay input can trigger first-use shader work, producing
+   roughly one-second host-to-poll/present samples. Warm gameplay probes are
+   generally below 35 ms host-to-present.
+4. Startup retains a repeatable 2.88–2.99 s host GPU gap. Process sampling
+   attributes it to MoltenVK/Metal command encoding and timeline synchronization;
+   Kyty-side shader, direct-memory, PM4-splitting, and tested MoltenVK settings
+   did not improve it.
+5. Fixed-point captures are consistent, but Stage 4 cannot be claimed without an
+   independent PS5/reference capture. The remaining load-time imports have not
+   appeared in a call trace and remain deferred.
+
 The current compatibility inventory is recorded in `BLOCKERS.md` and `LOG.md`:
 the remaining 108 load-time imports are patched stubs with no observed calls in
 the measured route; the Apple descriptor-set and NGS2/audio fixes are title- or
@@ -71,3 +90,6 @@ New stubs must be added to that inventory and traced before implementation.
 - Do not distribute game files, system software, keys, or bypass protections.
 - Do not make unmeasured changes; retain before/after logs.
 - Back up emulator configs and saves before runtime testing.
+- Keep Apple workarounds title-gated (`PPSA22520`) and keep the low-latency
+  presentation override scoped to that title; preserve the default behavior for
+  other games and homebrew.
