@@ -174,10 +174,10 @@ library. No game-specific diagnosis is valid until this is resolved.
   bytes) on all three follow-up probes. The cache is active, but it does not
   remove the initial shader-compilation spike.
 - The harness now defaults shader logging to `Silent`; set
-  `KYTY_SHADER_LOG_DIRECTION=File` for full IR dumps. Three Silent Immediate
-  probes measured 60.05–60.40 FPS median and 2.77–3.94 s max frame gaps, so
-  suppressing diagnostic dumps improves normal harness overhead but does not
-  remove the first-use MoltenVK/scene stall.
+  `KYTY_SHADER_LOG_DIRECTION=File` for full IR dumps. A clean rebuild first
+  invalidated the driver cache; the two subsequent cache-loaded Silent probes
+  measured 60.17–60.44 FPS median with 2.93–3.60 s max gaps. Suppressing
+  diagnostic dumps does not remove the first-use MoltenVK/scene stall.
 
 ## Gameplay stability gate — 2026-10-10
 

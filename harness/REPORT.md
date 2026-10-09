@@ -33,9 +33,10 @@ long input-delay reports remain in progress.
 - Three Immediate-present probes measured 60.31–60.71 FPS median and 19.83–20.34
   ms p95. Startup spikes remained 2.73–3.21 s. The clean Release build now
   loads and saves the PPSA22520 Vulkan pipeline cache.
-- The harness now defaults shader logs to Silent. Three follow-up Silent runs
-  still measured 60.05–60.40 FPS median with 2.77–3.94 s max gaps, confirming
-  the startup stall is not caused primarily by diagnostic file dumping.
+- The harness now defaults shader logs to Silent. After one expected cache
+  invalidation on the new revision, two cache-loaded Silent runs measured
+  60.17–60.44 FPS median with 2.93–3.60 s max gaps, confirming the startup
+  stall is not caused primarily by diagnostic file dumping.
 - Stage 3 is stable across three runs. Fixed-point gameplay screenshot comparison
   remains the Stage 4 gate.
 - Three fixed-point visual probes consistently rendered the gameplay “Wake up”
