@@ -16,8 +16,11 @@ presents 3840x2160 frames at a steady rate. **Every presented frame is 100% blac
 render targets prove the GPU work is not being delivered: draws with valid vertices, a valid
 texture atlas and even a forced solid-magenta pixel shader leave their render targets at exactly
 their clear value. The failure is therefore at (or after) vertex/raster/attachment-store, not in
-asset loading, not in imports, not in the pixel shader's math. The precise root cause is **not yet
-found**; section 7 lists what has been eliminated and `ROADMAP.md` lists the next decisive tests.
+asset loading, not in imports, and not in the pixel shader's math. The root cause was MoltenVK's
+push-descriptor path: Animal Well's descriptor arrays produced unusable storage-buffer/image
+bindings. Selecting ordinary descriptor sets for `PPSA22520` on Apple hosts restores the original
+guest shader resources. Three clean 20-second runs now show the CRT title artwork; section 7 still
+lists follow-up work for menu input, longer stability, and performance.
 
 ---------------------------------------------------------------------------------------------------
 
