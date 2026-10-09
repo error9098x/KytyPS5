@@ -19,6 +19,8 @@ struct Ngs2VoiceState;
 struct Ngs2WaveformFormat;
 struct Ngs2WaveformBlock;
 struct Ngs2WaveformInfo;
+struct Ngs2RackInfo;
+struct Ngs2VoicePortInfo;
 struct Ngs2PanWork;
 struct Ngs2PanParam;
 struct Ngs2GeomListenerParam;
@@ -48,11 +50,14 @@ int KYTY_SYSV_ABI Ngs2RackCreateWithAllocator(uintptr_t system_handle, uint32_t 
                                               const Ngs2BufferAllocator* allocator,
                                               uintptr_t*                 handle);
 int KYTY_SYSV_ABI Ngs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* buffer_info);
+int KYTY_SYSV_ABI Ngs2RackGetInfo(uintptr_t rack_handle, Ngs2RackInfo* info, size_t info_size);
 int KYTY_SYSV_ABI Ngs2RackLock(uintptr_t rack_handle);
 int KYTY_SYSV_ABI Ngs2RackUnlock(uintptr_t rack_handle);
 int KYTY_SYSV_ABI Ngs2RackGetVoiceHandle(uintptr_t rack_handle, uint32_t voice_id,
                                          uintptr_t* handle);
 int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamHeader* param_list);
+int KYTY_SYSV_ABI Ngs2VoiceGetPortInfo(uintptr_t voice_handle, uint32_t port,
+                                       Ngs2VoicePortInfo* info, size_t info_size);
 int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* commands,
                                        size_t num_commands);
 int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* state,
