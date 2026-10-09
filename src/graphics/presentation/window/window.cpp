@@ -25,6 +25,7 @@
 #include "loader/systemContent.h"
 
 #include <cstdlib>
+#include <chrono>
 #include <fmt/format.h>
 #include <memory>
 #include <string>
@@ -323,6 +324,13 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 	}
 
 	if (f.down || f.up) {
+		if (std::getenv("KYTY_INPUT_STATS") != nullptr) {
+			static uint64_t sequence = 0;
+			const auto now = std::chrono::steady_clock::now().time_since_epoch();
+			const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+			LOGF("InputStats: seq=%" PRIu64 " kind=controller_button id=%d button=%d down=%d t_us=%" PRIu64 "\n",
+			     ++sequence, f.id, f.button, f.down ? 1 : 0, static_cast<uint64_t>(micros));
+		}
 		const auto button = ControllerButtonToPadButton(f.button);
 		if (button != 0) {
 			Controller::SetButton(f.id, button, f.down);
@@ -330,6 +338,13 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 	}
 
 	if (f.axis) {
+		if (std::getenv("KYTY_INPUT_STATS") != nullptr) {
+			static uint64_t sequence = 0;
+			const auto now = std::chrono::steady_clock::now().time_since_epoch();
+			const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+			LOGF("InputStats: seq=%" PRIu64 " kind=controller_axis id=%d axis=%d value=%d t_us=%" PRIu64 "\n",
+			     ++sequence, f.id, f.axis_id, f.axis_value, static_cast<uint64_t>(micros));
+		}
 		const auto axis = ControllerAxisFromSdl(f.axis_id);
 		if (axis != Controller::Axis::AxisMax) {
 			Controller::SetAxis(f.id, axis,

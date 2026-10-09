@@ -441,6 +441,14 @@ void HostInputKey(int key_code, bool down) {
 }
 
 void HostInputMouseButton(uint8_t mouse_button, bool down) {
+	if (std::getenv("KYTY_INPUT_STATS") != nullptr) {
+		static uint64_t sequence = 0;
+		const auto now = std::chrono::steady_clock::now().time_since_epoch();
+		const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+		LOGF("InputStats: seq=%" PRIu64 " kind=mouse_button button=%u down=%d t_us=%" PRIu64 "\n",
+		     ++sequence, static_cast<unsigned>(mouse_button), down ? 1 : 0,
+		     static_cast<uint64_t>(micros));
+	}
 	const auto& map = GetInputMap();
 	if (map.Custom() && mouse_button != 0) {
 		SetControl(map.FindMouseButton(mouse_button), down);

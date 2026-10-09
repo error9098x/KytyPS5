@@ -7,7 +7,11 @@ import sys
 
 text = (pathlib.Path(sys.argv[1]) / "guest-printf.log").read_text(errors="replace")
 inputs = [int(t) for t in re.findall(r"InputStats:.*?t_us=(\d+)", text)]
-frames = [int(t) for t in re.findall(r"FrameStats:.*?t_us=(\d+)", text)]
+# FrameTiming is emitted for every present. FrameStats is an optional sparse
+# diagnostic, so only use it when the per-present stream is unavailable.
+frames = [int(t) for t in re.findall(r"FrameTiming: present=\d+ t_us=(\d+)", text)]
+if not frames:
+    frames = [int(t) for t in re.findall(r"FrameStats:.*?t_us=(\d+)", text)]
 delays = []
 for stamp in inputs:
     next_frame = next((frame for frame in frames if frame >= stamp), None)
