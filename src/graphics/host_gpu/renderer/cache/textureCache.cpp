@@ -20,6 +20,7 @@
 #include <array>
 #include <bit>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -1835,6 +1836,74 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uin
 	}
 	m_texture_cache.DownloadImage(image, buffer, buf_offset, copy_size, std::move(transfer));
 	return true;
+}
+
+void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t layer,
+                                         uint64_t vertex_hash, uint64_t pixel_hash) {
+	static const bool enabled = std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr;
+	static const uint64_t address_filter = [] {
+		const char* value = std::getenv("KYTY_INTERNAL_FRAME_ADDRESS");
+		return value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull;
+	}();
+	static uint32_t count = 0;
+	if (!enabled || count >= 100 || !id) return;
+	auto& image = m_slot_images[id];
+	if (address_filter != 0 && image.info.data.address != address_filter) return;
+	const auto sample = ++count;
+	const auto& backing = image.backing;
+	const bool rgba = backing.format == vk::Format::eR8G8B8A8Unorm ||
+	                  backing.format == vk::Format::eR8G8B8A8Srgb ||
+	                  backing.format == vk::Format::eB8G8R8A8Unorm ||
+	                  backing.format == vk::Format::eB8G8R8A8Srgb;
+	if (!rgba || backing.samples != 1 || backing.image_type != vk::ImageType::e2D ||
+	    mip >= backing.mip_levels ||
+	    layer >= backing.layers || backing.image == nullptr) {
+		LOGF("InternalFrameStats: sample=%u skip format=%s samples=%u mip=%u layer=%u\n",
+		     sample, vk::to_string(backing.format).c_str(), image.info.samples, mip, layer);
+		return;
+	}
+	const uint32_t width = std::max(backing.extent.width >> mip, 1u);
+	const uint32_t height = std::max(backing.extent.height >> mip, 1u);
+	const uint64_t pixels = static_cast<uint64_t>(width) * height;
+	if (pixels == 0 || pixels > (64u * 1024u * 1024u) / 4u) {
+		LOGF("InternalFrameStats: sample=%u skip oversized extent=%ux%u\n", sample, width, height);
+		return;
+	}
+	const uint64_t size = pixels * 4;
+	auto& download = m_buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
+	auto [mapped, offset] = download.Map(size, 4);
+	if (mapped == nullptr) {
+		LOGF("InternalFrameStats: sample=%u skip map failed bytes=%" PRIu64 "\n", sample, size);
+		return;
+	}
+	download.Commit();
+	vk::BufferImageCopy copy {};
+	copy.bufferOffset = offset;
+	copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, mip, layer, 1};
+	copy.imageExtent = {width, height, 1};
+	image.Download(std::span {&copy, 1}, download.Handle(), offset, size);
+	vk::BufferMemoryBarrier barrier {};
+	barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+	barrier.dstAccessMask = vk::AccessFlagBits::eHostRead;
+	barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.buffer = download.Handle();
+	barrier.offset = offset;
+	barrier.size = size;
+	m_scheduler.Current().Handle().pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	    vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &barrier, 0, nullptr);
+	m_scheduler.FlushAndWait();
+	download.Invalidate(offset, size);
+	const auto* bytes = static_cast<const uint8_t*>(mapped);
+	uint64_t nonblack = 0, alpha = 0;
+	for (uint64_t i = 0; i < pixels; ++i) {
+		nonblack += bytes[i * 4] != 0 || bytes[i * 4 + 1] != 0 || bytes[i * 4 + 2] != 0;
+		alpha += bytes[i * 4 + 3];
+	}
+	LOGF("InternalFrameStats: sample=%u address=0x%016" PRIx64 " format=%s extent=%ux%u "
+	     "mip=%u layer=%u rgb_nonblack=%.4f%% alpha_avg=%.2f vs=0x%016" PRIx64
+	     " ps=0x%016" PRIx64 "\n", sample, image.info.data.address,
+	     vk::to_string(backing.format).c_str(), width, height, mip, layer,
+	     100.0 * nonblack / pixels, static_cast<double>(alpha) / pixels, vertex_hash, pixel_hash);
 }
 
 bool TextureCache::DownloadImageMemory(ImageId id) {

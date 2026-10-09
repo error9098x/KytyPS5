@@ -19,8 +19,12 @@ if [ ! -d "$game_dir" ]; then
 fi
 
 export KYTY_BORDERLESS=${KYTY_BORDERLESS:-1}
-# Frame stats are always on (cheap). PNG dumps are opt-in: KYTY_FRAME_DUMP=1 (~25 MB per 4K frame).
-export KYTY_FRAME_STATS=1
+# Sampled readbacks stall the GPU; use KYTY_FRAME_STATS=0 for performance runs.
+if [ "${KYTY_FRAME_STATS:-1}" = "0" ]; then
+	unset KYTY_FRAME_STATS
+else
+	export KYTY_FRAME_STATS=1
+fi
 if [ "${KYTY_FRAME_DUMP:-0}" = "1" ]; then
 	mkdir -p "$out_dir/frames"
 	export KYTY_FRAME_DUMP_DIR="$out_dir/frames"
@@ -28,8 +32,8 @@ else
 	unset KYTY_FRAME_DUMP_DIR
 fi
 # Default Vulkan loader for the x86-64 build (override with SDL_VULKAN_LIBRARY).
-if [ -z "${SDL_VULKAN_LIBRARY:-}" ] && [ -f /tmp/mvk-x86/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib ]; then
-	export SDL_VULKAN_LIBRARY=/tmp/mvk-x86/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
+if [ -z "${SDL_VULKAN_LIBRARY:-}" ] && [ -f "$root/harness/tools/MoltenVK-1.4.2/libMoltenVK.dylib" ]; then
+	export SDL_VULKAN_LIBRARY="$root/harness/tools/MoltenVK-1.4.2/libMoltenVK.dylib"
 fi
 python3 - "$build_dir/kyty_emulator" "$game_dir" "$timeout_seconds" "$out_dir" <<'PY'
 import os, pathlib, signal, subprocess, sys, time

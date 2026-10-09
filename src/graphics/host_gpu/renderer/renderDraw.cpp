@@ -1193,6 +1193,13 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
 	}
+	for (uint32_t i = 0; i < state.color_count; ++i) {
+		const auto& color = state.color_info[i];
+		m_context.GetTextureCache().LogInternalFrameStats(
+		    color.image_id, color.desc.view_info.base_level, color.desc.view_info.base_layer,
+		    state.vertex_info[0].stage.program->shader_hash,
+		    state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0);
+	}
 }
 
 void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,

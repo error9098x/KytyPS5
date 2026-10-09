@@ -303,6 +303,88 @@ void TestSubmixerSetupAndRouting() {
 	}
 }
 
+void TestMasteringGainAndInfo() {
+	for (const uint32_t channels: {2u, 6u, 8u}) {
+		Ngs2Internal system;
+		system.option = Ngs2DefaultSystemOption();
+		system.option.num_grain_samples = 4;
+		Ngs2RackOptionUnion sampler_option {}, mastering_option {};
+		Ngs2FillDefaultRackOption(0x1000, &sampler_option);
+		Ngs2FillDefaultRackOption(0x3000, &mastering_option);
+		sampler_option.common.max_voices = 1;
+		sampler_option.common.max_ports = 1;
+		std::memcpy(sampler_option.common.name, "gain fixture", 13);
+		alignas(Ngs2RackInternal) alignas(Ngs2VoiceInternal)
+		    std::byte sampler_storage[sizeof(Ngs2RackInternal) + sizeof(Ngs2VoiceInternal)];
+		alignas(Ngs2RackInternal) alignas(Ngs2VoiceInternal)
+		    std::byte mastering_storage[sizeof(Ngs2RackInternal) + sizeof(Ngs2VoiceInternal)];
+		Ngs2ContextBufferInfo sampler_buffer {sampler_storage, sizeof(sampler_storage)};
+		Ngs2ContextBufferInfo mastering_buffer {mastering_storage, sizeof(mastering_storage)};
+		uintptr_t sampler_handle = 0, mastering_handle = 0;
+		const auto system_handle = reinterpret_cast<uintptr_t>(&system);
+		Check(Ngs2RackCreate(system_handle, 0x1000, &sampler_option.common, &sampler_buffer,
+		                     &sampler_handle) == OK &&
+		          Ngs2RackCreate(system_handle, 0x3000, &mastering_option.common, &mastering_buffer,
+		                         &mastering_handle) == OK, "gain fixture rack creation failed");
+		auto& sampler = *reinterpret_cast<Ngs2VoiceInternal*>(reinterpret_cast<Ngs2RackInternal*>(sampler_handle) + 1);
+		auto& mastering = *reinterpret_cast<Ngs2VoiceInternal*>(reinterpret_cast<Ngs2RackInternal*>(mastering_handle) + 1);
+		mastering.channels = channels;
+		mastering.state = Ngs2VoicePlayState::Playing;
+		std::vector<int16_t> input(4 * channels, 8192);
+		std::vector<float> samples(input.size());
+		Ngs2RenderBufferInfo output {samples.data(), samples.size() * sizeof(float), 0x18, channels};
+		for (const bool scaled: {false, true}) {
+			sampler.SetupSampler({0x12, channels, 48000});
+			sampler.blocks.push_back({reinterpret_cast<const uint8_t*>(input.data()), {0, input.size() * sizeof(int16_t), 0, 0, 4}});
+			sampler.ports[0].dest = &mastering;
+			sampler.SetEvent(1);
+			if (scaled) {
+				Ngs2MasteringVoiceGainParam gain {{16, 0, 0x30000004}, 0.5f, 0.25f};
+				Check(Ngs2VoiceControl(reinterpret_cast<uintptr_t>(&mastering), &gain.header) == OK,
+				      "mastering gain control rejected valid values");
+			}
+			Check(Ngs2SystemRender(system_handle, &output, 1) == OK, "mastering gain render failed");
+			for (size_t n = 0; n < samples.size(); ++n) {
+				const float gain = !scaled ? 1.0f : (channels >= 6 && n % channels == 3 ? 0.25f : 0.5f);
+				Check(std::abs(samples[n] - 0.25f * gain) < 0.000001f,
+				      "mastering output did not preserve unity or apply broadband/LFE gain");
+			}
+			Check(std::abs(mastering.samples[0] - 0.25f) < 0.000001f,
+			      "mastering gain incorrectly modified voice source samples");
+		}
+		Ngs2RackInfo info {};
+		Check(Ngs2RackGetInfo(sampler_handle, &info, sizeof(info)) == OK &&
+		          info.rack_handle == sampler_handle && info.owner_system_handle == system_handle &&
+		          info.buffer_info.host_buffer == sampler_storage && info.rack_id == 0x1000 &&
+		          info.type == 1 && info.max_voices == 1 && info.max_ports == 1 &&
+		          info.render_count == 2 && std::strcmp(info.name, "gain fixture") == 0,
+		      "rack info did not report actual rack configuration and render count");
+		Check(Ngs2RackGetInfo(sampler_handle, nullptr, sizeof(info)) == static_cast<int32_t>(0x804a8010u) &&
+		          Ngs2RackGetInfo(sampler_handle, &info, sizeof(info) - 1) == static_cast<int32_t>(0x804a8011u) &&
+		          Ngs2RackGetInfo(1, &info, sizeof(info)) == static_cast<int32_t>(0x804a8202u),
+		      "rack info failed pointer/size/arbitrary handle validation");
+		Ngs2VoicePortInfo port {};
+		sampler.ports[0].matrix = 2;
+		sampler.ports[0].volume = 0.3f;
+		sampler.ports[0].input = 7;
+		const auto voice_handle = reinterpret_cast<uintptr_t>(&sampler);
+		Check(Ngs2VoiceGetPortInfo(voice_handle, 0, &port, sizeof(port)) == OK &&
+		          port.matrix_id == 2 && port.volume == 0.3f && port.dest_input_id == 7 &&
+		          port.dest_handle == reinterpret_cast<uintptr_t>(&mastering) && port.num_delay_samples == 0,
+		      "voice port info does not match routing");
+		Check(Ngs2VoiceGetPortInfo(voice_handle, 0, nullptr, sizeof(port)) == static_cast<int32_t>(0x804a8010u) &&
+		          Ngs2VoiceGetPortInfo(voice_handle, 0, &port, sizeof(port) - 1) == static_cast<int32_t>(0x804a8011u) &&
+		          Ngs2VoiceGetPortInfo(1, 0, &port, sizeof(port)) != OK &&
+		          Ngs2VoiceGetPortInfo(voice_handle, 1, &port, sizeof(port)) != OK,
+		      "voice port info failed pointer/size/arbitrary handle/port validation");
+		Check(Ngs2RackDestroy(mastering_handle, nullptr) == OK && Ngs2RackDestroy(sampler_handle, nullptr) == OK,
+		      "gain fixture cleanup failed");
+		Check(Ngs2RackGetInfo(sampler_handle, &info, sizeof(info)) != OK &&
+		          Ngs2VoiceGetPortInfo(voice_handle, 0, &port, sizeof(port)) != OK,
+		      "destroyed rack or voice handle remained valid");
+	}
+}
+
 void TestPcm16RenderOutput() {
 	Ngs2Internal system;
 	system.option                   = Ngs2DefaultSystemOption();
@@ -1060,6 +1142,7 @@ void TestFiniteFilterTail() {
 int main() {
 	TestAtrac9Vibration();
 	TestPcm16RenderOutput();
+	TestMasteringGainAndInfo();
 	TestSubmixerSetupAndRouting();
 	TestWaveformBlockGeometry();
 	TestAtrac9ResampleAfterStarvation();

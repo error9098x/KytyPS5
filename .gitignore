@@ -7,3 +7,7 @@ _Build/
 cmake-build-debug/
 _PipelineCache/
 harness/runs/
+harness/backups/
+harness/tools/
+_SaveData/
+harness/__pycache__/
