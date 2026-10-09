@@ -16,8 +16,11 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cinttypes>
 #include <cstring>
+#include <cstdlib>
 #include <vector>
 
 namespace Libs::Controller {
@@ -215,6 +218,17 @@ static void pad_fill_data(PadData* data, const ControllerState& state, bool conn
 	data->timestamp              = state.time;
 	data->connected_count        = static_cast<uint8_t>(std::min(connected_count, 255));
 	data->device_unique_data_len = 0;
+}
+
+static void LogInputPoll(const PadData& data) {
+	if (std::getenv("KYTY_INPUT_STATS") == nullptr) {
+		return;
+	}
+	static uint64_t sequence = 0;
+	const auto now = std::chrono::steady_clock::now().time_since_epoch();
+	const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+	LOGF("InputPoll: seq=%" PRIu64 " buttons=0x%08" PRIx32 " connected=%d t_us=%" PRIu64 "\n",
+	     ++sequence, data.buttons, data.connected ? 1 : 0, static_cast<uint64_t>(micros));
 }
 
 // In cycle order, starting at the PS5 default.
@@ -1131,6 +1145,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	g_controller->ReadState(&state, &connected, &connected_count);
 
 	pad_fill_data(data, state, connected, connected_count);
+	LogInputPoll(*data);
 
 	return OK;
 }
@@ -1164,6 +1179,7 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 	for (int i = 0; i < ret_num; i++) {
 		pad_fill_data(&data[i], states[i], connected, connected_count);
 	}
+	LogInputPoll(data[0]);
 
 	return ret_num;
 }
