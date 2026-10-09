@@ -66,3 +66,12 @@ library. No game-specific diagnosis is valid until this is resolved.
   entries are load-time relocations only in these runs.
 - The lane-zero A/B (`lane-zero-1`) also produced 19/19 all-black samples, so
   changing the vertex fallback lane value did not improve pixels.
+
+## Pixel/resource A/B — 2026-10-09
+
+- `no-pixel-kill-1` produced 33/33 all-black samples; disabling the PS pixel-kill
+  flag is not the cause.
+- `resource-debug-postbuild` shows the final 4K pass samples internal 320x180
+  images (for example `0x0212a70000`) and completes successfully. The black
+  result is upstream in the internal render-texture chain; a separate resource
+  dump records the sampled image descriptors.
