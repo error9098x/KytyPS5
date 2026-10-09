@@ -75,3 +75,14 @@ library. No game-specific diagnosis is valid until this is resolved.
   images (for example `0x0212a70000`) and completes successfully. The black
   result is upstream in the internal render-texture chain; a separate resource
   dump records the sampled image descriptors.
+
+## Internal target readback — 2026-10-09
+
+- `internal-readback-1` read back producing color targets after draws without
+  writing guest memory. Most 8-bit intermediate targets were all-black, but
+  several later targets reached 100% non-black pixels.
+- The final 3840x2160 video target remained `rgb_nonblack=0.0000%` and
+  `alpha_avg=0.00`, despite successful draw completion. This narrows the issue
+  to the final compositing chain or its source texture state.
+- Added `KYTY_INTERNAL_FRAME_ADDRESS` filtering for targeted follow-up runs.
+- Added NGS2 mastering/rack/port regression coverage; `ngs2_sampler` passes.

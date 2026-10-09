@@ -22,3 +22,8 @@ The final 4K video pass samples internal 320x180 render textures and completes
 without Vulkan errors. Pixel-kill and vertex-lane A/B experiments stayed fully
 black. The next investigation must read back or validate the internal texture
 after its producing pass, rather than adding more import stubs blindly.
+
+The readback proves that some intermediate 8-bit targets are non-black while the
+final video target is black. The next fix should trace the final composite source
+and image barriers/format handling, with a targeted non-black readback as the
+keep/revert gate.
