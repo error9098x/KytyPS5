@@ -59,9 +59,11 @@ properly where practical; every compatibility stub must be logged.
 2. NGS2 streamed audio now reaches SDL and the selected playback device. The
    host was muted at zero volume during diagnosis and was restored to 50%,
    unmuted; physical audibility still needs user-side confirmation.
-3. The first title-to-gameplay input can trigger first-use shader work, producing
-   roughly one-second host-to-poll/present samples. Warm gameplay probes are
-   generally below 35 ms host-to-present.
+3. An input arriving before the game begins its first pad poll can coincide with
+   roughly one-second host-to-poll/present samples. Exact traces show queued
+   transitions are drained in order; Metal residency work surrounds the first
+   poll, while shader compilation begins afterward. Post-initialization probes
+   are generally below 35 ms host-to-present.
 4. Startup retains a repeatable 2.88–2.99 s host GPU gap. Process sampling
    attributes it to MoltenVK/Metal command encoding and timeline synchronization;
    Kyty-side shader, direct-memory, PM4-splitting, and tested MoltenVK settings

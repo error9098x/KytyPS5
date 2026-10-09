@@ -330,9 +330,11 @@ library. No game-specific diagnosis is valid until this is resolved.
   button update, allowing the harness to measure when the guest actually sees a
   transition rather than only when it calls the pad API.
 - Three warm probes measured host-to-next-present median/p95/max of
-  `8.94/22.68/28.62`, `9.12/26.16/32.93`, and `10.46/27.34/35.00` ms. Their
-  guest-poll p95 values were `19.19`, `18.64`, and `19.39` ms, with one
-  `225.54` ms poll gap. These are the steady-state results after startup.
+  `12.84/49.43/97.98`, `9.47/28.20/32.19`, and `8.33/27.23/30.91` ms after
+  exact-state telemetry was added. The first still overlapped residual startup;
+  the other two stayed below 31 ms. Guest-poll p95 values were `41.42`,
+  `19.12`, and `19.29` ms. These runs support a warm steady-state baseline,
+  but do not prove that every startup transition is free of hitches.
 - The short startup probe reproduced host-to-observed-button maxima of about
   `945` ms and host-to-present maxima of about `1.07` s. The guest then drained
   the queued button transitions in order. This points to the guest/render
@@ -348,12 +350,21 @@ library. No game-specific diagnosis is valid until this is resolved.
   `KYTY_INPUT_PROBE_INTERVAL_MS`, and `KYTY_INPUT_PROBE_HOLD_MS` tune it; the
   default key is `J` and the first event is delayed by 2 seconds.
 - One 30-second immediate-present run with the default start contained
-  title-to-gameplay host-to-present samples of `1187.4`, `668.2`, and `232.2` ms.
-  Matching guest-poll samples were `1006.0`, `671.1`, and `486.8` ms. A fresh
-  trace with the new state telemetry measured a `945` ms maximum to the guest
-  observing the button and a `1.07` s maximum to the next present. The first
-  transition loads and compiles a large shader batch, which is the concrete
-  source of the roughly one-second host-path samples.
+  host-to-present samples of `1187.4`, `668.2`, and `232.2` ms. Matching
+  guest-poll samples were `1006.0`, `671.1`, and `486.8` ms. Exact-state traces
+  measured about `1.07` s to the guest observing the button and to the next
+  present. The delay starts before the first pad poll; Metal residency work is
+  active around `vkQueueSubmit`, while shader compilation begins afterward.
+  The cause is therefore an initialization/render-thread stall, not proven
+  shader compilation on the input path.
+
+## MoltenVK residency A/B — 2026-10-10
+
+- `MVK_CONFIG_USE_MTLHEAP=0` was tested against the default heap path. One
+  clean 12-second probe regressed host-to-present median/p95/max to
+  `318.6/2376.9/2394.4` ms, host-to-guest-poll to
+  `306.1/2142.8/2160.3` ms, host-to-observed-button max to `4140.8` ms, and
+  startup max to `3810` ms. The setting is rejected and was not retained.
 - Three 35-second runs with the first probe event delayed to 10 seconds measured
   warm host-to-present median/p95/max of `8.94/22.68/28.62 ms`,
   `9.12/26.16/32.93 ms`, and `10.46/27.34/35.00 ms`. Guest-poll p95 was

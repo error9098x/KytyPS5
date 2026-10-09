@@ -1211,7 +1211,7 @@ void Presenter::Impl::Present() {
 				}
 			}
 		}
-		LogPresentTiming("record_submit", timing_n, record_start);
+		LogPresentTiming("lock_record_submit", timing_n, record_start);
 		if (rb.buffer != VK_NULL_HANDLE) {
 			present_scheduler.Wait(rb_tick);
 			vmaInvalidateAllocation(window.graphic_ctx.allocator, rb.allocation, 0, VK_WHOLE_SIZE);

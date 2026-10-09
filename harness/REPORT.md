@@ -26,18 +26,20 @@ long input-delay reports remain in progress.
   telemetry samples. Physical audibility still cannot be verified by logs alone.
 - AudioOut2 now releases its state mutex before the potentially blocking SDL
   pacing call; a matched latency run is still needed to quantify the effect.
-- Three warm focused input probes now measure host-to-guest-poll,
-  host-to-observed-button, and host-to-next-present timing. Their warm
-  host-to-present maxima were 28.62–35.00 ms, with guest-poll p95 values below
-  20 ms; the harness also reports the count of samples over 40, 100, and 500 ms.
+- Three focused input probes now measure host-to-guest-poll,
+  host-to-observed-button, and host-to-next-present timing. Two runs started
+  after initialization and stayed below 31 ms host-to-present maximum; the
+  first still overlapped startup and reached 98 ms. The harness reports the
+  count of samples over 40, 100, and 500 ms.
 - The deterministic input probe reproduces roughly one-second host-to-poll and
-  host-to-present samples only during the title-to-gameplay transition, where
-  first-use shader compilation blocks input polling and presentation. The new
-  state trace measured about 945 ms to the guest observing the button and about
-  1.07 s to the next present; the queued transitions are then drained in order.
-  This identifies the hitch as a guest/render-thread stall rather than a lost
-  host event. Visible-state response is still unmeasured, so the transition
-  hitch remains open for a prewarm or asynchronous shader-compilation fix.
+  host-to-present samples when the probe fires before the game has begun its
+  first pad poll. The exact state trace measured about 1.07 s to the guest
+  observing the button and to the next present; the queued transitions are
+  then drained in order. This identifies an initialization/render-thread stall
+  rather than a lost host event. Sampling shows Metal residency work around
+  `vkQueueSubmit`; shader compilation begins after the first pad poll, so a
+  shader-prewarm fix is not yet justified. Visible-state response remains
+  unmeasured.
 - Frame pacing probe: median 16.91 ms / 59.12 FPS, p95 33.37 ms; startup guest
   initialization produced a 2.96 s outlier.
 - Three Immediate-present probes measured 60.31–60.71 FPS median and 19.83–20.34
@@ -91,6 +93,9 @@ long input-delay reports remain in progress.
   after a 5.12 s startup regression in one of three runs.
 - Asynchronous MoltenVK queue submission was tested and rejected because it did
   not improve startup or warm gameplay latency.
+- MoltenVK `MVK_CONFIG_USE_MTLHEAP=0` was tested as an environment-only A/B and
+  rejected after one clean probe regressed host-to-present to 2.4 seconds,
+  host-to-observed-button to 4.1 seconds, and startup max to 3.8 seconds.
 
 ## Remaining work
 

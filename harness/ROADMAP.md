@@ -64,8 +64,9 @@ The remaining work is outside the basic render path:
 3. Three marked Cross-input gameplay soaks reached 10 minutes cleanly and pass
    the machine-checked Stage 3 gate.
 4. The deterministic synthetic input probe now supplies matched host, guest-poll,
-   and present samples without a focused controller. Warm p95 is below 28 ms;
-   title-to-gameplay first-use shader work remains a hitch.
+   observed-button, and present samples without a focused controller. Two
+   post-initialization runs stayed below 31 ms host-to-present maximum; the
+   pre-poll initialization hitch remains a separate blocker.
 5. Fixed-point screenshot/reference comparison is still needed for visual stage 4.
 
 ---------------------------------------------------------------------------------------------------

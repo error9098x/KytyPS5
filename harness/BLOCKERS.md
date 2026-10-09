@@ -43,12 +43,12 @@ harness keeps these probes opt-in.
 The first frame-timing probe measured a 59.12 FPS median with a 33.37 ms p95 and
 a 2.96 s startup outlier. Three focused probes now measure host-to-guest-poll and
 host-to-present timing. The deterministic probe reproduces roughly one-second
-host-path samples only
-while the first input transitions from the title to gameplay; the log shows a
-batch of first-use pixel-shader compilation in that window. Warm immediate-present
-runs stay below 35 ms host-to-present maximum, with one 225 ms guest-poll outlier.
-Prewarming or moving those first-use compilations off the input/render path remains
-unresolved.
+host-path samples when the first synthetic input arrives before the game has
+begun its first pad poll. Exact-state traces show the queued transitions are
+drained in order. Sampling places Metal residency work around `vkQueueSubmit`
+before/around the first poll; shader compilation begins afterward, so prewarming
+is not yet justified as the fix. Two of three new post-initialization probes stay
+below 31 ms host-to-present maximum; the first still overlaps startup.
 
 The startup-only 2.88–2.99 s gap is separately characterized by a macOS process
 sample: MoltenVK/Metal command encoding (`beginRendering`, image clears, and draws)
@@ -56,7 +56,9 @@ and timeline-semaphore waits dominate the host GPU thread while the guest execut
 `AgcSuspendPoint` itself waits only 25.5 ms initially and 8–18 ms afterward. A
 guest barrier bypass is therefore not justified without a rendering-correctness
 test. MoltenVK `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1` was also tested in
-three runs and did not reduce the gap, so it remains disabled.
+three runs and did not reduce the gap, so it remains disabled. Disabling Metal
+heaps (`MVK_CONFIG_USE_MTLHEAP=0`) caused multi-second latency regression and was
+rejected.
 Controller, axis, mouse, and keyboard events are now timestamped. AudioOut2 also
 releases its state mutex before the potentially blocking SDL queue call.
 
