@@ -12,8 +12,8 @@ Acceptance stages (from the mission): 1 first frame, 2 title/menu, 3 gameplay 10
 |---|---|---|
 | Build + launch on macOS (x86-64/Rosetta + MoltenVK) | **Done** | `run.sh` runs reproducibly |
 | Boot without crash, assets load, game logic runs | **Done** | 60-90 s runs, no crash; atlas readback perfect; sprites animate |
-| 1. First frame presented | **Reached, but content is black** | >=540 presents/45 s, every sampled frame 100% black (4K) |
-| 2. Title / menu visible | **Not reached** | nothing visible |
+| 1. First frame presented | **Done** | Three clean 20 s runs: 27 sampled frames each, 17 with content |
+| 2. Title / menu visible | **Reached** | Captured 3840x2160 frame visibly shows Animal Well CRT title artwork |
 | 3-5 | Not started | blocked by 2 |
 
 So: stage 1 is technically met (frames are presented, no crash) but fails "visually"; the whole
@@ -31,7 +31,7 @@ failure lies in a narrow band (section 2).
 * Docs: `SPEC.md`, `LOG.md`, `BLOCKERS.md`, `ANALYSIS.md`, this file.
 
 ### Not done
-* Root cause of black output; any stage >= 2.
+* Gameplay input/menu progression; any stage >= 3.
 * Reviewer-subagent pass on the NGS2 and shader diffs (only the Vulkan-feature diff was reviewed).
 * `REPORT.md` final report; performance work; input; the 109 unresolved imports (never called so far).
 * Backups of saves/configs (`_SaveData/` is untracked; copy it before long runs).
