@@ -39,16 +39,22 @@ properly where practical; every compatibility stub must be logged.
    features before game loading (`image view minLod`, buffer int64 atomics,
    cull distance).
 4. After the Apple capability fallback, the game reaches NGS2 audio and then
-   the first graphics pipelines. NGS2 gain (`0x30000004`) and two missing NGS2
-   exports were implemented from public ABI evidence.
-5. The first vertex pipeline then fails on MoltenVK's inability to compile a
+   the first graphics pipelines. NGS2 gain (`0x30000004`) and the missing
+   rack/voice query exports were implemented from public ABI evidence.
+6. The first vertex pipeline then fails on MoltenVK's inability to compile a
    subgroup builtin in a vertex function. A PPSA22520-only Apple fallback uses
-   `gl_VertexIndex` as the subgroup lane value in vertex stages; three 30-second runs remain
-   alive past pipeline creation, pending visual confirmation.
-3. Upstream documentation identifies macOS as experimental and expects the
+   `gl_VertexIndex` as the subgroup lane value in vertex stages; title artwork is
+   now visible under the descriptor-set workaround.
+7. Upstream documentation identifies macOS as experimental and expects the
    x86-64/Rosetta + MoltenVK path.
-4. No Animal Well-specific KytyPS5 compatibility report was found in the
+8. No Animal Well-specific KytyPS5 compatibility report was found in the
    initial upstream research.
+
+The current compatibility inventory is recorded in `BLOCKERS.md` and `LOG.md`:
+the remaining 108 load-time imports are patched stubs with no observed calls in
+the measured route; the Apple descriptor-set and NGS2/audio fixes are title- or
+path-specific, with NGS2 unit coverage and runtime title-art/audio evidence.
+New stubs must be added to that inventory and traced before implementation.
 
 ## Acceptance stages
 

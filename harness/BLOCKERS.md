@@ -31,7 +31,7 @@ Gameplay input reaches streamed audio. The game sends an NGS2 block reset
 not an invalid block submission. Kyty now accepts that reset transition. A 115-second
 input run completed without a fatal error; repeat longer gameplay soaks next.
 
-## Audio output (fixed; latency still to measure)
+## Audio output (fixed; host audibility and latency still to measure)
 
 The audio path was initially silent even though SDL queued blocks. Opt-in signal
 telemetry showed zero NGS2 output, caused by an unresolved voice-info export and
@@ -42,7 +42,9 @@ timestamp probe.
 
 The first frame-timing probe measured a 59.12 FPS median with a 33.37 ms p95 and
 a 2.96 s startup outlier. A matched input-to-present sample still requires a
-focused emulator window, so latency is not yet characterized.
+focused emulator window or SDL controller event, so latency is not yet characterized.
+Controller, axis, mouse, and keyboard events are now timestamped. AudioOut2 also
+releases its state mutex before the potentially blocking SDL queue call.
 
 ## Internal render-texture chain
 

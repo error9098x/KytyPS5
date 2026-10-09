@@ -12,9 +12,12 @@ remain in progress.
 - One 10-minute gameplay soak after scripted Cross input: timed out cleanly at
   600 seconds with no fatal, GPU, or unimplemented errors.
 - NGS2 sampler tests and shader configuration tests pass.
-- Audio telemetry has captured nonzero NGS2 and SDL samples in a successful route
-  probe (SDL RMS 0.106–0.283, peaks up to 0.56). The current opt-in probe reports
-  exact signal and queue levels.
+- Input-driven probes `audio-probe-order` and `audio-probe-reverb` captured
+  nonzero NGS2 and SDL samples after startup (SDL RMS 0.106–0.283, peaks up to
+  0.56). Title-only probes remain silent. The opt-in harness now reports these
+  streams separately; speaker audibility is still unconfirmed.
+- AudioOut2 now releases its state mutex before the potentially blocking SDL
+  pacing call; a matched latency run is still needed to quantify the effect.
 - Frame pacing probe: median 16.91 ms / 59.12 FPS, p95 33.37 ms; startup shader
   compilation produced a 2.96 s outlier.
 
@@ -27,7 +30,8 @@ remain in progress.
 
 ## Remaining work
 
-- Capture matched input-to-present samples with the emulator window focused.
+- Capture matched input-to-present samples with a focused keyboard or SDL
+  controller route; automated runs with no delivered input remain unmeasured.
 - Confirm audible output on the user's selected macOS playback device.
 - Compare fixed-point screenshots against a reference and remove major visual defects.
 - Reduce startup shader stutter and measure sustained gameplay performance.

@@ -72,4 +72,5 @@ python3 "$root/harness/scan_log.py" "$out_dir/kyty.log" "$out_dir/guest-printf.l
 python3 "$root/harness/stage.py" "$out_dir" >> "$out_dir/scan.txt"
 python3 "$root/harness/latency.py" "$out_dir" >> "$out_dir/scan.txt"
 python3 "$root/harness/fps.py" "$out_dir" >> "$out_dir/scan.txt"
+python3 "$root/harness/audio.py" "$out_dir" >> "$out_dir/scan.txt"
 cat "$out_dir/scan.txt"

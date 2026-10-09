@@ -1,6 +1,6 @@
 # Animal Well on KytyPS5: progress, where to continue, and what it takes to finish
 
-Status date: 2026-10-09. Read `harness/ANALYSIS.md` first for how everything works and the evidence.
+Status date: 2026-10-10. Read `harness/ANALYSIS.md` first for how everything works and the evidence.
 Acceptance stages (from the mission): 1 first frame, 2 title/menu, 3 gameplay 10 min,
 4 visually correct, 5 performance (>=30 FPS, no shader stutter spikes).
 
@@ -14,12 +14,14 @@ Acceptance stages (from the mission): 1 first frame, 2 title/menu, 3 gameplay 10
 | Boot without crash, assets load, game logic runs | **Done** | 60-90 s runs, no crash; atlas readback perfect; sprites animate |
 | 1. First frame presented | **Done** | Three clean 20 s runs: 27 sampled frames each, 17 with content |
 | 2. Title / menu visible | **Reached** | Captured 3840x2160 frame visibly shows Animal Well CRT title artwork |
-| 3-5 | Not started | blocked by 2 |
+| 3. Gameplay stability | **Measured once** | One 10-minute Cross-input soak ended cleanly; repeat twice |
+| 4. Visual correctness | **Pending** | Need fixed-point reference captures and image diffs |
+| 5. Performance | **Baseline only** | 59.12 FPS median in one timing run; startup and p95 spikes remain |
 
-So: stage 1 is technically met (frames are presented, no crash) but fails "visually"; the whole
-GPU->screen path delivers nothing. We have **not** yet found the root cause. Everything between
-"game submits valid draws" and "pixels in a render target" has now been measured, and the
-failure lies in a narrow band (section 2).
+The original black-frame failure is fixed for PPSA22520 on Apple hosts by selecting ordinary
+descriptor sets instead of MoltenVK push descriptors. The remaining work is quality and
+measurement: repeat the gameplay soak, verify audio on the selected host device, obtain matched
+input-to-present samples from a focused keyboard or controller route, and compare screenshots.
 
 ### Done, committed
 * Apple/MoltenVK device-feature gating (3 missing features made optional, with explicit errors).
@@ -31,9 +33,10 @@ failure lies in a narrow band (section 2).
 * Docs: `SPEC.md`, `LOG.md`, `BLOCKERS.md`, `ANALYSIS.md`, this file.
 
 ### Not done
-* Gameplay input/menu progression; any stage >= 3.
-* Reviewer-subagent pass on the NGS2 and shader diffs (only the Vulkan-feature diff was reviewed).
-* `REPORT.md` final report; performance work; input; the 109 unresolved imports (never called so far).
+* Two more 10-minute gameplay soaks, fixed-point visual comparisons, and sustained performance work.
+* Audible confirmation on the user's selected macOS playback device.
+* A matched input-to-present route using the new keyboard, mouse, and SDL controller timestamps.
+* The 108 unresolved imports (never called in the measured route) remain intentionally deferred.
 * Backups of saves/configs (`_SaveData/` is untracked; copy it before long runs).
 
 ---------------------------------------------------------------------------------------------------

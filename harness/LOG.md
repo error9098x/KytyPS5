@@ -116,8 +116,10 @@ library. No game-specific diagnosis is valid until this is resolved.
   (8-byte channel info), resolving the repeated NGS2 stub calls.
 - The NGS2 render graph now initializes the game's stereo reverb node, renders
   non-master voices before mastering sinks, and emits custom-mastering voices.
-- A successful probe recorded nonzero NGS2 and SDL levels (SDL RMS `0.106`–`0.283`,
-  peaks up to `0.56`). Audio telemetry remains opt-in.
+- Input-driven probes `audio-probe-order` and `audio-probe-reverb` recorded
+  nonzero NGS2 and SDL levels after startup (SDL RMS `0.106`–`0.283`, peaks up
+  to `0.56`). Title-only probes remain silent. Audio telemetry remains opt-in,
+  and the harness now reports both signal streams as `[audio]`.
 - Restored the full NGS2 PCM output-mix/writeback path that had been lost during
   an earlier diagnostic edit; this is required for the nonzero SDL samples.
 
@@ -131,6 +133,17 @@ library. No game-specific diagnosis is valid until this is resolved.
 - `KYTY_FRAME_TIMING=1` adds per-present timestamps without frame readbacks;
   `harness/fps.py` reports pacing. A 10-second probe measured median 16.91 ms
   (59.12 FPS), p95 33.37 ms, with a 2.96 s startup/shader outlier.
+- Controller buttons, controller axes, and mouse buttons now use the same
+  monotonic `InputStats` clock. A follow-up automated keyboard probe produced
+  no input events, so it correctly reported no matched samples rather than
+  inventing a latency value; repeat with a focused SDL controller route.
+
+## Audio queue contention — 2026-10-10
+
+- AudioOut2 previously held its global state mutex while `AudioOutOutputs`
+  paced SDL audio. PCM, gains, and object-mix data are now snapshotted under
+  the mutex and the backend call runs after unlock. This is a static contention
+  fix; a matched input latency run is still required to quantify its effect.
 
 ## Shader descriptor trace — 2026-10-09
 
