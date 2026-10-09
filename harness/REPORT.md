@@ -72,6 +72,8 @@ long input-delay reports remain in progress.
 - Startup profiling attributes the repeated 2.88–2.99 s gap to first-use
   MoltenVK/Metal command encoding and timeline synchronization; no unsafe
   synchronization workaround was retained.
+- MoltenVK command-buffer prefill was tested in three environment-only runs and
+  rejected because it did not reduce the startup gap.
 
 ## Remaining work
 
