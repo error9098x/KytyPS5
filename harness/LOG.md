@@ -104,7 +104,7 @@ library. No game-specific diagnosis is valid until this is resolved.
 - Vertex shader `0002_new_shader_vs_cdcf88828e5c2df8` uses the lane ID only as
   `(0xFFFFFFFF >> (lane & 31)) & 1`, which is always 1, so the `gl_VertexIndex` fallback is
   behaviourally harmless for this shader. Theory demoted.
-- New leading suspect: the shader reads position data from storage buffers with bounds checks
+- ~~New leading suspect~~ (REJECTED by the descriptor trace above: scalar buffers are valid and readable): the shader reads position data from storage buffers with bounds checks
   that return 0 when out of range. All-zero positions trigger the "zero-position clip guard"
   (spirvEmitterFlow.cpp), which clips the primitive. Not yet tested.
 - Next experiments (each with 3 runs, compare `[frames]`): (a) env-gated disable of the clip guard,
