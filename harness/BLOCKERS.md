@@ -55,7 +55,8 @@ sample: MoltenVK/Metal command encoding (`beginRendering`, image clears, and dra
 and timeline-semaphore waits dominate the host GPU thread while the guest executes.
 `AgcSuspendPoint` itself waits only 25.5 ms initially and 8–18 ms afterward. A
 guest barrier bypass is therefore not justified without a rendering-correctness
-test.
+test. MoltenVK `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1` was also tested in
+three runs and did not reduce the gap, so it remains disabled.
 Controller, axis, mouse, and keyboard events are now timestamped. AudioOut2 also
 releases its state mutex before the potentially blocking SDL queue call.
 

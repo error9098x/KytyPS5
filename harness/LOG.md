@@ -229,6 +229,11 @@ library. No game-specific diagnosis is valid until this is resolved.
   blocker is host-side first-use Metal/MoltenVK command encoding and GPU
   synchronization; changing guest barriers without a correctness proof would
   risk rendering and gameplay stability.
+- Tested MoltenVK's documented `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1`
+  as an environment-only A/B change. Three runs measured max gaps of `2.929`,
+  `2.967`, and `2.871 s` with median FPS `60.17`, `60.41`, and `60.44`, which
+  is indistinguishable from the default path. The setting was rejected and is
+  not enabled by Kyty.
 
 ## Gameplay stability gate — 2026-10-10
 
