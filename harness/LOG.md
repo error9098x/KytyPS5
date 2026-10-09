@@ -280,8 +280,12 @@ library. No game-specific diagnosis is valid until this is resolved.
   [KhronosGroup/MoltenVK#2863](https://github.com/KhronosGroup/MoltenVK/issues/2863).
 - Three Kyty startup probes using only `SDL_VULKAN_LIBRARY` redirection measured
   max gaps of `5.117`, `2.924`, and `2.958 s`. The first run regressed badly and
-  the other two were indistinguishable from the bundled 1.4.2 path. The custom
-  dylib is not selected by the harness; the bundled runtime remains validated.
+  the other two were indistinguishable from the bundled 1.4.2 path. The tested
+  artifact was `_Build/MoltenVK-upstream/Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib`,
+  built from upstream commit `67b2682699d7903606b97a0392061d85d27d49e6`,
+  SHA-256 `ab9893f6aa1e6de5f02aea09c572aec26f2c10878ed3f4efa70ed0a044581929`.
+  The custom dylib is not selected by the harness; the bundled runtime remains
+  validated.
 
 ## MoltenVK asynchronous submission experiment — 2026-10-10
 
