@@ -108,6 +108,17 @@ library. No game-specific diagnosis is valid until this is resolved.
 - Allowing reset blocks in that state removes the fatal error. A 115-second run with
   Cross input timed out cleanly (`exit=0`), with no unimplemented or GPU errors.
 
+## Audio signal and graph fix — 2026-10-10
+
+- `KYTY_AUDIO_STATS=1` measured the complete path: SDL opened 48 kHz streams and
+  queued blocks, but both NGS2 output and SDL RMS were exactly zero.
+- The missing NGS2 `sceNgs2VoiceQueryInfo` export was implemented for info `0x4001`
+  (8-byte channel info), resolving the repeated NGS2 stub calls.
+- The NGS2 render graph now initializes the game's stereo reverb node, renders
+  non-master voices before mastering sinks, and emits custom-mastering voices.
+- A successful probe recorded nonzero NGS2 and SDL levels (SDL RMS `0.106`–`0.283`,
+  peaks up to `0.56`). Audio telemetry remains opt-in.
+
 ## Shader descriptor trace — 2026-10-09
 
 - The first VS descriptor trace reports valid readable scalar buffers:

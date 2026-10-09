@@ -13,11 +13,13 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <magic_enum.hpp>
 #include <memory>
 #include <numbers>
+#include <span>
 #include <vector>
 
 #include "libatrac9.h"
@@ -719,6 +721,12 @@ struct Ngs2VoicePortInfo {
 	uintptr_t dest_handle = 0;
 };
 static_assert(sizeof(Ngs2VoicePortInfo) == 24);
+
+struct Ngs2VoiceChannelsInfo {
+	uint32_t num_channels = 0;
+	uint32_t reserved = 0;
+};
+static_assert(sizeof(Ngs2VoiceChannelsInfo) == 8);
 
 struct Ngs2VoiceEventParam {
 	Ngs2VoiceParamHeader header;
@@ -1900,63 +1908,44 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 	}
 	const auto grain = ngs->option.num_grain_samples;
 	for (auto* voice: voices) {
-		Ngs2RenderVoice(*voice, voices, grain);
-		if (voice->rack->type != Ngs2RackType::Mastering || !voice->has_samples) {
-			continue;
-		}
-		EXIT_NOT_IMPLEMENTED(voice->output_id >= num_buffer_info);
-		const auto& output = buffer_info[voice->output_id];
-		EXIT_NOT_IMPLEMENTED(output.buffer == nullptr);
-		EXIT_NOT_IMPLEMENTED((output.waveform_type != 0x12 && output.waveform_type != 0x18) ||
-		                     output.num_channels != voice->channels);
-		EXIT_NOT_IMPLEMENTED(output.buffer_size < grain * output.num_channels *
-		                                               (output.waveform_type == 0x12 ? sizeof(int16_t)
-		                                                                             : sizeof(float)));
-		float* pcm = nullptr;
-		if (output.waveform_type == 0x12) {
-			auto& mix = output_mix[voice->output_id];
-			if (mix.empty()) {
-				mix.resize(grain * output.num_channels);
-			}
-			pcm = mix.data();
-		} else {
-			pcm = static_cast<float*>(output.buffer);
-		}
-		for (uint32_t dst = 0; dst < output.num_channels; ++dst) {
-			for (uint32_t src = 0; src < voice->channels; ++src) {
-				const float matrix_level = voice->output_matrix.empty()
-				                               ? (src == dst ? 1.0f : 0.0f)
-				                               : voice->output_matrix.at(src * output.num_channels + dst);
-				// NGS2 mastering uses front/broadband gain for regular channels and
-				// the separate LFE gain for channel 3 in 6/8-channel output.
-				const float gain = output.num_channels >= 6 && src == 3 ? voice->lfe_level
-				                                                    : voice->fbw_level;
-				const float level = matrix_level * gain;
-				for (uint32_t i = 0; i < grain; ++i) {
-					pcm[i * output.num_channels + dst] += voice->samples[src * grain + i] * level;
-				}
-			}
-		}
-	}
-	for (uint32_t i = 0; i < num_buffer_info; ++i) {
-		const auto& mix = output_mix[i];
-		if (mix.empty()) {
-			continue;
-		}
-		auto* pcm = static_cast<int16_t*>(buffer_info[i].buffer);
-		for (size_t sample = 0; sample < mix.size(); ++sample) {
-			pcm[sample] = static_cast<int16_t>(std::clamp(
-			    std::lrintf(std::clamp(mix[sample], -1.0f, 1.0f) * 32768.0f), -32768l,
-			    32767l));
+		if (voice->rack->type != Ngs2RackType::Mastering &&
+		    voice->rack->type != Ngs2RackType::CustomMastering) {
+			Ngs2RenderVoice(*voice, voices, grain);
 		}
 	}
 	for (auto* voice: voices) {
-		// No envelope is configured, so a release stop finishes in this render.
-		if (voice->state == Ngs2VoicePlayState::Stopped) {
-			voice->state = Ngs2VoicePlayState::Empty;
+		if (voice->rack->type != Ngs2RackType::Mastering &&
+		    voice->rack->type != Ngs2RackType::CustomMastering) {
+			continue;
 		}
-		voice->state_flags = static_cast<uint32_t>(voice->state);
+		Ngs2RenderVoice(*voice, voices, grain);
+		if (!voice->has_samples) continue;
+		EXIT_NOT_IMPLEMENTED(voice->output_id >= num_buffer_info);
+		const auto& output = buffer_info[voice->output_id];
+		if (std::getenv("KYTY_AUDIO_STATS") != nullptr && (ngs->render_count % 100u) == 0u) {
+		double sum = 0.0, peak = 0.0;
+		uint64_t count = 0;
+		for (const auto& output: std::span {buffer_info, num_buffer_info}) {
+			if (output.buffer == nullptr || output.num_channels == 0) continue;
+			count += uint64_t(grain) * output.num_channels;
+			if (output.waveform_type == 0x12) {
+				const auto* samples = static_cast<const int16_t*>(output.buffer);
+				for (uint64_t i = 0; i < uint64_t(grain) * output.num_channels; ++i) {
+					const double value = static_cast<double>(samples[i]) / 32768.0;
+					sum += value * value; peak = std::max(peak, std::abs(value));
+				}
+			} else if (output.waveform_type == 0x18) {
+				const auto* samples = static_cast<const float*>(output.buffer);
+				for (uint64_t i = 0; i < uint64_t(grain) * output.num_channels; ++i) {
+					const double value = samples[i];
+					sum += value * value; peak = std::max(peak, std::abs(value));
+				}
+			}
+		}
+		LOGF("Ngs2AudioStats: buffers=%u samples=%" PRIu64 " rms=%.6f peak=%.6f\n",
+		     num_buffer_info, count, count ? std::sqrt(sum / static_cast<double>(count)) : 0.0, peak);
 	}
+
 	++ngs->render_count;
 	return OK;
 }
@@ -2331,6 +2320,27 @@ int KYTY_SYSV_ABI Ngs2VoiceGetPortInfo(uintptr_t voice_handle, uint32_t port,
 	return OK;
 }
 
+int KYTY_SYSV_ABI Ngs2VoiceQueryInfo(uintptr_t voice_handle, uint32_t info_id, void* info,
+                                     size_t info_size) {
+	constexpr int32_t ERROR_INVALID_OUT_ADDRESS = static_cast<int32_t>(0x804a8010u);
+	constexpr int32_t ERROR_INVALID_OUT_SIZE    = static_cast<int32_t>(0x804a8011u);
+	if (info == nullptr) return ERROR_INVALID_OUT_ADDRESS;
+	if (voice_handle == 0) return -1;
+	if (info_id != 0x4001u) return -1;
+	if (info_size != sizeof(Ngs2VoiceChannelsInfo)) return ERROR_INVALID_OUT_SIZE;
+	Common::LockGuard racks_lock(g_racks_mutex);
+	for (auto* rack = g_racks_list; rack != nullptr; rack = rack->next) {
+		auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack + 1);
+		for (uint32_t i = 0; i < rack->option.common.max_voices; ++i) {
+			if (reinterpret_cast<uintptr_t>(&voices[i]) == voice_handle) {
+				*static_cast<Ngs2VoiceChannelsInfo*>(info) = {voices[i].channels, 0};
+				return OK;
+			}
+		}
+	}
+	return -1;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamHeader* param_list) {
 	PRINT_NAME();
@@ -2439,6 +2449,11 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 					EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2SubmixerVoiceSetupParam));
 					const auto& setup =
 					    *reinterpret_cast<const Ngs2SubmixerVoiceSetupParam*>(param);
+					if (std::getenv("KYTY_AUDIO_STATS") != nullptr) {
+						LOGF("Ngs2SubmixerSetup: channels=%u flags=0x%08" PRIx32 " max_output=%u\n",
+						     setup.num_io_channels, setup.flags,
+						     voice->rack->option.submixer.rack_option.max_output_channels);
+					}
 					EXIT_NOT_IMPLEMENTED(
 					    setup.num_io_channels == 0 ||
 					    setup.num_io_channels > voice->rack->option.submixer.max_channels ||
@@ -2448,7 +2463,13 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 				}
 				break;
 			}
-			case 0x2001: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Reverb); break;
+			case 0x2001:
+				EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Reverb);
+				// The game uses the default reverb voice as a stereo graph node. The
+				// reverb setup packet carries no channel count, so inherit the common
+				// stereo output shape when the voice is first configured.
+				if (voice->channels == 0) voice->channels = 2;
+				break;
 			case 0x3000: {
 				EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Mastering);
 				const auto* values = reinterpret_cast<const uint32_t*>(param + 1);

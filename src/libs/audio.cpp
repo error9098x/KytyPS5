@@ -14,7 +14,9 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <magic_enum.hpp>
 #include <vector>
 
@@ -411,6 +413,32 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 		LOGF("AudioOut: SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
 		port->queue_primed = false;
 		return false;
+	}
+	static const bool audio_stats = std::getenv("KYTY_AUDIO_STATS") != nullptr;
+	static uint64_t audio_stats_blocks = 0;
+	if (audio_stats && ((audio_stats_blocks++ % 100u) == 0u)) {
+		double sum = 0.0;
+		double peak = 0.0;
+		const auto count = static_cast<size_t>(port->samples_num) * OutputChannels(*port);
+		if (FormatIsFloat(port->format)) {
+			const auto* samples = static_cast<const float*>(prepared_data);
+			for (size_t i = 0; i < count; ++i) {
+				const double value = samples[i];
+				sum += value * value;
+				peak = std::max(peak, std::abs(value));
+			}
+		} else {
+			const auto* samples = static_cast<const int16_t*>(prepared_data);
+			for (size_t i = 0; i < count; ++i) {
+				const double value = static_cast<double>(samples[i]) / 32768.0;
+				sum += value * value;
+				peak = std::max(peak, std::abs(value));
+			}
+		}
+		const double rms = count != 0 ? std::sqrt(sum / static_cast<double>(count)) : 0.0;
+		LOGF("AudioStats: type=%d freq=%u channels=%u frames=%u rms=%.6f peak=%.6f queued=%d\n",
+		     port->type, port->freq, OutputChannels(*port), port->samples_num, rms, peak,
+		     SDL_GetAudioStreamQueued(port->stream));
 	}
 	// Unpaced priming must not advance the playback deadline into the future.
 	if (!port->queue_primed) {

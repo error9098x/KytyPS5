@@ -31,6 +31,14 @@ Gameplay input reaches streamed audio. The game sends an NGS2 block reset
 not an invalid block submission. Kyty now accepts that reset transition. A 115-second
 input run completed without a fatal error; repeat longer gameplay soaks next.
 
+## Audio output (fixed; latency still to measure)
+
+The audio path was initially silent even though SDL queued blocks. Opt-in signal
+telemetry showed zero NGS2 output, caused by an unresolved voice-info export and
+an incomplete graph render order/channel setup. The export and graph fixes now
+produce nonzero NGS2 and SDL samples. Input latency and frame pacing remain the
+next measurement target.
+
 ## Internal render-texture chain
 
 The final 4K video pass samples internal 320x180 render textures and completes
