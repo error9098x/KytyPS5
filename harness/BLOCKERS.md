@@ -31,14 +31,14 @@ Gameplay input reaches streamed audio. The game sends an NGS2 block reset
 not an invalid block submission. Kyty now accepts that reset transition. A 115-second
 input run completed without a fatal error; repeat longer gameplay soaks next.
 
-## Audio output (signal fixed; host routing now selectable; audibility and latency still to measure)
+## Audio output (signal fixed; host routing selectable; speaker audibility pending)
 
 The audio path was initially silent even though SDL queued blocks. Opt-in signal
 telemetry showed zero NGS2 output, caused by an unresolved voice-info export and
 an incomplete graph render order/channel setup. The export, graph, and output
 writeback fixes now produce nonzero NGS2 and SDL samples. Input latency and frame
-pacing remain the next measurement target; the harness has an opt-in monotonic
-timestamp probe.
+pacing have been measured with host, guest-poll, and present timestamps; the
+harness keeps these probes opt-in.
 
 The first frame-timing probe measured a 59.12 FPS median with a 33.37 ms p95 and
 a 2.96 s startup outlier. Three focused probes now measure host-to-guest-poll and
