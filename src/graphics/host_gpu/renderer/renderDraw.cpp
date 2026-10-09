@@ -371,6 +371,22 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 		viewport.minDepth =
 		    guest.zoffset - (ctx.GetClipControl().dx_clip_space ? 0.0f : guest.zscale);
 		viewport.maxDepth = guest.zscale + guest.zoffset;
+		// Diagnostics: KYTY_CLAMP_VIEWPORT_DEPTH=1 clamps the depth range to Vulkan's legal [0,1].
+		static const bool clamp_viewport_depth = std::getenv("KYTY_CLAMP_VIEWPORT_DEPTH") != nullptr;
+		if (clamp_viewport_depth) {
+			viewport.minDepth = std::clamp(viewport.minDepth, 0.0f, 1.0f);
+			viewport.maxDepth = std::clamp(viewport.maxDepth, 0.0f, 1.0f);
+		}
+		// KYTY_INTERNAL_FRAME_VERTICES=1: log the Vulkan viewport incl. depth range (first 60).
+		static const bool log_viewport = std::getenv("KYTY_INTERNAL_FRAME_VERTICES") != nullptr;
+		static std::atomic<uint32_t> viewport_logs {0};
+		if (log_viewport && i == 0 && viewport_logs.fetch_add(1) < 60) {
+			LOGF("ViewportProbe: x=%.1f y=%.1f w=%.1f h=%.1f depth=[%.4f,%.4f] zscale=%.4f zoffset=%.4f "
+			     "dx_clip_space=%d clip_disable=%d\n",
+			     viewport.x, viewport.y, viewport.width, viewport.height, viewport.minDepth,
+			     viewport.maxDepth, guest.zscale, guest.zoffset,
+			     ctx.GetClipControl().dx_clip_space ? 1 : 0, ctx.GetClipControl().clip_disable ? 1 : 0);
+		}
 
 		const auto final_scissor =
 		    calc_final_scissor(vp, ctx.GetScanModeControl(), framebuffer_extent, i);
