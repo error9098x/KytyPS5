@@ -283,6 +283,14 @@ library. No game-specific diagnosis is valid until this is resolved.
   the other two were indistinguishable from the bundled 1.4.2 path. The custom
   dylib is not selected by the harness; the bundled runtime remains validated.
 
+## MoltenVK asynchronous submission experiment — 2026-10-10
+
+- Tested the documented `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0` setting as an
+  environment-only change. Three title probes showed no startup improvement,
+  and three warm gameplay probes measured host-to-present maxima of `34.71`,
+  `34.41`, and `38.78 ms`, with no gain over the default synchronous path.
+  The setting was rejected; the default remains enabled.
+
 ## Gameplay stability gate — 2026-10-10
 
 - `gameplay-gate-3-20261010`, `gameplay-gate-4-20261010`, and

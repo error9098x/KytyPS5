@@ -87,6 +87,8 @@ long input-delay reports remain in progress.
   startup and worsened one warm gameplay latency tail to 46 ms.
 - An isolated upstream MoltenVK #2863 patched dylib was also tested and rejected
   after a 5.12 s startup regression in one of three runs.
+- Asynchronous MoltenVK queue submission was tested and rejected because it did
+  not improve startup or warm gameplay latency.
 
 ## Remaining work
 
