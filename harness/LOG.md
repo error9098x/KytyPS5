@@ -94,3 +94,19 @@ library. No game-specific diagnosis is valid until this is resolved.
   - texture constants: `1024`, `2048`, plus valid metadata
 - Both descriptors are `type=0`, nonzero, 16-byte ranges. The constant-buffer
   materialization/offset hypothesis is rejected for this draw.
+
+## Hypothesis check (no code changes) — 2026-10-09
+
+- `flow-check` (30 s): **0** "Unresolved import stub called" lines. The 109 stubbed imports were
+  patched at load but never called in that window, so the missing-AGC theory is NOT supported
+  (a 1024-call log cap exists; the window was short). Demoted in BLOCKERS.md.
+- The game does issue GPU work: many VS/PS pipelines created, 64 compute dispatches (CS 24576x1x1).
+- Vertex shader `0002_new_shader_vs_cdcf88828e5c2df8` uses the lane ID only as
+  `(0xFFFFFFFF >> (lane & 31)) & 1`, which is always 1, so the `gl_VertexIndex` fallback is
+  behaviourally harmless for this shader. Theory demoted.
+- New leading suspect: the shader reads position data from storage buffers with bounds checks
+  that return 0 when out of range. All-zero positions trigger the "zero-position clip guard"
+  (spirvEmitterFlow.cpp), which clips the primitive. Not yet tested.
+- Next experiments (each with 3 runs, compare `[frames]`): (a) env-gated disable of the clip guard,
+  (b) log first draws' vertex-buffer sizes/addresses and the shader's computed positions,
+  (c) check pixel shader outputs and whether the render target feeds the presented buffer.
