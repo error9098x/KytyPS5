@@ -80,6 +80,8 @@ long input-delay reports remain in progress.
 - A native arm64 build probe was configured but deferred because the host fault
   bridge and x64 instruction-emulator context are both x86-specific; the
   validated target remains x86-64 under Rosetta.
+- An opt-in PM4 submission split was tested and reverted because three runs did
+  not improve the startup gap consistently.
 
 ## Remaining work
 

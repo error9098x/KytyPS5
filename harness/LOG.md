@@ -253,6 +253,14 @@ library. No game-specific diagnosis is valid until this is resolved.
   394 ms host-to-present and 550 ms guest-poll outlier in one run. It was
   rejected and the default argument-buffer path remains enabled for gameplay.
 
+## PM4 submission split experiment — 2026-10-10
+
+- Tested an opt-in PM4 flush interval of 2,048 packets to split the first large
+  guest command batch before MoltenVK submission. Three title probes measured
+  max frame gaps of `3.228`, `2.735`, and `2.918 s`, with no consistent gain over
+  the default path. The diagnostic code was reverted; no production behavior
+  changed.
+
 ## Gameplay stability gate — 2026-10-10
 
 - `gameplay-gate-3-20261010`, `gameplay-gate-4-20261010`, and
