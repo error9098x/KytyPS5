@@ -184,6 +184,18 @@ library. No game-specific diagnosis is valid until this is resolved.
   observed in all three runs: SDL `1949/3368`, `2071/3357`, and `2131/3366`;
   NGS2 `648/1123`, `689/1119`, and `709/1122`.
 
+## Visual consistency probes — 2026-10-10
+
+- `visual-gate-1/2/3-20261010` captured fixed frame `000600` after the same
+  short Cross-input route. All three runs produced non-black gameplay content
+  (12, 12, and 13 content samples respectively) and the frame shows the player
+  character with the “Wake up” prompt.
+- At a 320x180 comparison scale, pairwise frame-000600 mean absolute channel
+  differences were `0.851`, `0.775`, and `0.742`; more-than-four-level channel
+  changes covered `3.76%`, `3.83%`, and `3.16%`. This establishes repeatable
+  rendering, but an independent PS5/reference capture is still needed to claim
+  visual correctness.
+
 ## Full input-path latency — 2026-10-10
 
 - Added `InputPoll` timestamps at the guest `PadRead`/`PadReadState` boundary.

@@ -32,6 +32,9 @@ remain in progress.
   loads and saves the PPSA22520 Vulkan pipeline cache.
 - Stage 3 is stable across three runs. Fixed-point gameplay screenshot comparison
   remains the Stage 4 gate.
+- Three fixed-point visual probes consistently rendered the gameplay “Wake up”
+  scene. Downscaled pairwise mean absolute differences were 0.742–0.851, but
+  no independent PS5/reference image is available, so Stage 4 remains pending.
 
 ## Kept fixes
 
