@@ -61,32 +61,33 @@ The remaining work is outside the basic render path:
    2.73–3.21 seconds. Animal Well now selects Immediate automatically on Apple when
    Mailbox is configured; set `KYTY_PPSA22520_MAILBOX` to compare the old mode.
    The clean Release pipeline cache is active.
-3. One controlled Cross-input gameplay soak reached 10 minutes cleanly. Two more
-   marked gameplay soaks are required for the stage gate.
-4. Matched input-to-present samples are still missing because the locked macOS
-   session did not deliver automated keyboard/controller events.
+3. Three marked Cross-input gameplay soaks reached 10 minutes cleanly and pass
+   the machine-checked Stage 3 gate.
+4. The deterministic synthetic input probe now supplies matched host, guest-poll,
+   and present samples without a focused controller. Warm p95 is below 28 ms;
+   title-to-gameplay first-use shader work remains a hitch.
 5. Fixed-point screenshot/reference comparison is still needed for visual stage 4.
 
 ---------------------------------------------------------------------------------------------------
 
 ## 3. Next steps, in order (each has a pass/fail signal)
 
-**Step 1 — Verify the selected output route.** Run three short gameplay routes with
+**Step 1 — Verify the selected output route.** Three short gameplay routes with
 `KYTY_AUDIO_STATS=1 KYTY_AUDIO_DEVICE="MacBook Air Speakers"` (or the user’s
 chosen exact SDL name). Pass: nonzero SDL RMS, `paused=0`, and a draining
-converted-byte queue on all three runs.
+converted-byte queue on all three runs. **Done.**
 
-**Step 2 — Repeat the gameplay gate.** Run two additional 10-minute routes with
+**Step 2 — Repeat the gameplay gate.** Three 10-minute routes with
 `KYTY_ROUTE=gameplay`, preserving the existing save backup. Pass: timeout at
 600 seconds, exit 0, no fatal/unimplemented/GPU errors, and gameplay audio/input
-evidence in each run.
+evidence in each run. **Done.**
 
 **Step 3 — Measure latency.** Use `KYTY_INPUT_PROBE=1` with
 `KYTY_INPUT_STATS=1` and `KYTY_FRAME_TIMING=1`; this follows the same host-input
 path without requiring a focused window. Three 35-second warm probes reached
-stable median/p95 next-present delays below 11/28 ms. The first title-to-gameplay
-input still exposes a shader-compilation hitch and needs a prewarm or asynchronous
-solution before this item is closed.
+stable median/p95 next-present delays below 11/28 ms. Host-path measurement is
+**Done**; the first title-to-gameplay shader-compilation hitch and visible-state
+response remain open.
 
 **Step 4 — Visual gate.** Capture the same fixed gameplay points on three runs and
 compare against a reference capture with `harness/image_diff.py`, recording image
