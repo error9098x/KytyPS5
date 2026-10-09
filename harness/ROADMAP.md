@@ -16,7 +16,7 @@ Acceptance stages (from the mission): 1 first frame, 2 title/menu, 3 gameplay 10
 | 2. Title / menu visible | **Reached** | Captured 3840x2160 frame visibly shows Animal Well CRT title artwork |
 | 3. Gameplay stability | **Measured once** | One 10-minute Cross-input soak ended cleanly; repeat twice |
 | 4. Visual correctness | **Pending** | Need fixed-point reference captures and image diffs |
-| 5. Performance | **Baseline only** | 59.12 FPS median in one timing run; startup and p95 spikes remain |
+| 5. Performance | **Baseline only** | 59.12 FPS median in one Mailbox timing run; startup and p95 spikes remain |
 
 The original black-frame failure is fixed for PPSA22520 on Apple hosts by selecting ordinary
 descriptor sets instead of MoltenVK push descriptors. The remaining work is quality and
@@ -36,6 +36,7 @@ input-to-present samples from a focused keyboard or controller route, and compar
 * Two more 10-minute gameplay soaks, fixed-point visual comparisons, and sustained performance work.
 * Audible confirmation on the user's selected macOS playback device.
 * A matched input-to-present route using the new keyboard, mouse, and SDL controller timestamps.
+* Three `KYTY_PRESENT_MODE=Immediate` pacing probes, compared with Mailbox.
 * The 108 unresolved imports (never called in the measured route) remain intentionally deferred.
 * Keep the local save backup at `harness/backups/animal-well-20261010/` intact;
   its `MANIFEST.sha256` covers the two save files. No separate repository or
