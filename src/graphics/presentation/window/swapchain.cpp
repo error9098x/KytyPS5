@@ -17,6 +17,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -152,10 +154,12 @@ void AnalyzeReadback(Readback& rb, uint64_t n) {
 		nonblack += (r | g | bl) != 0;
 		maxc = std::max({maxc, r, g, bl});
 	}
-	LOGF("FrameStats: present=%" PRIu64 " %ux%u avg=%.2f max=%u nonblack=%.4f%% %s\n", n,
+	const auto now = std::chrono::steady_clock::now().time_since_epoch();
+	const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+	LOGF("FrameStats: present=%" PRIu64 " %ux%u avg=%.2f max=%u nonblack=%.4f%% %s t_us=%" PRIu64 "\n", n,
 	     rb.width, rb.height, pixels ? static_cast<double>(sum) / (pixels * 3) : 0.0, maxc,
 	     pixels ? 100.0 * static_cast<double>(nonblack) / pixels : 0.0,
-	     nonblack == 0 ? "ALL_BLACK" : "HAS_CONTENT");
+	     nonblack == 0 ? "ALL_BLACK" : "HAS_CONTENT", static_cast<uint64_t>(micros));
 	const auto& dir = Diag().dump_dir;
 	if (!dir.empty()) {
 		char name[64];

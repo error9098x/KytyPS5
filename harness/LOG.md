@@ -118,6 +118,16 @@ library. No game-specific diagnosis is valid until this is resolved.
   non-master voices before mastering sinks, and emits custom-mastering voices.
 - A successful probe recorded nonzero NGS2 and SDL levels (SDL RMS `0.106`–`0.283`,
   peaks up to `0.56`). Audio telemetry remains opt-in.
+- Restored the full NGS2 PCM output-mix/writeback path that had been lost during
+  an earlier diagnostic edit; this is required for the nonzero SDL samples.
+
+## Input latency telemetry — 2026-10-10
+
+- `KYTY_INPUT_STATS=1` timestamps host key events with the same monotonic clock used
+  by `FrameStats`; `harness/latency.py` reports next-present median, p95, and max.
+- The harness now appends a `[latency]` line per run. A focused window and at least
+  one input event are required for matched samples; missing matches are reported
+  explicitly rather than treated as zero latency.
 
 ## Shader descriptor trace — 2026-10-09
 

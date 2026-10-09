@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
+#include <cinttypes>
 #include <cstddef>
 #include <cstdlib>
 #include <string>
@@ -423,6 +425,13 @@ void HostInputShutdown() {
 }
 
 void HostInputKey(int key_code, bool down) {
+	if (std::getenv("KYTY_INPUT_STATS") != nullptr) {
+		static uint64_t sequence = 0;
+		const auto now = std::chrono::steady_clock::now().time_since_epoch();
+		const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+		LOGF("InputStats: seq=%" PRIu64 " key=%d down=%d t_us=%" PRIu64 "\n", ++sequence,
+		     key_code, down ? 1 : 0, static_cast<uint64_t>(micros));
+	}
 	const auto& map = GetInputMap();
 	if (map.Custom()) {
 		SetControl(map.FindKey(key_code), down);

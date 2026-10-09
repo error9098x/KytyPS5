@@ -70,4 +70,5 @@ print("run_dir=%s exit=%d timeout=%s elapsed=%.3f" % (out_dir, rc, timed_out, el
 PY
 python3 "$root/harness/scan_log.py" "$out_dir/kyty.log" "$out_dir/guest-printf.log" > "$out_dir/scan.txt"
 python3 "$root/harness/stage.py" "$out_dir" >> "$out_dir/scan.txt"
+python3 "$root/harness/latency.py" "$out_dir" >> "$out_dir/scan.txt"
 cat "$out_dir/scan.txt"

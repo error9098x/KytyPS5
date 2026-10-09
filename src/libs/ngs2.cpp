@@ -1919,10 +1919,58 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 			continue;
 		}
 		Ngs2RenderVoice(*voice, voices, grain);
-		if (!voice->has_samples) continue;
+		if (!voice->has_samples) {
+			continue;
+		}
 		EXIT_NOT_IMPLEMENTED(voice->output_id >= num_buffer_info);
 		const auto& output = buffer_info[voice->output_id];
-		if (std::getenv("KYTY_AUDIO_STATS") != nullptr && (ngs->render_count % 100u) == 0u) {
+		EXIT_NOT_IMPLEMENTED(output.buffer == nullptr);
+		EXIT_NOT_IMPLEMENTED((output.waveform_type != 0x12 && output.waveform_type != 0x18) ||
+		                     output.num_channels != voice->channels);
+		EXIT_NOT_IMPLEMENTED(output.buffer_size < grain * output.num_channels *
+		                                               (output.waveform_type == 0x12 ? sizeof(int16_t)
+		                                                                             : sizeof(float)));
+		float* pcm = nullptr;
+		if (output.waveform_type == 0x12) {
+			auto& mix = output_mix[voice->output_id];
+			if (mix.empty()) {
+				mix.resize(grain * output.num_channels);
+			}
+			pcm = mix.data();
+		} else {
+			pcm = static_cast<float*>(output.buffer);
+		}
+		for (uint32_t dst = 0; dst < output.num_channels; ++dst) {
+			for (uint32_t src = 0; src < voice->channels; ++src) {
+				const float level = voice->output_matrix.empty()
+				                        ? (src == dst ? 1.0f : 0.0f)
+				                        : voice->output_matrix.at(src * output.num_channels + dst);
+				for (uint32_t i = 0; i < grain; ++i) {
+					pcm[i * output.num_channels + dst] += voice->samples[src * grain + i] * level;
+				}
+			}
+		}
+	}
+	for (uint32_t i = 0; i < num_buffer_info; ++i) {
+		const auto& mix = output_mix[i];
+		if (mix.empty()) {
+			continue;
+		}
+		auto* pcm = static_cast<int16_t*>(buffer_info[i].buffer);
+		for (size_t sample = 0; sample < mix.size(); ++sample) {
+			pcm[sample] = static_cast<int16_t>(std::clamp(
+			    std::lrintf(std::clamp(mix[sample], -1.0f, 1.0f) * 32768.0f), -32768l,
+			    32767l));
+		}
+	}
+	for (auto* voice: voices) {
+		// No envelope is configured, so a release stop finishes in this render.
+		if (voice->state == Ngs2VoicePlayState::Stopped) {
+			voice->state = Ngs2VoicePlayState::Empty;
+		}
+		voice->state_flags = static_cast<uint32_t>(voice->state);
+	}
+	if (std::getenv("KYTY_AUDIO_STATS") != nullptr && (ngs->render_count % 100u) == 0u) {
 		double sum = 0.0, peak = 0.0;
 		uint64_t count = 0;
 		for (const auto& output: std::span {buffer_info, num_buffer_info}) {
@@ -1932,20 +1980,22 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 				const auto* samples = static_cast<const int16_t*>(output.buffer);
 				for (uint64_t i = 0; i < uint64_t(grain) * output.num_channels; ++i) {
 					const double value = static_cast<double>(samples[i]) / 32768.0;
-					sum += value * value; peak = std::max(peak, std::abs(value));
+					sum += value * value;
+					peak = std::max(peak, std::abs(value));
 				}
 			} else if (output.waveform_type == 0x18) {
 				const auto* samples = static_cast<const float*>(output.buffer);
 				for (uint64_t i = 0; i < uint64_t(grain) * output.num_channels; ++i) {
 					const double value = samples[i];
-					sum += value * value; peak = std::max(peak, std::abs(value));
+					sum += value * value;
+					peak = std::max(peak, std::abs(value));
 				}
 			}
 		}
 		LOGF("Ngs2AudioStats: buffers=%u samples=%" PRIu64 " rms=%.6f peak=%.6f\n",
-		     num_buffer_info, count, count ? std::sqrt(sum / static_cast<double>(count)) : 0.0, peak);
+		     num_buffer_info, count, count ? std::sqrt(sum / static_cast<double>(count)) : 0.0,
+		     peak);
 	}
-
 	++ngs->render_count;
 	return OK;
 }

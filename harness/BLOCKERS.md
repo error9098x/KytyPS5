@@ -35,9 +35,10 @@ input run completed without a fatal error; repeat longer gameplay soaks next.
 
 The audio path was initially silent even though SDL queued blocks. Opt-in signal
 telemetry showed zero NGS2 output, caused by an unresolved voice-info export and
-an incomplete graph render order/channel setup. The export and graph fixes now
-produce nonzero NGS2 and SDL samples. Input latency and frame pacing remain the
-next measurement target.
+an incomplete graph render order/channel setup. The export, graph, and output
+writeback fixes now produce nonzero NGS2 and SDL samples. Input latency and frame
+pacing remain the next measurement target; the harness has an opt-in monotonic
+timestamp probe.
 
 ## Internal render-texture chain
 
