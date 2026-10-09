@@ -163,7 +163,8 @@ library. No game-specific diagnosis is valid until this is resolved.
   audio/input evidence. Zero-valued startup telemetry no longer counts as
   gameplay.
 - `KYTY_PRESENT_MODE=Immediate` passes `--present-mode Immediate` for an
-  uncapped pacing probe; the default remains Mailbox.
+  uncapped pacing probe. Animal Well on Apple now uses Immediate when Mailbox
+  is configured; other titles retain their configured mode.
 - Controlled soak runs can set `KYTY_ROUTE=gameplay`; `run.json` preserves that
   marker so Stage 3 is never awarded from a long title-only run by accident.
 - Three Immediate-present probes completed without crashes: median FPS
@@ -180,6 +181,20 @@ library. No game-specific diagnosis is valid until this is resolved.
   diagnostic dumps does not remove the first-use MoltenVK/scene stall.
 - `KYTY_PRINTF_DIRECTION=Silent` is now supported for performance probes and
   still produces a normal scanner summary with empty guest-log diagnostics.
+
+## Title-gated low-latency presentation — 2026-10-10
+
+- Before the change, the default Mailbox path measured 59.12 FPS median with
+  33.37 ms p95; explicit Immediate probes measured 60.31–60.71 FPS median with
+  19.83–20.34 ms p95.
+- Kyty now selects Immediate automatically for `PPSA22520` on Apple when the
+  user leaves the mode at Mailbox. Other titles and platforms keep their
+  configured mode. Set `KYTY_PPSA22520_MAILBOX` (presence is enough; its value
+  is not parsed) to retain Mailbox for a comparison.
+- Three default-mode runs after the change resolved the title gate and measured
+  host-to-present median/p95/max of `9.28/27.50/36.13 ms`,
+  `10.58/23.44/34.71 ms`, and `9.37/25.70/36.00 ms`. Each timed out cleanly,
+  with no fatal, GPU, or unimplemented errors and nonzero gameplay audio.
 
 ## Startup pipeline timing — 2026-10-10
 

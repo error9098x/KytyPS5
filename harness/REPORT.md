@@ -67,6 +67,8 @@ long input-delay reports remain in progress.
 - NGS2 voice channel query, reset-block handling, stereo reverb setup, graph render
   ordering, custom-mastering output, and mastering gain/writeback.
 - Opt-in frame timing, audio signal, and input-to-present telemetry.
+- Apple/PPSA22520 title-gated Immediate presentation when Mailbox is otherwise
+  selected; `KYTY_PPSA22520_MAILBOX` retains Mailbox for comparison.
 
 ## Remaining work
 

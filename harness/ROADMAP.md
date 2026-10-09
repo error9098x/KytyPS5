@@ -58,7 +58,9 @@ The remaining work is outside the basic render path:
    override for users listening on another output.
 2. Mailbox timing measured 59.12 FPS median. Three Immediate runs measured
    60.31–60.71 FPS median and 19.83–20.34 ms p95, but startup initialization gaps remain
-   2.73–3.21 seconds. The clean Release pipeline cache is active.
+   2.73–3.21 seconds. Animal Well now selects Immediate automatically on Apple when
+   Mailbox is configured; set `KYTY_PPSA22520_MAILBOX` to compare the old mode.
+   The clean Release pipeline cache is active.
 3. One controlled Cross-input gameplay soak reached 10 minutes cleanly. Two more
    marked gameplay soaks are required for the stage gate.
 4. Matched input-to-present samples are still missing because the locked macOS
