@@ -10,8 +10,8 @@ required before retaining it as an accepted improvement.
 
 ## Unresolved load-time imports and black render output
 
-109 unresolved imports are patched at load (Agc_v1 77, AgcDriver_v1 22, libkernel 8,
-Ngs2 1, LibcInternalExt 1), but no unresolved-import calls were observed. The current
+108 unresolved imports are patched at load (Agc_v1 77, AgcDriver_v1 22, libkernel 8,
+LibcInternalExt 1), but no unresolved-import calls were observed. The current
 draw trace shows real draws and successful pipelines, so the causal role of these imports
 is unproven. Resolve only imports that appear in a call trace before implementing them.
 See `harness/runs/flow-check/guest-printf.log` for the relocation list.
@@ -31,7 +31,7 @@ Gameplay input reaches streamed audio. The game sends an NGS2 block reset
 not an invalid block submission. Kyty now accepts that reset transition. A 115-second
 input run completed without a fatal error; repeat longer gameplay soaks next.
 
-## Audio output (fixed; host audibility and latency still to measure)
+## Audio output (signal fixed; host routing now selectable; audibility and latency still to measure)
 
 The audio path was initially silent even though SDL queued blocks. Opt-in signal
 telemetry showed zero NGS2 output, caused by an unresolved voice-info export and
@@ -45,6 +45,12 @@ a 2.96 s startup outlier. A matched input-to-present sample still requires a
 focused emulator window or SDL controller event, so latency is not yet characterized.
 Controller, axis, mouse, and keyboard events are now timestamped. AudioOut2 also
 releases its state mutex before the potentially blocking SDL queue call.
+
+macOS currently defaults to `HyperX Cloud Stinger 2 Wireless`, while the built-in
+MacBook Air Speakers are not the default. Kyty logs the resolved SDL device and
+supports `--audio-device "MacBook Air Speakers"` (or `KYTY_AUDIO_DEVICE` in the
+harness). Both devices report `paused=0` and draining converted bytes in probes;
+the remaining question is which physical device the user is listening to.
 
 ## Internal render-texture chain
 

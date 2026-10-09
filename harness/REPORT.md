@@ -16,6 +16,10 @@ remain in progress.
   nonzero NGS2 and SDL samples after startup (SDL RMS 0.106–0.283, peaks up to
   0.56). Title-only probes remain silent. The opt-in harness now reports these
   streams separately; speaker audibility is still unconfirmed.
+- macOS default output is HyperX Cloud Stinger 2 Wireless. Kyty now supports
+  selecting `MacBook Air Speakers` explicitly and logs the resolved device,
+  paused state, queued bytes, and converted-byte availability; both tested
+  devices were active and draining.
 - AudioOut2 now releases its state mutex before the potentially blocking SDL
   pacing call; a matched latency run is still needed to quantify the effect.
 - Frame pacing probe: median 16.91 ms / 59.12 FPS, p95 33.37 ms; startup shader
@@ -32,6 +36,10 @@ remain in progress.
 
 - Capture matched input-to-present samples with a focused keyboard or SDL
   controller route; automated runs with no delivered input remain unmeasured.
+- Run three Immediate-present pacing probes, then compare them with the default
+  Mailbox baseline.
+- Mark a controlled gameplay soak with `KYTY_ROUTE=gameplay` so the per-run
+  stage tracker does not infer gameplay from incidental startup input.
 - Confirm audible output on the user's selected macOS playback device.
 - Compare fixed-point screenshots against a reference and remove major visual defects.
 - Reduce startup shader stutter and measure sustained gameplay performance.

@@ -145,6 +145,28 @@ library. No game-specific diagnosis is valid until this is resolved.
   the mutex and the backend call runs after unlock. This is a static contention
   fix; a matched input latency run is still required to quantify its effect.
 
+## Playback-device diagnosis — 2026-10-10
+
+- macOS reports **HyperX Cloud Stinger 2 Wireless** as the default output;
+  MacBook Air Speakers are available but not default. Kyty therefore sent its
+  valid PCM stream to the HyperX device when no device was specified.
+- Added `--audio-device <exact SDL name>` and `KYTY_AUDIO_DEVICE` harness
+  support. A probe selecting `MacBook Air Speakers` resolved SDL device 29 with
+  `paused=0`; the default probe resolved the HyperX device with `paused=0`.
+  Queue and converted-byte availability drain in both cases. This explains a
+  likely host-routing cause of “no audio” without changing the NGS2 mix.
+
+## Harness stage and pacing — 2026-10-10
+
+- `stage.py` now uses `FrameTiming` when readbacks are disabled and distinguishes
+  first presentation, non-black content, and a long run with nonzero gameplay
+  audio/input evidence. Zero-valued startup telemetry no longer counts as
+  gameplay.
+- `KYTY_PRESENT_MODE=Immediate` passes `--present-mode Immediate` for an
+  uncapped pacing probe; the default remains Mailbox.
+- Controlled soak runs can set `KYTY_ROUTE=gameplay`; `run.json` preserves that
+  marker so Stage 3 is never awarded from a long title-only run by accident.
+
 ## Save backup — 2026-10-10
 
 - Copied `_SaveData/` to the ignored local backup

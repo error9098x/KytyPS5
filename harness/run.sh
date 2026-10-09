@@ -36,7 +36,7 @@ if [ -z "${SDL_VULKAN_LIBRARY:-}" ] && [ -f "$root/harness/tools/MoltenVK-1.4.2/
 	export SDL_VULKAN_LIBRARY="$root/harness/tools/MoltenVK-1.4.2/libMoltenVK.dylib"
 fi
 python3 - "$build_dir/kyty_emulator" "$game_dir" "$timeout_seconds" "$out_dir" <<'PY'
-import os, pathlib, signal, subprocess, sys, time
+import json, os, pathlib, signal, subprocess, sys, time
 
 exe, game, timeout_s, out_dir = sys.argv[1], sys.argv[2], float(sys.argv[3]), pathlib.Path(sys.argv[4])
 log = out_dir / "kyty.log"
@@ -69,9 +69,10 @@ with log.open("w") as stream:
             os.killpg(proc.pid, signal.SIGKILL)
             rc = proc.wait()
 elapsed = time.time() - started
-(out_dir / "run.json").write_text(
-    '{"exit_code":%d,"timed_out":%s,"elapsed_seconds":%.3f}\n' %
-    (rc, str(timed_out).lower(), elapsed))
+metadata = {"exit_code": rc, "timed_out": timed_out, "elapsed_seconds": round(elapsed, 3)}
+if os.environ.get("KYTY_ROUTE"):
+    metadata["route"] = os.environ["KYTY_ROUTE"]
+(out_dir / "run.json").write_text(json.dumps(metadata) + "\n")
 print("run_dir=%s exit=%d timeout=%s elapsed=%.3f" % (out_dir, rc, timed_out, elapsed))
 PY
 python3 "$root/harness/scan_log.py" "$out_dir/kyty.log" "$out_dir/guest-printf.log" > "$out_dir/scan.txt"
