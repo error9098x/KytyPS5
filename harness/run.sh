@@ -39,9 +39,10 @@ python3 - "$build_dir/kyty_emulator" "$game_dir" "$timeout_seconds" "$out_dir" <
 import json, os, pathlib, signal, subprocess, sys, time
 
 exe, game, timeout_s, out_dir = sys.argv[1], sys.argv[2], float(sys.argv[3]), pathlib.Path(sys.argv[4])
+shader_log_direction = os.environ.get("KYTY_SHADER_LOG_DIRECTION", "Silent")
 log = out_dir / "kyty.log"
 args = [exe, "--game", game,
-        "--shader-log-direction", "File", "--shader-log-folder", str(out_dir / "shaders"),
+        "--shader-log-direction", shader_log_direction, "--shader-log-folder", str(out_dir / "shaders"),
         "--printf-direction", "File", "--printf-output-file", str(out_dir / "guest-printf.log"),
         "--vulkan-validation", "false",
         "--graphics-debug-dump", os.environ.get("KYTY_GRAPHICS_DEBUG_DUMP", "false"),

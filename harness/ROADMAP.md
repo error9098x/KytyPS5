@@ -92,6 +92,9 @@ diffs and any missing effects.
 remaining shader compilation spike; retain a change only if the three-run p95/max
 startup metrics improve without reducing sustained FPS.
 
+The harness no longer enables shader IR dumps during ordinary performance runs;
+use `KYTY_SHADER_LOG_DIRECTION=File` only for diagnostics.
+
 ---------------------------------------------------------------------------------------------------
 
 ## 4. What happens after the first pixels appear (expect more work)

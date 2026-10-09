@@ -173,6 +173,11 @@ library. No game-specific diagnosis is valid until this is resolved.
 - A clean Release build now loads `_PipelineCache/PPSA22520.bin` (1,144,892
   bytes) on all three follow-up probes. The cache is active, but it does not
   remove the initial shader-compilation spike.
+- The harness now defaults shader logging to `Silent`; set
+  `KYTY_SHADER_LOG_DIRECTION=File` for full IR dumps. Three Silent Immediate
+  probes measured 60.05–60.40 FPS median and 2.77–3.94 s max frame gaps, so
+  suppressing diagnostic dumps improves normal harness overhead but does not
+  remove the first-use MoltenVK/scene stall.
 
 ## Gameplay stability gate — 2026-10-10
 
