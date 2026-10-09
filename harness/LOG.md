@@ -179,6 +179,17 @@ library. No game-specific diagnosis is valid until this is resolved.
   measured 60.17–60.44 FPS median with 2.93–3.60 s max gaps. Suppressing
   diagnostic dumps does not remove the first-use MoltenVK/scene stall.
 
+## Startup pipeline timing — 2026-10-10
+
+- Added opt-in `KYTY_PIPELINE_TIMING=1` logs for shader-program materialization
+  and Vulkan pipeline creation. The first compute program materialized in about
+  39 ms and its Vulkan pipeline creation took about 2.4 ms, while the associated
+  frame gap was about 3 seconds.
+- This rules out the Kyty IR compiler and the direct `vkCreateComputePipelines`
+  call as the whole stall. The remaining cost is likely MoltenVK/Metal first-use
+  compilation or queue synchronization; no behavior change was kept for this
+  diagnostic.
+
 ## Gameplay stability gate — 2026-10-10
 
 - `gameplay-gate-3-20261010`, `gameplay-gate-4-20261010`, and

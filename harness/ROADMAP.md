@@ -94,6 +94,9 @@ startup metrics improve without reducing sustained FPS.
 
 The harness no longer enables shader IR dumps during ordinary performance runs;
 use `KYTY_SHADER_LOG_DIRECTION=File` only for diagnostics.
+`KYTY_PIPELINE_TIMING=1` now separates Kyty program materialization from direct
+Vulkan pipeline creation; the remaining gap is downstream and needs MoltenVK/
+Metal-level profiling before a behavior change is justified.
 
 ---------------------------------------------------------------------------------------------------
 

@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -692,11 +693,19 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	uint32_t          push_data_cursor =
 	    mesh_active ? ShaderRecompiler::IR::PushData::MeshDrawDwordCount : 0;
 	GraphicsPrograms  result;
+	const auto         program_start = std::chrono::steady_clock::now();
 	if (pixel_active) {
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
 		result.vertex[i] = m_program_cache->Get(vertex_params[i], vertex_info[i], push_data_cursor);
+	}
+	if (std::getenv("KYTY_PIPELINE_TIMING") != nullptr) {
+		const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+		                         std::chrono::steady_clock::now() - program_start)
+		                         .count();
+		LOGF("ProgramTiming: type=graphics pixel=%d elapsed_us=%" PRId64 "\n",
+		     pixel_active ? 1 : 0, static_cast<int64_t>(elapsed));
 	}
 	return result;
 }
@@ -709,7 +718,16 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	uint32_t          push_data_cursor = 0;
-	return m_program_cache->Get(params, input_info, push_data_cursor);
+	const auto        program_start = std::chrono::steady_clock::now();
+	auto              result = m_program_cache->Get(params, input_info, push_data_cursor);
+	if (std::getenv("KYTY_PIPELINE_TIMING") != nullptr) {
+		const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+		                         std::chrono::steady_clock::now() - program_start)
+		                         .count();
+		LOGF("ProgramTiming: type=compute id=%" PRIu64 " elapsed_us=%" PRId64 "\n",
+		     result.id, static_cast<int64_t>(elapsed));
+	}
+	return result;
 }
 
 bool PipelineStaticParameters::operator==(const PipelineStaticParameters& other) const noexcept {
@@ -901,9 +919,17 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 
 	auto cached = std::make_unique<Pipeline>();
 	LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
+	const auto pipeline_start = std::chrono::steady_clock::now();
 	CreatePipelineInternal(m_graphics, *cached, rendering, key.vertex_input, vertex_info,
 	                       ps_input_info, programs, static_params, m_driver_cache);
 	LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
+	if (std::getenv("KYTY_PIPELINE_TIMING") != nullptr) {
+		const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+		                         std::chrono::steady_clock::now() - pipeline_start)
+		                         .count();
+		LOGF("PipelineTiming: type=graphics VS=%" PRIu64 " PS=%" PRIu64 " elapsed_us=%" PRId64 "\n",
+		     vs_id, ps_id, static_cast<int64_t>(elapsed));
+	}
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
@@ -931,7 +957,15 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	}
 
 	auto cached = std::make_unique<Pipeline>();
+	const auto pipeline_start = std::chrono::steady_clock::now();
 	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache);
+	if (std::getenv("KYTY_PIPELINE_TIMING") != nullptr) {
+		const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+		                         std::chrono::steady_clock::now() - pipeline_start)
+		                         .count();
+		LOGF("PipelineTiming: type=compute id=%" PRIu64 " elapsed_us=%" PRId64 "\n",
+		     compute_program.id, static_cast<int64_t>(elapsed));
+	}
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);

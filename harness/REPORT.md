@@ -37,6 +37,10 @@ long input-delay reports remain in progress.
   invalidation on the new revision, two cache-loaded Silent runs measured
   60.17–60.44 FPS median with 2.93–3.60 s max gaps, confirming the startup
   stall is not caused primarily by diagnostic file dumping.
+- Opt-in pipeline timing measured roughly 39 ms for first compute program
+  materialization and 2.4 ms for direct compute pipeline creation, versus a
+  roughly 3 s present gap. The remaining startup cost is downstream of those
+  Kyty-side stages and has not been changed speculatively.
 - Stage 3 is stable across three runs. Fixed-point gameplay screenshot comparison
   remains the Stage 4 gate.
 - Three fixed-point visual probes consistently rendered the gameplay “Wake up”
