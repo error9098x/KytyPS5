@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -227,6 +228,18 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 	    sc.bottom);
 
 	LogMrtState(draw_name, buffer, ps_input_info);
+	if (std::getenv("KYTY_DRAW_RESOURCE_STATS") != nullptr &&
+	    ps_input_info.stage.resources != nullptr) {
+		const auto& resources = *ps_input_info.stage.resources;
+		for (size_t i = 0; i < resources.images.size(); ++i) {
+			const auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(resources.images[i]);
+			LOGF("DrawResourceState[%u]: image=%zu base=0x%012" PRIx64 " type=%u format=%u extent=%ux%u\n",
+			     log_id, i, descriptor.Base40(), static_cast<uint32_t>(descriptor.Type()),
+			     static_cast<uint32_t>(descriptor.Format()),
+			     static_cast<uint32_t>(descriptor.Width5()) + 1u,
+			     static_cast<uint32_t>(descriptor.Height5()) + 1u);
+		}
+	}
 }
 
 static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo& color,
