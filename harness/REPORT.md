@@ -35,6 +35,8 @@ long input-delay reports remain in progress.
 - Three fixed-point visual probes consistently rendered the gameplay “Wake up”
   scene. Downscaled pairwise mean absolute differences were 0.742–0.851, but
   no independent PS5/reference image is available, so Stage 4 remains pending.
+- The visual comparison is now reproducible with
+  `python3 harness/image_diff.py <reference.png> <candidate.png> --stride 8`.
 
 ## Kept fixes
 

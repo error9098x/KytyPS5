@@ -85,7 +85,8 @@ controller, run three Immediate probes with `KYTY_INPUT_STATS=1` and
 stable median/p95 next-present delays.
 
 **Step 4 — Visual gate.** Capture the same fixed gameplay points on three runs and
-compare against a reference capture, recording image diffs and any missing effects.
+compare against a reference capture with `harness/image_diff.py`, recording image
+diffs and any missing effects.
 
 **Step 5 — Startup stutter.** Keep the active Vulkan pipeline cache and profile the
 remaining shader compilation spike; retain a change only if the three-run p95/max

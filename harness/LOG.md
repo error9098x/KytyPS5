@@ -195,6 +195,9 @@ library. No game-specific diagnosis is valid until this is resolved.
   changes covered `3.76%`, `3.83%`, and `3.16%`. This establishes repeatable
   rendering, but an independent PS5/reference capture is still needed to claim
   visual correctness.
+- Added `harness/image_diff.py`, a dependency-free RGB/RGBA PNG comparator. The
+  same frame pairs report stride-8 MAE `0.902` and `0.829`, with changed-pixel
+  fractions `4.87%` and `5.07%`.
 
 ## Full input-path latency — 2026-10-10
 
