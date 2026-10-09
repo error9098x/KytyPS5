@@ -16,6 +16,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "kernel/memory.h"
 
+#include <cmath>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -1849,18 +1850,44 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 		const char* value = std::getenv("KYTY_INTERNAL_FRAME_PIXEL_HASH");
 		return value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull;
 	}();
+	static const bool unique_addresses = std::getenv("KYTY_INTERNAL_FRAME_UNIQUE") != nullptr;
+	static std::array<uint64_t, 256> sampled_addresses {};
+	static uint32_t sampled_address_count = 0;
 	static uint32_t count = 0;
-	if (!enabled || count >= 100 || !id) return;
+	// KYTY_INTERNAL_FRAME_SKIP=N ignores the first N eligible draws (reach steady state);
+	// KYTY_INTERNAL_FRAME_MAX=N raises the default 100-sample cap.
+	static const uint64_t skip_first = [] {
+		const char* value = std::getenv("KYTY_INTERNAL_FRAME_SKIP");
+		return value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull;
+	}();
+	static const uint32_t max_samples = [] {
+		const char* value = std::getenv("KYTY_INTERNAL_FRAME_MAX");
+		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 0)) : 100u;
+	}();
+	static uint64_t seen = 0;
+	if (!enabled || count >= max_samples || !id) return;
 	auto& image = m_slot_images[id];
 	if (address_filter != 0 && image.info.data.address != address_filter) return;
 	if (pixel_hash_filter != 0 && pixel_hash != pixel_hash_filter) return;
+	if (unique_addresses) {
+		if (std::ranges::find(sampled_addresses.begin(), sampled_addresses.begin() + sampled_address_count,
+		                       image.info.data.address) != sampled_addresses.begin() + sampled_address_count) {
+			return;
+		}
+		if (sampled_address_count >= sampled_addresses.size()) return;
+		sampled_addresses[sampled_address_count++] = image.info.data.address;
+	}
+	if (seen++ < skip_first) return;
 	const auto sample = ++count;
 	const auto& backing = image.backing;
 	const bool rgba = backing.format == vk::Format::eR8G8B8A8Unorm ||
 	                  backing.format == vk::Format::eR8G8B8A8Srgb ||
 	                  backing.format == vk::Format::eB8G8R8A8Unorm ||
 	                  backing.format == vk::Format::eB8G8R8A8Srgb;
-	if (!rgba || backing.samples != 1 || backing.image_type != vk::ImageType::e2D ||
+	const bool rg16f   = backing.format == vk::Format::eR16G16Sfloat;
+	const bool rgba16f = backing.format == vk::Format::eR16G16B16A16Sfloat;
+	const uint32_t bpp = rgba16f ? 8u : 4u;
+	if (!(rgba || rg16f || rgba16f) || backing.samples != 1 || backing.image_type != vk::ImageType::e2D ||
 	    mip >= backing.mip_levels ||
 	    layer >= backing.layers || backing.image == nullptr) {
 		LOGF("InternalFrameStats: sample=%u skip format=%s samples=%u mip=%u layer=%u\n",
@@ -1870,11 +1897,11 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 	const uint32_t width = std::max(backing.extent.width >> mip, 1u);
 	const uint32_t height = std::max(backing.extent.height >> mip, 1u);
 	const uint64_t pixels = static_cast<uint64_t>(width) * height;
-	if (pixels == 0 || pixels > (64u * 1024u * 1024u) / 4u) {
+	if (pixels == 0 || pixels > (64u * 1024u * 1024u) / bpp) {
 		LOGF("InternalFrameStats: sample=%u skip oversized extent=%ux%u\n", sample, width, height);
 		return;
 	}
-	const uint64_t size = pixels * 4;
+	const uint64_t size = pixels * bpp;
 	auto& download = m_buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
 	auto [mapped, offset] = download.Map(size, 4);
 	if (mapped == nullptr) {
@@ -1898,6 +1925,37 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 	    vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &barrier, 0, nullptr);
 	m_scheduler.FlushAndWait();
 	download.Invalidate(offset, size);
+	if (rg16f || rgba16f) {
+		const auto* halves = reinterpret_cast<const uint16_t*>(mapped);
+		const uint32_t channels = rgba16f ? 4u : 2u;
+		auto to_float = [](uint16_t h) {
+			const uint32_t sign = (h >> 15) & 1u, exp = (h >> 10) & 0x1Fu, man = h & 0x3FFu;
+			float v = exp == 0 ? std::ldexp(static_cast<float>(man), -24)
+			          : exp == 31 ? 65504.0f
+			                      : std::ldexp(static_cast<float>(man | 0x400u), static_cast<int>(exp) - 25);
+			return sign ? -v : v;
+		};
+		std::array<double, 4> sum {};
+		std::array<float, 4> mx {};
+		uint64_t nonzero = 0;
+		for (uint64_t i = 0; i < pixels; ++i) {
+			bool any = false;
+			for (uint32_t c = 0; c < channels; ++c) {
+				const float v = to_float(halves[i * channels + c]);
+				sum[c] += v;
+				mx[c] = std::max(mx[c], std::fabs(v));
+				any |= (halves[i * channels + c] & 0x7FFFu) != 0;
+			}
+			nonzero += any;
+		}
+		LOGF("InternalFrameStats: sample=%u address=0x%016" PRIx64 " format=%s extent=%ux%u "
+		     "mip=%u layer=%u nonzero=%.4f%% avg=(%.3f,%.3f,%.3f,%.3f) max=(%.3f,%.3f,%.3f,%.3f) "
+		     "vs=0x%016" PRIx64 " ps=0x%016" PRIx64 "\n", sample, image.info.data.address,
+		     vk::to_string(backing.format).c_str(), width, height, mip, layer,
+		     100.0 * nonzero / pixels, sum[0] / pixels, sum[1] / pixels, sum[2] / pixels,
+		     sum[3] / pixels, mx[0], mx[1], mx[2], mx[3], vertex_hash, pixel_hash);
+		return;
+	}
 	const auto* bytes = static_cast<const uint8_t*>(mapped);
 	uint64_t nonblack = 0, alpha = 0;
 	for (uint64_t i = 0; i < pixels; ++i) {
