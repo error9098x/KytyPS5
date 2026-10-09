@@ -1,5 +1,6 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 
+#include <cstdlib>
 #include <algorithm>
 #include <bit>
 
@@ -601,7 +602,10 @@ void DefineOutputs(EmitterState& state) {
 		DefineMeshOutputs(state, clip_distance_count, cull_distance_count);
 		return;
 	}
-	if (state.program.stage == ShaderType::Vertex && clip_distance_count + cull_distance_count < 8u &&
+	// Diagnostics: KYTY_DISABLE_CLIP_GUARD=1 omits the zero-position clip-distance plane.
+	static const bool disable_clip_guard = std::getenv("KYTY_DISABLE_CLIP_GUARD") != nullptr;
+	if (!disable_clip_guard && state.program.stage == ShaderType::Vertex &&
+	    clip_distance_count + cull_distance_count < 8u &&
 	    std::ranges::any_of(state.outputs, [](const OutputBinding& output) {
 		    return output.kind == IR::StageOutputKind::Position;
 	    })) {

@@ -57,7 +57,7 @@ public:
 	}
 	void MarkGpuWritten(ImageId id);
 	void LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t layer,
-	                           uint64_t vertex_hash, uint64_t pixel_hash);
+	                           uint64_t vertex_hash, uint64_t pixel_hash, const char* role = "rt");
 
 	[[nodiscard]] bool ClearImageFromBuffer(CommandBuffer& command, uint64_t address, uint64_t size,
 	                                        uint32_t packed_clear);

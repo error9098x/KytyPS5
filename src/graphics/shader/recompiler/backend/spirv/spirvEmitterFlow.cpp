@@ -2,6 +2,7 @@
 
 #include "common/logging/log.h"
 
+#include <cstdlib>
 #include <algorithm>
 #include <atomic>
 
@@ -523,6 +524,17 @@ void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 		const bool uint_output = MrtOutputMode(state, exp) == 7u;
 		const auto vector_type = uint_output ? TypeU32Vector(state, 4) : TypeF32Vector(state, 4);
 		auto       value       = ExportVector(ctx, data, exp, uint_output);
+		// Diagnostics: KYTY_DEBUG_SOLID_PS=1 forces every float MRT0 export to opaque magenta, to
+		// separate "nothing is rasterized" from "the pixel shader computes zero".
+		static const bool debug_solid_ps = std::getenv("KYTY_DEBUG_SOLID_PS") != nullptr;
+		if (debug_solid_ps && state.program.stage == ShaderType::Pixel &&
+		    exp.kind == IR::ExportTargetKind::Mrt && exp.index == 0 && !uint_output) {
+			const auto solid = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeConstruct, vector_type, solid,
+			                          ConstantF32Value(state, 1.0f), ConstantF32Value(state, 0.0f),
+			                          ConstantF32Value(state, 1.0f), ConstantF32Value(state, 1.0f));
+			value = solid;
+		}
 		if (state.program.stage == ShaderType::Pixel && exp.kind == IR::ExportTargetKind::Mrt &&
 		    exp.index == 0 && !uint_output &&
 		    state.input_info.pixel->alpha_blend_source != ShaderAlphaBlendSource::None) {

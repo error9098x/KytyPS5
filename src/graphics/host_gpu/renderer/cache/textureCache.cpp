@@ -17,6 +17,9 @@
 #include "kernel/memory.h"
 
 #include <cmath>
+#include <vector>
+#include <string>
+#include <cstdio>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -1839,8 +1842,71 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uin
 	return true;
 }
 
+namespace {
+// Diagnostics only (KYTY_INTERNAL_FRAME_DUMP_DIR): minimal RGBA->PNG writer (stored deflate).
+uint32_t DiagCrc32(const std::vector<uint8_t>& d, uint32_t crc = 0) {
+	crc = ~crc;
+	for (auto b: d) {
+		crc ^= b;
+		for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+	}
+	return ~crc;
+}
+void DiagBe32(std::vector<uint8_t>& v, uint32_t x) {
+	for (int s = 24; s >= 0; s -= 8) v.push_back(static_cast<uint8_t>(x >> s));
+}
+void DiagChunk(std::vector<uint8_t>& out, const char* type, const std::vector<uint8_t>& body) {
+	DiagBe32(out, static_cast<uint32_t>(body.size()));
+	std::vector<uint8_t> tb(type, type + 4);
+	tb.insert(tb.end(), body.begin(), body.end());
+	out.insert(out.end(), tb.begin(), tb.end());
+	DiagBe32(out, DiagCrc32(tb));
+}
+void DiagWritePng(const std::string& path, const uint8_t* rgba, uint32_t w, uint32_t h, bool bgra,
+                  bool opaque) {
+	std::vector<uint8_t> raw;
+	raw.reserve((static_cast<size_t>(w) * 4 + 1) * h);
+	for (uint32_t y = 0; y < h; y++) {
+		raw.push_back(0);
+		for (uint32_t x = 0; x < w; x++) {
+			const uint8_t* px = rgba + (static_cast<size_t>(y) * w + x) * 4;
+			raw.push_back(px[bgra ? 2 : 0]);
+			raw.push_back(px[1]);
+			raw.push_back(px[bgra ? 0 : 2]);
+			raw.push_back(opaque ? 255 : px[3]);
+		}
+	}
+	std::vector<uint8_t> z {0x78, 0x01};
+	for (size_t pos = 0; pos < raw.size();) {
+		const size_t n = std::min<size_t>(65535, raw.size() - pos);
+		z.push_back(pos + n == raw.size() ? 1 : 0);
+		z.push_back(static_cast<uint8_t>(n & 0xFF));
+		z.push_back(static_cast<uint8_t>(n >> 8));
+		z.push_back(static_cast<uint8_t>(~n & 0xFF));
+		z.push_back(static_cast<uint8_t>((~n >> 8) & 0xFF));
+		z.insert(z.end(), raw.begin() + pos, raw.begin() + pos + n);
+		pos += n;
+	}
+	uint32_t a = 1, b = 0;
+	for (uint8_t c: raw) { a = (a + c) % 65521; b = (b + a) % 65521; }
+	DiagBe32(z, (b << 16) | a);
+	std::vector<uint8_t> out {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+	std::vector<uint8_t> ihdr;
+	DiagBe32(ihdr, w); DiagBe32(ihdr, h);
+	ihdr.insert(ihdr.end(), {8, 6, 0, 0, 0});
+	DiagChunk(out, "IHDR", ihdr);
+	DiagChunk(out, "IDAT", z);
+	DiagChunk(out, "IEND", {});
+	if (FILE* f = std::fopen(path.c_str(), "wb")) {
+		std::fwrite(out.data(), 1, out.size(), f);
+		std::fclose(f);
+	}
+}
+} // namespace
+
 void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t layer,
-                                         uint64_t vertex_hash, uint64_t pixel_hash) {
+                                         uint64_t vertex_hash, uint64_t pixel_hash,
+                                         const char* role) {
 	static const bool enabled = std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr;
 	static const uint64_t address_filter = [] {
 		const char* value = std::getenv("KYTY_INTERNAL_FRAME_ADDRESS");
@@ -1890,8 +1956,8 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 	if (!(rgba || rg16f || rgba16f) || backing.samples != 1 || backing.image_type != vk::ImageType::e2D ||
 	    mip >= backing.mip_levels ||
 	    layer >= backing.layers || backing.image == nullptr) {
-		LOGF("InternalFrameStats: sample=%u skip format=%s samples=%u mip=%u layer=%u\n",
-		     sample, vk::to_string(backing.format).c_str(), image.info.samples, mip, layer);
+		LOGF("InternalFrameStats: sample=%u role=%s skip format=%s samples=%u mip=%u layer=%u address=0x%016" PRIx64 " ps=0x%016" PRIx64 "\n",
+		     sample, role, vk::to_string(backing.format).c_str(), image.info.samples, mip, layer, image.info.data.address, pixel_hash);
 		return;
 	}
 	const uint32_t width = std::max(backing.extent.width >> mip, 1u);
@@ -1948,23 +2014,34 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 			}
 			nonzero += any;
 		}
-		LOGF("InternalFrameStats: sample=%u address=0x%016" PRIx64 " format=%s extent=%ux%u "
+		LOGF("InternalFrameStats: sample=%u role=%s address=0x%016" PRIx64 " format=%s extent=%ux%u "
 		     "mip=%u layer=%u nonzero=%.4f%% avg=(%.3f,%.3f,%.3f,%.3f) max=(%.3f,%.3f,%.3f,%.3f) "
-		     "vs=0x%016" PRIx64 " ps=0x%016" PRIx64 "\n", sample, image.info.data.address,
+		     "vs=0x%016" PRIx64 " ps=0x%016" PRIx64 "\n", sample, role, image.info.data.address,
 		     vk::to_string(backing.format).c_str(), width, height, mip, layer,
 		     100.0 * nonzero / pixels, sum[0] / pixels, sum[1] / pixels, sum[2] / pixels,
 		     sum[3] / pixels, mx[0], mx[1], mx[2], mx[3], vertex_hash, pixel_hash);
 		return;
 	}
 	const auto* bytes = static_cast<const uint8_t*>(mapped);
+	if (const char* dump_dir = std::getenv("KYTY_INTERNAL_FRAME_DUMP_DIR")) {
+		if (static_cast<uint64_t>(width) * height <= 2200000ull) {
+			char name[160];
+			std::snprintf(name, sizeof(name), "/%04u_%s_%010" PRIx64 "_ps%08x.png", sample, role,
+			              image.info.data.address & 0xFFFFFFFFFFull,
+			              static_cast<uint32_t>(pixel_hash & 0xFFFFFFFFu));
+			const bool bgra = backing.format == vk::Format::eB8G8R8A8Unorm ||
+			                  backing.format == vk::Format::eB8G8R8A8Srgb;
+			DiagWritePng(std::string(dump_dir) + name, bytes, width, height, bgra, false);
+		}
+	}
 	uint64_t nonblack = 0, alpha = 0;
 	for (uint64_t i = 0; i < pixels; ++i) {
 		nonblack += bytes[i * 4] != 0 || bytes[i * 4 + 1] != 0 || bytes[i * 4 + 2] != 0;
 		alpha += bytes[i * 4 + 3];
 	}
-	LOGF("InternalFrameStats: sample=%u address=0x%016" PRIx64 " format=%s extent=%ux%u "
+	LOGF("InternalFrameStats: sample=%u role=%s address=0x%016" PRIx64 " format=%s extent=%ux%u "
 	     "mip=%u layer=%u rgb_nonblack=%.4f%% alpha_avg=%.2f vs=0x%016" PRIx64
-	     " ps=0x%016" PRIx64 "\n", sample, image.info.data.address,
+	     " ps=0x%016" PRIx64 "\n", sample, role, image.info.data.address,
 	     vk::to_string(backing.format).c_str(), width, height, mip, layer,
 	     100.0 * nonblack / pixels, static_cast<double>(alpha) / pixels, vertex_hash, pixel_hash);
 }

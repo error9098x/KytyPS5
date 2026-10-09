@@ -38,6 +38,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -246,6 +247,14 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
                               const ShaderVertexInputInfo& vs_input_info,
                               uint32_t index_type_and_size, uint32_t index_count,
                               const void* index_addr) {
+	// KYTY_DRAW_INPUT_MIN_FRAME=N: start the 64-draw input log at guest frame N (steady state).
+	static const int min_frame = [] {
+		const char* value = std::getenv("KYTY_DRAW_INPUT_MIN_FRAME");
+		return value != nullptr ? std::atoi(value) : 0;
+	}();
+	if (buffer.GetContext().GetGpu().GetFrameNum() < min_frame) {
+		return;
+	}
 	auto log_id = g_draw_input_log_count.fetch_add(1);
 	if (log_id >= 64) {
 		return;
@@ -352,8 +361,12 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 		} else {
 			viewport.x      = guest.xoffset - guest.xscale;
 			viewport.y      = guest.yoffset - guest.yscale;
-			viewport.width  = guest.xscale * 2.0f;
-			viewport.height = guest.yscale * 2.0f;
+		viewport.width  = guest.xscale * 2.0f;
+		viewport.height = guest.yscale * 2.0f;
+		if (std::getenv("KYTY_FORCE_POSITIVE_VIEWPORT") != nullptr && viewport.height < 0.0f) {
+			viewport.y      = 0.0f;
+			viewport.height = -viewport.height;
+		}
 		}
 		viewport.minDepth =
 		    guest.zoffset - (ctx.GetClipControl().dx_clip_space ? 0.0f : guest.zscale);
@@ -1193,12 +1206,100 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
 	}
+	// KYTY_INTERNAL_FRAME_VERTICES=1: log the topology and the vertices this draw really fetches.
+	static const bool log_vertices = std::getenv("KYTY_INTERNAL_FRAME_VERTICES") != nullptr;
+	if (log_vertices && state.ps_active && state.vertex_info[0].buffers_num > 0) {
+		const auto& vb = state.vertex_info[0].buffers[0];
+		LOGF("DrawVertexProbe: ps=0x%016" PRIx64 " prim=%u indexed=%d count=%u instances=%u "
+		     "first_vertex=%u vertex_offset=%d first_instance=%u vb=0x%010" PRIx64
+		     " stride=%u records=%u\n",
+		     state.ps_input_info.stage.program->shader_hash,
+		     static_cast<uint32_t>(ucfg.GetPrimType()), draw.IsIndexed() ? 1 : 0, draw.index_count,
+		     draw.instance_count, emit.first_vertex, emit.vertex_offset, emit.first_instance, vb.addr,
+		     vb.stride, vb.num_records);
+		const auto* bytes = reinterpret_cast<const uint8_t*>(vb.addr);
+		if (bytes != nullptr && vb.stride >= 20) {
+			const uint32_t shown = std::min<uint32_t>(std::max(draw.index_count, 1u), 6u);
+			for (uint32_t v = 0; v < shown; ++v) {
+				const uint64_t index = static_cast<uint64_t>(emit.first_vertex) + v;
+				if (index >= vb.num_records) break;
+				float f[4]; uint32_t color = 0;
+				std::memcpy(f, bytes + index * vb.stride, sizeof(f));
+				std::memcpy(&color, bytes + index * vb.stride + 16, sizeof(color));
+				LOGF("DrawVertexProbe:   v%u (x=%.2f y=%.2f u=%.2f v=%.2f) color=0x%08x\n", v, f[0],
+				     f[1], f[2], f[3], color);
+			}
+		}
+	}
+	// KYTY_VERTEX_GPU_COMPARE=1: read the vertex data the GPU really fetched (host buffer) back and
+	// compare it with guest memory, to detect stale/missed CPU->GPU uploads.
+	static const bool compare_gpu_vertices = std::getenv("KYTY_VERTEX_GPU_COMPARE") != nullptr;
+	static uint32_t   compare_count        = 0;
+	static const int compare_min_frame = [] {
+		const char* value = std::getenv("KYTY_VERTEX_GPU_COMPARE_MIN_FRAME");
+		return value != nullptr ? std::atoi(value) : 0;
+	}();
+	if (compare_gpu_vertices && !mesh_active && state.vertex_info[0].buffers_num > 0 &&
+	    vertex_bindings.buffers[0] != nullptr && compare_count < 400 &&
+	    buffer.GetContext().GetGpu().GetFrameNum() >= compare_min_frame) {
+		const auto& vb = state.vertex_info[0].buffers[0];
+		if (vb.addr != 0 && vb.stride >= 20 && vb.stride <= 256) {
+			const uint64_t first = static_cast<uint64_t>(emit.first_vertex);
+			const uint32_t shown = std::min<uint32_t>(std::max(draw.index_count, 1u), 4u);
+			const uint64_t bytes = static_cast<uint64_t>(shown) * vb.stride;
+			if (first + shown <= vb.num_records) {
+				auto& scheduler = m_context.GetCommandScheduler();
+				scheduler.EndRendering();
+				auto& dl = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Download);
+				auto [mapped, offset] = dl.Map(bytes, 4);
+				if (mapped != nullptr) {
+					dl.Commit();
+					vk::BufferCopy copy {vertex_bindings.offsets[0] + first * vb.stride, offset, bytes};
+					scheduler.Current().Handle().copyBuffer(vertex_bindings.buffers[0], dl.Handle(), copy);
+					vk::BufferMemoryBarrier barrier {};
+					barrier.srcAccessMask       = vk::AccessFlagBits::eTransferWrite;
+					barrier.dstAccessMask       = vk::AccessFlagBits::eHostRead;
+					barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+					barrier.buffer              = dl.Handle();
+					barrier.offset              = offset;
+					barrier.size                = bytes;
+					scheduler.Current().Handle().pipelineBarrier(
+					    vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eHost, {}, 0,
+					    nullptr, 1, &barrier, 0, nullptr);
+					scheduler.FlushAndWait();
+					dl.Invalidate(offset, bytes);
+					const auto* gpu   = static_cast<const uint8_t*>(mapped);
+					const auto* guest = reinterpret_cast<const uint8_t*>(vb.addr) + first * vb.stride;
+					const bool  match = std::memcmp(gpu, guest, bytes) == 0;
+					float g[4] {}, h[4] {};
+					std::memcpy(g, gpu, sizeof(g));
+					std::memcpy(h, guest, sizeof(h));
+					++compare_count;
+					LOGF("VertexGpuCompare: ps=0x%016" PRIx64 " first=%u count=%u %s gpu_v0=(%.2f,%.2f,%.2f,%.2f)"
+					     " guest_v0=(%.2f,%.2f,%.2f,%.2f)\n",
+					     state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0,
+					     emit.first_vertex, draw.index_count, match ? "MATCH" : "MISMATCH", g[0], g[1],
+					     g[2], g[3], h[0], h[1], h[2], h[3]);
+				}
+			}
+		}
+	}
 	for (uint32_t i = 0; i < state.color_count; ++i) {
 		const auto& color = state.color_info[i];
 		m_context.GetTextureCache().LogInternalFrameStats(
 		    color.image_id, color.desc.view_info.base_level, color.desc.view_info.base_layer,
 		    state.vertex_info[0].stage.program->shader_hash,
 		    state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0);
+	}
+	// KYTY_INTERNAL_FRAME_SAMPLED=1: also read back every texture the pixel shader samples.
+	static const bool log_sampled = std::getenv("KYTY_INTERNAL_FRAME_SAMPLED") != nullptr;
+	if (log_sampled && state.ps_active && bindings.pixel) {
+		for (const auto& texture: bindings.pixel->images) {
+			m_context.GetTextureCache().LogInternalFrameStats(
+			    texture.image_id, texture.desc.view_info.base_level,
+			    texture.desc.view_info.base_layer, state.vertex_info[0].stage.program->shader_hash,
+			    state.ps_input_info.stage.program->shader_hash, "sampled");
+		}
 	}
 }
 
