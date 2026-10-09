@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+build_dir=${KYTY_BUILD_DIR:-$root/_Build/macos-x86_64}
+game_dir=${KYTY_GAME_DIR:-$root/../Animal.Well-extracted-unar/[SuperPSX]-Animal.Well-PPSA22520-JPN-Game\ \(v01.000.011\)-PS5}
+timeout_seconds=${KYTY_TIMEOUT_SECONDS:-30}
+run_id=${1:-$(date +%Y%m%d-%H%M%S)}
+out_dir=${KYTY_HARNESS_OUT:-$root/harness/runs/$run_id}
+mkdir -p "$out_dir/shaders"
+
+if [ ! -x "$build_dir/kyty_emulator" ]; then
+	printf '%s\n' "missing emulator: $build_dir/kyty_emulator" >&2
+	exit 2
+fi
+if [ ! -d "$game_dir" ]; then
+	printf '%s\n' "missing game directory: $game_dir" >&2
+	exit 2
+fi
+
+export KYTY_BORDERLESS=${KYTY_BORDERLESS:-1}
+# Frame stats are always on (cheap). PNG dumps are opt-in: KYTY_FRAME_DUMP=1 (~25 MB per 4K frame).
+export KYTY_FRAME_STATS=1
+if [ "${KYTY_FRAME_DUMP:-0}" = "1" ]; then
+	mkdir -p "$out_dir/frames"
+	export KYTY_FRAME_DUMP_DIR="$out_dir/frames"
+else
+	unset KYTY_FRAME_DUMP_DIR
+fi
+# Default Vulkan loader for the x86-64 build (override with SDL_VULKAN_LIBRARY).
+if [ -z "${SDL_VULKAN_LIBRARY:-}" ] && [ -f /tmp/mvk-x86/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib ]; then
+	export SDL_VULKAN_LIBRARY=/tmp/mvk-x86/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
+fi
+python3 - "$build_dir/kyty_emulator" "$game_dir" "$timeout_seconds" "$out_dir" <<'PY'
+import os, pathlib, signal, subprocess, sys, time
+
+exe, game, timeout_s, out_dir = sys.argv[1], sys.argv[2], float(sys.argv[3]), pathlib.Path(sys.argv[4])
+log = out_dir / "kyty.log"
+args = [exe, "--game", game,
+        "--shader-log-direction", "File", "--shader-log-folder", str(out_dir / "shaders"),
+        "--printf-direction", "File", "--printf-output-file", str(out_dir / "guest-printf.log"),
+        "--vulkan-validation", "false",
+        "--graphics-debug-dump", os.environ.get("KYTY_GRAPHICS_DEBUG_DUMP", "false")]
+started = time.time()
+with log.open("w") as stream:
+    proc = subprocess.Popen(args, stdout=stream, stderr=subprocess.STDOUT,
+                            start_new_session=True, env=os.environ.copy())
+    try:
+        rc = proc.wait(timeout=timeout_s)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            rc = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            rc = proc.wait()
+elapsed = time.time() - started
+(out_dir / "run.json").write_text(
+    '{"exit_code":%d,"timed_out":%s,"elapsed_seconds":%.3f}\n' %
+    (rc, str(timed_out).lower(), elapsed))
+print("run_dir=%s exit=%d timeout=%s elapsed=%.3f" % (out_dir, rc, timed_out, elapsed))
+PY
+python3 "$root/harness/scan_log.py" "$out_dir/kyty.log" "$out_dir/guest-printf.log" > "$out_dir/scan.txt"
+python3 "$root/harness/stage.py" "$out_dir" >> "$out_dir/scan.txt"
+cat "$out_dir/scan.txt"

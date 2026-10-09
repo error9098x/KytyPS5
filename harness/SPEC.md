@@ -1,0 +1,67 @@
+# Animal Well on KytyPS5: Harness Specification
+
+## Scope
+
+Target the legally dumped Animal Well package (`PPSA22520`, content version
+`01.000.011`) on this machine, while preserving existing KytyPS5 behavior for
+other games and homebrew. Game-specific workarounds must be gated by an
+explicit per-game condition. Missing functionality should be implemented
+properly where practical; every compatibility stub must be logged.
+
+## Baseline environment
+
+- KytyPS5 commit: `4c8fc53a8582543200caa697acad2a9f09937cec` (main,
+  2026-10-09)
+- Host: macOS 26.5.1, Apple Silicon `Mac17,3`, ARM64, 10 CPU cores, 16 GiB RAM
+- Intended build: x86-64 under Rosetta 2, Vulkan 1.3 through MoltenVK
+- Game package: extracted under `Animal.Well-extracted-unar/`, title ID
+  `PPSA22520`, version `01.000.011`
+
+## Repository map
+
+- CPU/loader/JIT: `src/loader` (ELF/runtime linker/JIT), guest instruction
+  patching and emulation
+- GPU: `src/graphics/guest_gpu`, `src/graphics/host_gpu`
+- Shader translation: `src/graphics/shader/recompiler`
+- Kernel and libraries: `src/kernel`, `src/libs`
+- Configuration and logging: `src/common/emulatorConfig.*`,
+  `src/common/logging/*`, CLI in `src/main.cpp`
+- Build: CMake + Ninja, C++20, Clang; no-Qt target is `kyty_emulator`
+
+## Baseline findings
+
+1. ARM64 native configuration fails during `src/common/hostException.cpp`:
+   x86 thread-state members (`__rip`, `__err`) are unavailable in ARM headers.
+2. The documented x86-64 configuration builds successfully. MoltenVK 1.4.2's
+   universal library is supplied explicitly because Homebrew's ARM-only library
+   cannot load into the x86-64 Rosetta process.
+3. The unmodified x86-64 runtime rejects the Apple M5 GPU's unsupported Vulkan
+   features before game loading (`image view minLod`, buffer int64 atomics,
+   cull distance).
+4. After the Apple capability fallback, the game reaches NGS2 audio and then
+   the first graphics pipelines. NGS2 gain (`0x30000004`) and two missing NGS2
+   exports were implemented from public ABI evidence.
+5. The first vertex pipeline then fails on MoltenVK's inability to compile a
+   subgroup builtin in a vertex function. A PPSA22520-only Apple fallback uses
+   `gl_VertexIndex` as the subgroup lane value; three 30-second runs remain
+   alive past pipeline creation, pending visual confirmation.
+3. Upstream documentation identifies macOS as experimental and expects the
+   x86-64/Rosetta + MoltenVK path.
+4. No Animal Well-specific KytyPS5 compatibility report was found in the
+   initial upstream research.
+
+## Acceptance stages
+
+1. First frame without a crash, stable across three runs.
+2. Title/menu reached, stable across three runs.
+3. Gameplay survives 10 minutes, stable across three runs.
+4. No major visual or missing-effect defects against fixed screenshots.
+5. Performance target: first establish baseline; then target >=30 FPS and
+   investigate 60 FPS, recording frame-time and shader-stutter spikes.
+
+## Boundaries
+
+- Use only the user's legally dumped copy.
+- Do not distribute game files, system software, keys, or bypass protections.
+- Do not make unmeasured changes; retain before/after logs.
+- Back up emulator configs and saves before runtime testing.
