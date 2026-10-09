@@ -86,3 +86,11 @@ library. No game-specific diagnosis is valid until this is resolved.
   to the final compositing chain or its source texture state.
 - Added `KYTY_INTERNAL_FRAME_ADDRESS` filtering for targeted follow-up runs.
 - Added NGS2 mastering/rack/port regression coverage; `ngs2_sampler` passes.
+
+## Shader descriptor trace — 2026-10-09
+
+- The first VS descriptor trace reports valid readable scalar buffers:
+  - screen constants: `320.0`, `180.0`
+  - texture constants: `1024`, `2048`, plus valid metadata
+- Both descriptors are `type=0`, nonzero, 16-byte ranges. The constant-buffer
+  materialization/offset hypothesis is rejected for this draw.

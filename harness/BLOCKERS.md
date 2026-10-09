@@ -27,3 +27,7 @@ The readback proves that some intermediate 8-bit targets are non-black while the
 final video target is black. The next fix should trace the final composite source
 and image barriers/format handling, with a targeted non-black readback as the
 keep/revert gate.
+
+The first vertex shader's scalar descriptors are now proven valid (320x180 and
+1024x2048 values). Do not change S_LOAD/component offset lowering; that theory
+is contradicted by runtime data and SPIR-V inspection.

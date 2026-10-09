@@ -33,6 +33,8 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cinttypes>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <limits>
 #include <span>
@@ -812,6 +814,12 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 		const auto& program  = *prepared.runtime->program;
 		const auto& snapshot = *prepared.runtime->resources;
 		const auto& layout = program.bindings;
+		const bool log_resources = std::getenv("KYTY_DRAW_RESOURCE_STATS") != nullptr;
+		if (log_resources) {
+			LOGF("ShaderBufferLayout: hash=0x%016" PRIx64 " buffers=%zu descriptors=%u\n",
+			     program.shader_hash, program.info.buffers.size(),
+			     layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)]);
+		}
 		prepared.buffer_sources.resize(layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)]);
 		if (layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)] == 0) {
 			continue;
@@ -823,6 +831,17 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 			const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[resource]);
 			const auto address = descriptor.Base48();
 			auto size = descriptor.GetSize();
+			if (log_resources) {
+				uint32_t words[4] = {};
+				const bool readable = address != 0 && size >= sizeof(words) &&
+				                      Libs::LibKernel::Memory::TryReadBacking(address, words, sizeof(words));
+				LOGF("ShaderBufferState: hash=0x%016" PRIx64 " resource=%u descriptor=%u "
+				     "base=0x%012" PRIx64 " size=0x%012" PRIx64 " type=%u stride=%u records=%u"
+				     " words=%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 " readable=%s\n",
+				     program.shader_hash, resource, metadata.descriptor_index, address, size,
+				     descriptor.Type(), descriptor.Stride(), descriptor.NumRecords(), words[0], words[1],
+				     words[2], words[3], readable ? "yes" : "no");
+			}
 			if (address == 0 || size == 0) {
 				source = {};
 				continue;
