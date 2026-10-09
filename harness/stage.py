@@ -22,7 +22,7 @@ presented = len(frames) or len(timings)
 content = any(f[3] == "HAS_CONTENT" for f in frames)
 audio_signal = bool(re.search(r"(?:Ngs2AudioStats|AudioStats):.*?rms=(?!0(?:\.0+)?(?:\s|$))[0-9]", guest))
 input_signal = bool(re.search(r"InputStats:.*(?:controller|key=)", guest))
-gameplay_signal = meta.get("route") == "gameplay" or audio_signal
+gameplay_signal = meta.get("route") == "gameplay" and (audio_signal or input_signal)
 long_clean = bool(meta.get("timed_out")) and float(meta.get("elapsed_seconds", 0)) >= 600
 if presented and alive and long_clean and gameplay_signal:
     stage = 3
