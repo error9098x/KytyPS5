@@ -376,7 +376,16 @@ void TestMasteringGainAndInfo() {
 		          Ngs2VoiceGetPortInfo(voice_handle, 0, &port, sizeof(port) - 1) == static_cast<int32_t>(0x804a8011u) &&
 		          Ngs2VoiceGetPortInfo(1, 0, &port, sizeof(port)) != OK &&
 		          Ngs2VoiceGetPortInfo(voice_handle, 1, &port, sizeof(port)) != OK,
-		      "voice port info failed pointer/size/arbitrary handle/port validation");
+			          "voice port info failed pointer/size/arbitrary handle/port validation");
+		Ngs2VoiceChannelsInfo channels_info {};
+		Check(Ngs2VoiceQueryInfo(voice_handle, 0x4001, &channels_info, sizeof(channels_info)) == OK &&
+		          channels_info.num_channels == channels,
+		      "voice channel query did not report configured channels");
+		Check(Ngs2VoiceQueryInfo(voice_handle, 0x4001, nullptr, sizeof(channels_info)) ==
+		              static_cast<int32_t>(0x804a8010u) &&
+		          Ngs2VoiceQueryInfo(voice_handle, 0x4001, &channels_info, sizeof(channels_info) - 1) ==
+		              static_cast<int32_t>(0x804a8011u),
+		      "voice channel query failed pointer/size validation");
 		Check(Ngs2RackDestroy(mastering_handle, nullptr) == OK && Ngs2RackDestroy(sampler_handle, nullptr) == OK,
 		      "gain fixture cleanup failed");
 		Check(Ngs2RackGetInfo(sampler_handle, &info, sizeof(info)) != OK &&

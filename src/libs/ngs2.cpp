@@ -1942,9 +1942,12 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 		}
 		for (uint32_t dst = 0; dst < output.num_channels; ++dst) {
 			for (uint32_t src = 0; src < voice->channels; ++src) {
-				const float level = voice->output_matrix.empty()
-				                        ? (src == dst ? 1.0f : 0.0f)
-				                        : voice->output_matrix.at(src * output.num_channels + dst);
+				const float matrix_level = voice->output_matrix.empty()
+				                               ? (src == dst ? 1.0f : 0.0f)
+				                               : voice->output_matrix.at(src * output.num_channels + dst);
+				const float gain = output.num_channels >= 6 && src == 3 ? voice->lfe_level
+				                                                    : voice->fbw_level;
+				const float level = matrix_level * gain;
 				for (uint32_t i = 0; i < grain; ++i) {
 					pcm[i * output.num_channels + dst] += voice->samples[src * grain + i] * level;
 				}
