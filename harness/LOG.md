@@ -386,6 +386,28 @@ library. No game-specific diagnosis is valid until this is resolved.
   initial Cross bootstrap and first guest initialization.
 - Readback-enabled visual runs are kept separate because frame dumps stall the
   GPU and inflate latency tails.
+
+## Virtual-vblank frequency A/B — 2026-10-10
+
+- Exposed `KYTY_VBLANK_FREQUENCY` through the harness and compared three 120 Hz
+  runs with three 60 Hz runs using the gameplay bootstrap route.
+- Arrow-Left guest-observation p95/max values at 120 Hz were
+  `16.55/17.00`, `40.03/49.96`, and `15.03/42.46` ms. At 60 Hz they were
+  `22.64/26.84`, `21.27/23.82`, and `17.41/19.22` ms. Startup stalls remained
+  multi-second in both groups, so 120 Hz was not retained as a default.
+- The 60 Hz virtual vblank preserves PS5 timing semantics; 120 Hz remains an
+  opt-in diagnostic comparison through the harness.
+
+## Metal Performance HUD — 2026-10-10
+
+- Ran the unmodified harness with `MTL_HUD_ENABLED=1`,
+  `MTL_HUD_ELEMENTS=fps`, and `MTL_HUD_ALIGNMENT=topright`.
+- The Kyty log contains `[libMTLHud]` registrations for FPS, frame interval,
+  present delay, and logical FPS metrics. The run exited cleanly and measured
+  421 presented frames at a 60.03 FPS median.
+- A desktop screenshot could not be captured in the headless Codex session, so
+  the HUD's on-screen text is not visually verified here. No emulator code or
+  synchronization setting was changed.
 - Three 35-second runs with the first probe event delayed to 10 seconds measured
   warm host-to-present median/p95/max of `8.94/22.68/28.62 ms`,
   `9.12/26.16/32.93 ms`, and `10.46/27.34/35.00 ms`. Guest-poll p95 was

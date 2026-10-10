@@ -72,6 +72,9 @@ long input-delay reports remain in progress.
   `python3 harness/image_diff.py <reference.png> <candidate.png> --stride 8`.
 - The staged groups are machine-checked with `harness/acceptance.py`: gameplay
   Stage 3 and the three visual Stage 2 probes both pass their three-run checks.
+- Metal's built-in HUD was enabled without code changes. Kyty logged the HUD
+  metric registrations and a clean 60.03 FPS median run; the headless session
+  could not capture the overlay visually.
 
 ## Kept fixes
 
@@ -81,6 +84,9 @@ long input-delay reports remain in progress.
 - Opt-in frame timing, audio signal, and input-to-present telemetry.
 - Apple/PPSA22520 title-gated Immediate presentation when Mailbox is otherwise
   selected; `KYTY_PPSA22520_MAILBOX` retains Mailbox for comparison.
+- The virtual-vblank default remains 60 Hz. A three-run 120 Hz comparison did
+  not consistently improve movement latency and retained multi-second startup
+  stalls, so it remains an opt-in harness setting only.
 - Startup profiling attributes the repeated 2.88–2.99 s gap to first-use
   MoltenVK/Metal command encoding and timeline synchronization; no unsafe
   synchronization workaround was retained.
