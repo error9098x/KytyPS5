@@ -366,6 +366,14 @@ library. No game-specific diagnosis is valid until this is resolved.
   `306.1/2142.8/2160.3` ms, host-to-observed-button max to `4140.8` ms, and
   startup max to `3810` ms. The setting is rejected and was not retained.
 
+## Blocked-submission retry experiment — 2026-10-10
+
+- A diagnostic override was briefly added for the retry timeout used when all
+  guest-GPU submission queues are blocked. Source review showed
+  `Common::CondVar::WaitFor` takes microseconds, so the existing `100` value is
+  0.1 ms rather than 100 ms. The hypothesis could not explain the observed
+  stall; the change was reverted and no runtime behavior was retained.
+
 ## Gameplay input route — 2026-10-10
 
 - The synthetic probe now supports a bounded Cross bootstrap followed by a
