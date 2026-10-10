@@ -129,3 +129,51 @@ failed: 2` appeared in the log; it is probably harmless (missing directory) but 
 2. Make pipeline-creation failure non-fatal for diagnosis, then list every failing shader in one run.
 3. Re-test Animal Well (3 runs, all-nonblack frames, audio nonzero) to confirm no regression.
 4. Repeat: run, find the first blocker, fix, commit, log in `harness/LOG.md`.
+
+## Update 2026-10-10 (later): mesh-shader blocker analysis and proposed fix
+
+`KYTY_MESH_TRACE=1` (new, opt-in, `src/graphics/shader/shader.cpp` `PrepareProgram`) logs why a
+draw takes the mesh path. Silent Hill's first mesh draw (run `shtsm-mesh-trace`):
+
+```
+MeshTrace: hash=4e991d9d461f621d merged=1 native_ngg=0 type=4 fast_launch=0 prim=6 gs_out_prim=2
+gs_max_vert_out=3 max_vertices=192 max_prims=64 prims_per_group=62 verts_per_group=64 threads=192
+lds_dw=2176 wave=64 gs_front=1
+```
+
+So it is a real ES+GS pair (`merged=1`, GS front+back), triangle-strip output, max 3 vertices
+out per input primitive (one triangle each), 64 input verts / 62 prims per group, 192 threads,
+8.7 KB LDS. Kyty runs this only as a Vulkan mesh shader; MoltenVK has no `VK_EXT_mesh_shader`.
+
+### Proposed fix: "mesh via compute" (not implemented)
+
+The emitter is well isolated (`spirvEmitterMesh.cpp`, ~230 lines): the guest function writes
+per-lane outputs into Private/Workgroup arrays, and only `EmitMeshEntryPoint` calls
+`OpSetMeshOutputsEXT` and copies to Output arrays. Plan:
+
+1. Recompiler: add an Apple option to emit the Mesh program as `GLCompute` with the same
+   LocalSize. In `DefineMeshOutputs`/`EmitMeshEntryPoint`, replace Output arrays with stores into
+   an SSBO: vertex records at `(group * max_vertices + i)` (position, params, clip/cull, layer)
+   and triangle records at `(group * max_primitives + i)` as `uvec4(v0, v1, v2, flags)`; write a
+   "dead" marker for `i >= primitives` or the null/cull bit. `group = WorkgroupId.x +
+   WorkgroupId.y * NumWorkgroups.x` (Y = instance, matching `drawMeshTasksEXT(groups, instances, 1)`).
+   Drop the MeshShadingEXT capability/extension and mesh execution modes.
+2. Recompiler: generate a passthrough vertex shader. `prim = gl_VertexIndex / 3`,
+   `corner = gl_VertexIndex % 3`; read the triangle; if dead, output a degenerate position;
+   otherwise read the vertex record and write `gl_Position`, the same `Location`s as the mesh
+   outputs (so the pixel shader is unchanged), clip/cull distances, and layer.
+3. Host: `NativeBinding` maps both Mesh and Compute to binding group 0, so the compute variant
+   can reuse the mesh stage's descriptor slots. Add `eCompute` to the stage flags used for that
+   layout, or build a compute layout from the same bindings.
+4. Draw path (`renderDraw.cpp` `ExecutePreparedDraw`, the `mesh_active` branch): allocate or
+   grow a scratch SSBO; `EndRendering()`; bind the compute pipeline, commit bindings with
+   `eCompute`, push the same `draw_data`; `dispatch(mesh_groups, instance_count, 1)`; add a
+   barrier (compute write -> vertex shader read); then draw
+   `mesh_groups * instance_count * max_primitives * 3` vertices with the passthrough pipeline.
+   Rendering is begun lazily before each draw, so ending it before the dispatch fits the
+   existing structure.
+5. Gate everything to Apple when `!mesh_shader_enabled`; keep the real mesh path elsewhere.
+
+Rough size: 600–1000 lines across the recompiler, pipeline creation, and the draw path.
+Risks: per-draw render-pass splits (performance), primitive restart (already unimplemented on
+the mesh path), provoking-vertex/flat semantics, and whatever Unreal Engine blockers come next.

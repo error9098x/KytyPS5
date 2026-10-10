@@ -1,4 +1,5 @@
 #include "graphics/shader/shader.h"
+#include <cstdlib>
 
 #include "common/assert.h"
 #include "common/common.h"
@@ -786,6 +787,17 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	const auto threads = native_ngg && !mesh.fast_launch ? mesh.vertices_per_group : mesh.max_vertices;
 	mesh.threads_num[0] = ((threads + mesh.wave_size - 1u) / mesh.wave_size) * mesh.wave_size;
 	mesh.threads_num[1] = mesh.threads_num[2] = 1u;
+	if (std::getenv("KYTY_MESH_TRACE") != nullptr) {
+		LOGF("MeshTrace: hash=%016" PRIx64 " merged=%d native_ngg=%d type=%u fast_launch=%d prim=%u "
+		     "gs_out_prim=%u gs_max_vert_out=%u max_vertices=%u max_prims=%u prims_per_group=%u "
+		     "verts_per_group=%u threads=%u lds_dw=%u wave=%u gs_front=%d\n",
+		     params.hash, merged ? 1 : 0, native_ngg ? 1 : 0, static_cast<unsigned>(data.type),
+		     mesh.fast_launch ? 1 : 0, mesh.input_primitive, sh.m_vgtGsOutPrimType,
+		     sh.m_vgtGsMaxVertOut, mesh.max_vertices, mesh.max_primitives,
+		     mesh.primitives_per_group, mesh.vertices_per_group, mesh.threads_num[0],
+		     mesh.lds_size_dwords, mesh.wave_size,
+		     data.type == Prospero::ShaderBinaryType::kGsFront ? 1 : 0);
+	}
 	return params;
 }
 
