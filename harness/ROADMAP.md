@@ -35,7 +35,7 @@ compare fixed-point screenshots with an independent reference.
 ### Not done
 * Fixed-point visual comparison against an independent reference and sustained performance work.
 * Audible confirmation on the user's selected macOS playback device.
-* Visible-state response measurement for the user's reported 40 ms–1 s delay.
+* Reduce the pre-poll initialization/residency stall; warm gameplay movement is already measured below 25 ms to guest observation.
 * The 108 unresolved imports (never called in the measured route) remain intentionally deferred.
 * Keep the local save backup at `harness/backups/animal-well-20261010/` intact;
   its `MANIFEST.sha256` covers the two save files. No separate repository or
@@ -89,8 +89,10 @@ evidence in each run. **Done.**
 `KYTY_INPUT_STATS=1` and `KYTY_FRAME_TIMING=1`; this follows the same host-input
 path without requiring a focused window. Three 35-second warm probes reached
 stable median/p95 next-present delays below 11/28 ms. Host-path measurement is
-**Done**; the first title-to-gameplay shader-compilation hitch and visible-state
-response remain open.
+**Done** for warm gameplay. A bounded bootstrap route reaches the “Wake up”
+scene and measures Arrow-Left at 7.35/17.59/24.30 ms median/p95/max to guest
+observation. The remaining one-second samples occur before the first pad poll,
+around initialization and Metal residency work; shader compilation begins later.
 
 **Step 4 — Visual gate.** Capture the same fixed gameplay points on three runs and
 compare against a reference capture with `harness/image_diff.py`, recording image
@@ -98,7 +100,10 @@ diffs and any missing effects.
 
 **Step 5 — Startup stutter.** Keep the active Vulkan pipeline cache and profile the
 remaining guest/host initialization hitch; retain a change only if the three-run p95/max
-startup metrics improve without reducing sustained FPS.
+startup metrics improve without reducing sustained FPS. Guest-GPU timing now shows a
+724 ms processing slice, a ~456 ms early submission, and a ~3.4 s total frame gap.
+Immediate presentation, vblank 120 Hz, Metal heap changes, and legal two-image
+swapchain buffering did not produce a consistent improvement.
 
 The harness no longer enables shader IR dumps during ordinary performance runs;
 use `KYTY_SHADER_LOG_DIRECTION=File` only for diagnostics.
