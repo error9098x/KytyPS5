@@ -10,4 +10,5 @@ harness/runs/
 harness/backups/
 harness/tools/
 _SaveData/
+_DownloadData/
 harness/__pycache__/

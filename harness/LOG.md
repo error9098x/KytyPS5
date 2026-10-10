@@ -489,3 +489,24 @@ library. No game-specific diagnosis is valid until this is resolved.
 - Root cause: `GameController::AddState()` queued every motion/stick packet; `scePadRead(num=1)`
   returned the oldest sample. Fixed by coalescing non-discrete updates (`56852717`).
 - After fix: median 14.17 ms, max 18.68 ms; next present max 33.42 ms. See `INPUT_LAG_FIX.md`.
+
+## Silent Hill: The Short Message bring-up — 2026-10-10
+
+Two Apple/MoltenVK blockers cleared; the game now reaches mesh shaders.
+
+- **Blocker A — aliased storage-buffer views (FIXED, `5f8b23d4`).** The first compute shader
+  emitted both `%buffers_u8` and `%buffers` at DescriptorSet 0 / Binding 0 with `Aliased`.
+  Metal's SPIR-V-Cross path rejects that. On Apple, Kyty now declares only the 32-bit view and
+  emulates sub-word access through the existing shift/mask path. Before: exit 65 at ~3.5 s with
+  `SPIR-V to MSL conversion error: Attempting to alias same binding`. After: the shader compiles.
+- **Blocker B — vertex subgroup builtins (FIXED, `652d4247`).** A vertex shader read
+  `SubgroupLocalInvocationId`, which Metal vertex functions cannot expose. The lane-id fallback
+  (from the vertex index) was PPSA22520-only; the title check is now named and includes PPSA10112.
+  That shader uses the id only in an always-1 lane mask.
+- **Progress:** shaders compiled before stopping went 0 → VS 4 / PS 3 / CS 16, past engine config
+  and into ATRAC9 audio decoder init.
+- **Regression:** Animal Well, 3 × 45 s runs, stage 2, 41–43 content frames each, no change.
+- **Blocker C — mesh shaders (OPEN, host limit).** `EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled)`
+  at `pipelineCache.cpp:625`. This host's MoltenVK 1.4.2 does not expose `VK_EXT_mesh_shader`
+  (absent from its documented extension list; upstream issue #2375 has been open since 2024-10).
+  Kyty renders PS5 NGG geometry as Vulkan mesh shaders, so any PS5 3D title needs host mesh shaders.
