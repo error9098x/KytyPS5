@@ -656,6 +656,21 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 	return true;
 }
 
+#if defined(__APPLE__)
+// True when the instruction at `rip` is VEX-encoded with 256-bit vector length (VEX.L = 1).
+// Rosetta splits these accesses into two halves, which is unsafe across protected pages.
+static bool IsVex256Instruction(uint64_t rip) {
+	const auto* code = reinterpret_cast<const uint8_t*>(rip);
+	if (code[0] == 0xc5) {
+		return (code[1] & 0x04u) != 0; // 2-byte VEX: byte 1 bit 2 is L
+	}
+	if (code[0] == 0xc4) {
+		return (code[2] & 0x04u) != 0; // 3-byte VEX: byte 2 bit 2 is L
+	}
+	return false;
+}
+#endif
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -674,7 +689,13 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			case CoreAccess::Execute: access = GpuAccess::Execute; break;
 			case CoreAccess::Unknown: return false;
 		}
-		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
+#if defined(__APPLE__)
+		const bool wide_access = IsVex256Instruction(info->exception_address);
+#else
+		const bool wide_access = false;
+#endif
+		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr,
+		                                            wide_access)) {
 			return true;
 		}
 	}

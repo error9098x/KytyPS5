@@ -48,7 +48,9 @@ public:
 	TextureCache&       GetTextureCache() { return m_texture_cache; }
 	RenderExecutor&     GetRenderExecutor() { return m_render_executor; }
 
-	[[nodiscard]] bool HandleFault(PageFaultAccess access, uint64_t fault_vaddr) noexcept;
+	// `wide_access`: the faulting instruction is a 256-bit vector access (see HandleFault).
+	[[nodiscard]] bool HandleFault(PageFaultAccess access, uint64_t fault_vaddr,
+	                               bool wide_access = false) noexcept;
 	[[nodiscard]] bool InvalidateMemory(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsMapped(uint64_t vaddr, uint64_t size) const noexcept;
 	void               MapMemory(uint64_t vaddr, uint64_t size);

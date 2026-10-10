@@ -5,6 +5,8 @@
 #include "graphics/host_gpu/regionDefinitions.h"
 
 #include <memory>
+#include <utility>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -19,6 +21,13 @@ public:
 	KYTY_CLASS_NO_COPY(PageManager);
 
 	[[nodiscard]] uint64_t GetPageSize() const;
+	// Number of consecutive tracked (read- or access-protected) pages starting at `vaddr`,
+	// stopping at the first unprotected page or after `max_pages`.
+	[[nodiscard]] uint64_t CountProtectedPagesFrom(uint64_t vaddr, uint64_t max_pages) const;
+	// Tracked (protected) pages inside [vaddr, vaddr + window_pages * page size), merged into
+	// {address, page count} runs. At most `max_runs` runs are returned.
+	[[nodiscard]] std::vector<std::pair<uint64_t, uint64_t>>
+	ProtectedRunsFrom(uint64_t vaddr, uint64_t window_pages, size_t max_runs) const;
 
 	template <bool track>
 	void UpdatePageWatchers(uint64_t vaddr, uint64_t size);

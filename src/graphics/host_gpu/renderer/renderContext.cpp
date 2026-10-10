@@ -1,5 +1,11 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 
+#include <cinttypes>
+
+#include <cstdlib>
+
+#include <cstdio>
+
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -54,10 +60,18 @@ VideoOut::VideoOutDriver& RenderContext::GetVideoOut() const {
 	return *m_video_out;
 }
 
-bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) noexcept {
+bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr,
+                                bool wide_access) noexcept {
 	// The host reports the faulting byte, not the instruction's access width. Both caches
 	// resolve its page; guessing a width can cross the end of a valid guest mapping.
 	constexpr uint64_t fault_size = 1;
+	static const bool  log_faults = std::getenv("KYTY_FAULT_LOG") != nullptr;
+	if (log_faults) {
+		std::fprintf(stderr, "Fault: access=%c vaddr=0x%016" PRIx64 " page_off=0x%03" PRIx64 " mapped=%d\n",
+		             access == PageFaultAccess::Write ? 'W' : 'R', fault_vaddr, fault_vaddr & 0xfffu,
+		             IsMapped(fault_vaddr, fault_size) ? 1 : 0);
+		std::fflush(stderr);
+	}
 	if (!IsMapped(fault_vaddr, fault_size)) {
 		return false;
 	}
@@ -67,6 +81,53 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	} else {
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
+#if defined(__APPLE__)
+	// Rosetta executes a 256-bit AVX load/store as two 128-bit halves. If the first half commits
+	// and the second then faults on a still-protected page, Rosetta aborts the process
+	// ("unexpectedly need to EmulateForward on a synchronous exception") before this handler can
+	// run. A long sequential 256-bit loop (memset/memcpy over tracked memory) would cross into the
+	// next protected page after every handled fault, so resolve the whole contiguous protected
+	// run ahead of the access in one step. This trades finer dirty tracking for not crashing.
+	// Experimental and opt-in (KYTY_ROSETTA_RUNAHEAD=1): it removes the chained-fault case but
+	// not the entry-boundary case (a writer crossing from an untracked page into a tracked one
+	// never faults first), and it over-invalidates tracked memory.
+	static const bool run_ahead_enabled = std::getenv("KYTY_ROSETTA_RUNAHEAD") != nullptr;
+	if (wide_access && run_ahead_enabled) {
+		// Window the sequential loop is assumed to stay within, and a cap on how many separate
+		// protected runs are resolved per fault.
+		constexpr uint64_t RunAheadWindowPages = 1024; // 4 MB
+		constexpr size_t   MaxRuns             = 512;
+		const uint64_t     page_size           = m_page_manager.GetPageSize();
+		const uint64_t     next_page = (fault_vaddr & ~(page_size - 1u)) + page_size;
+		const auto runs = m_page_manager.ProtectedRunsFrom(next_page, RunAheadWindowPages, MaxRuns);
+		uint64_t   resolved_pages = 0;
+		for (const auto& [address, count]: runs) {
+			uint64_t pages = 0;
+			if (IsMapped(address, count * page_size)) {
+				pages = count;
+			} else {
+				while (pages < count && IsMapped(address + pages * page_size, page_size)) {
+					++pages;
+				}
+			}
+			if (pages == 0) {
+				continue;
+			}
+			if (access == PageFaultAccess::Write) {
+				m_buffer_cache.InvalidateMemory(address, pages * page_size);
+				m_texture_cache.InvalidateMemory(address, pages * page_size);
+			} else {
+				m_buffer_cache.ReadMemory(address, pages * page_size);
+			}
+			resolved_pages += pages;
+		}
+		if (log_faults && resolved_pages != 0) {
+			std::fprintf(stderr, "Fault: run-ahead resolved %" PRIu64 " pages in %zu runs after 0x%016" PRIx64 "\n",
+			             resolved_pages, runs.size(), fault_vaddr);
+			std::fflush(stderr);
+		}
+	}
+#endif
 	return true;
 }
 

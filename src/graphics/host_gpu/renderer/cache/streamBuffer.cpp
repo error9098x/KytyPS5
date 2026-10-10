@@ -1,5 +1,13 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
+#include <cstdlib>
+
+#include <cstdio>
+
+#include <cinttypes>
+
+#include <atomic>
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/profiler.h"
@@ -67,6 +75,13 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	buffer_info.usage       = flags;
 
 	const bool with_bda = bool(flags & vk::BufferUsageFlagBits::eShaderDeviceAddress);
+	if (std::getenv("KYTY_BUFFER_LOG") != nullptr && with_bda) {
+		static std::atomic<uint64_t> total_bda_bytes {0};
+		const auto total = total_bda_bytes.fetch_add(size) + size;
+		std::fprintf(stderr, "BdaBuffer: size=%" PRIu64 " MB total=%" PRIu64 " MB usage=%u addr=0x%016" PRIx64 "\n",
+		             size >> 20u, total >> 20u, static_cast<unsigned>(usage), cpu_address);
+		std::fflush(stderr);
+	}
 	const VmaAllocationCreateFlags bda_flag =
 	    with_bda ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT : 0;
 	VmaAllocationCreateInfo allocation_info {};

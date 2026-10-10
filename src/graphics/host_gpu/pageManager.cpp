@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/pageManager.h"
 
+#include <cinttypes>
+
 #include "common/alignment.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/regionDefinitions.h"
@@ -203,6 +205,18 @@ struct PageManager::Impl {
 	}
 
 	void Protect(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode mode) noexcept {
+		// Diagnostics: KYTY_PAGE_PROTECT_LOG=1 logs every tracking protection change;
+		// KYTY_NO_PAGE_PROTECT=1 skips them (CPU writes are then no longer tracked).
+		static const bool log_protect = std::getenv("KYTY_PAGE_PROTECT_LOG") != nullptr;
+		static const bool no_protect  = std::getenv("KYTY_NO_PAGE_PROTECT") != nullptr;
+		if (log_protect) {
+			std::fprintf(stderr, "PageProtect: vaddr=0x%016" PRIx64 " size=0x%" PRIx64 " mode=0x%08" PRIx32 "\n",
+			             vaddr, size, static_cast<uint32_t>(mode));
+			std::fflush(stderr);
+		}
+		if (no_protect) {
+			return;
+		}
 		if (!Libs::LibKernel::Memory::ProtectGuestHostMemory(vaddr, size, mode)) {
 			Fatal("address-space protection failed at 0x%016" PRIx64 ", mode=0x%08" PRIx32, vaddr,
 			      static_cast<uint32_t>(mode));
@@ -279,6 +293,74 @@ struct PageManager::Impl {
 		}
 	}
 
+	uint64_t CountProtectedPagesFrom(uint64_t vaddr, uint64_t max_pages) const noexcept {
+		uint64_t count = 0;
+		vaddr          = Common::AlignDown(vaddr, PAGE_SIZE);
+		while (count < max_pages && vaddr < ADDRESS_SIZE) {
+			auto* region = FindRegion(vaddr);
+			if (region == nullptr) {
+				break;
+			}
+			const auto region_base = Common::AlignDown(vaddr, REGION_SIZE);
+			auto       page_index  = static_cast<size_t>((vaddr - region_base) / PAGE_SIZE);
+			SpinGuard  lock(region->lock);
+			for (; page_index < REGION_PAGES && count < max_pages; ++page_index, ++count) {
+				if (region->pages[page_index].Perms() == Common::VirtualMemory::Mode::ReadWrite) {
+					return count;
+				}
+			}
+			vaddr = region_base + REGION_SIZE;
+		}
+		return count;
+	}
+
+	std::vector<std::pair<uint64_t, uint64_t>>
+	ProtectedRunsFrom(uint64_t vaddr, uint64_t window_pages, size_t max_runs) const {
+		std::vector<std::pair<uint64_t, uint64_t>> runs;
+		vaddr              = Common::AlignDown(vaddr, PAGE_SIZE);
+		uint64_t remaining = window_pages;
+		uint64_t run_start = 0;
+		uint64_t run_pages = 0;
+		while (remaining != 0 && vaddr < ADDRESS_SIZE && runs.size() < max_runs) {
+			const auto region_base = Common::AlignDown(vaddr, REGION_SIZE);
+			const auto in_region   = (region_base + REGION_SIZE - vaddr) / PAGE_SIZE;
+			const auto span        = std::min<uint64_t>(remaining, in_region);
+			auto*      region      = FindRegion(vaddr);
+			if (region == nullptr) {
+				if (run_pages != 0) {
+					runs.emplace_back(run_start, run_pages);
+					run_pages = 0;
+				}
+			} else {
+				SpinGuard lock(region->lock);
+				auto      page_index = static_cast<size_t>((vaddr - region_base) / PAGE_SIZE);
+				for (uint64_t i = 0; i < span; ++i, ++page_index) {
+					const bool protect_page =
+					    region->pages[page_index].Perms() != Common::VirtualMemory::Mode::ReadWrite;
+					const auto address = vaddr + i * PAGE_SIZE;
+					if (protect_page) {
+						if (run_pages == 0) {
+							run_start = address;
+						}
+						++run_pages;
+					} else if (run_pages != 0) {
+						runs.emplace_back(run_start, run_pages);
+						run_pages = 0;
+						if (runs.size() == max_runs) {
+							return runs;
+						}
+					}
+				}
+			}
+			vaddr += span * PAGE_SIZE;
+			remaining -= span;
+		}
+		if (run_pages != 0 && runs.size() < max_runs) {
+			runs.emplace_back(run_start, run_pages);
+		}
+		return runs;
+	}
+
 	std::unique_ptr<std::atomic<Region*>[]> regions;
 	std::vector<std::unique_ptr<Region>>    region_storage;
 	std::mutex                              region_mutex;
@@ -292,6 +374,15 @@ PageManager::~PageManager() = default;
 
 uint64_t PageManager::GetPageSize() const {
 	return PAGE_SIZE;
+}
+
+uint64_t PageManager::CountProtectedPagesFrom(uint64_t vaddr, uint64_t max_pages) const {
+	return m_impl->CountProtectedPagesFrom(vaddr, max_pages);
+}
+
+std::vector<std::pair<uint64_t, uint64_t>>
+PageManager::ProtectedRunsFrom(uint64_t vaddr, uint64_t window_pages, size_t max_runs) const {
+	return m_impl->ProtectedRunsFrom(vaddr, window_pages, max_runs);
 }
 
 template <bool track>

@@ -510,3 +510,17 @@ Two Apple/MoltenVK blockers cleared; the game now reaches mesh shaders.
   at `pipelineCache.cpp:625`. This host's MoltenVK 1.4.2 does not expose `VK_EXT_mesh_shader`
   (absent from its documented extension list; upstream issue #2375 has been open since 2024-10).
   Kyty renders PS5 NGG geometry as Vulkan mesh shaders, so any PS5 3D title needs host mesh shaders.
+
+## Silent Hill bring-up: mesh emulation, Rosetta finding — 2026-10-10
+
+- Mesh shaders emulated through compute; first emulated draw encoded. Vertex ballot/shuffle handled
+  with a one-lane subgroup mode. Push descriptors disabled on all Apple titles.
+- GPU error bisect (`KYTY_MESH_EMU_SKIP`): none with both halves skipped, error with either half.
+  Scratch size 16/64/256 MB and the newer MoltenVK build do not change it.
+- Rosetta abort root-caused and reproduced in 40 lines (`harness/repro/rosetta_avx_straddle.c`):
+  a 256-bit AVX store whose second half faults after the first half completed. Page tracking
+  activity rises from 126 to 2,433 protections once BDA mode starts. Mitigations tried did not
+  remove it; see `ROSETTA_AVX_PAGE_PROTECTION.md`.
+- Animal Well: 3 of 3 runs clean after the shader and descriptor changes, 2 of 2 after the final
+  fault-handler change (title content visible, about 60 FPS).
+- Silent Hill: still no rendered frames. Not solved.

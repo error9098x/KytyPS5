@@ -84,35 +84,36 @@ PPSA22520/Apple-gated and use fixed-point gameplay screenshots for the remaining
 visual correctness gate. Do not revisit S_LOAD/component-offset lowering based
 on the historical black-frame evidence.
 
-## Silent Hill: The Short Message — mesh shaders (HARD HOST LIMIT, 2026-10-10)
+## Silent Hill: The Short Message (PPSA10112) — current blockers (2026-10-10)
 
-Silent Hill (PPSA10112) now reaches `EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled)` at
-`src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp:625`. It is an Unreal Engine title whose
-PS5 NGG geometry shaders Kyty models as Vulkan mesh shaders; there is no non-mesh fallback in Kyty
-(`shaders.cpp:243` and `pipelineCache.cpp:625` both require host mesh support; `renderDraw.cpp:1086`
-gates the mesh path on `ShaderType::Mesh`).
+The title still does not reach rendered frames on this Mac. Cleared since the first report:
 
-This machine cannot satisfy that requirement:
+- Aliased storage-buffer views (`5f8b23d4`) and the vertex subgroup fallback (`652d4247`).
+- **Mesh shaders are no longer a hard limit.** Without `VK_EXT_mesh_shader` (MoltenVK) the guest
+  NGG/GS program is compiled as a compute shader that writes triangles and vertices to a scratch
+  buffer, and a generated vertex shader draws them (`src/graphics/shader/meshEmulation*.{h,cpp}`,
+  `spirvEmitterMesh.cpp`, `renderDraw.cpp`). The first emulated draw is encoded
+  (`MeshEmulation: first draw groups=1 instances=64`). Visual correctness is unverified.
+- Vertex programs that use ballot/shuffle (readfirstlane, exec masks) now run as one-lane
+  subgroups on Apple (`single_lane_subgroup`); Metal rejects `threads_per_simdgroup` in vertex
+  functions.
+- Ordinary descriptor sets are now used for every title on Apple (MoltenVK push descriptors leave
+  storage buffers unusable; first found with Animal Well). `KYTY_ENABLE_PUSH_DESCRIPTORS=1`
+  restores push descriptors.
 
-- The Vulkan driver here is **MoltenVK 1.4.2**, which does **not** expose `VK_EXT_mesh_shader`
-  (absent from its documented extension list; upstream issue KhronosGroup/MoltenVK#2375 has been
-  open since 2024-10). The device-extension dump in `harness/runs/shtsm-fix2/kyty.log` confirms no
-  mesh extension is advertised.
-- The one macOS Vulkan driver that does support mesh shaders, **KosmicKrisp** (Mesa, in the LunarG
-  macOS Vulkan SDK, Vulkan 1.4 conformant on Metal 4), is **Apple-Silicon-only** ("only functional
-  on Apple Silicon, not older x86_64 hardware").
-- Kyty only runs as **x86-64** here: PS5 guest code is x86-64 and Kyty executes it natively —
-  `runtimeLinker.cpp:237` casts a guest address to a function pointer, and the JIT stubs in `jit.h`
-  emit x86-64 machine code with x86 register constraints (`register ... asm("r14")`). A native arm64
-  Kyty does not run x86-64 guest code. (arm64 also fails to build: `hostException.cpp` reads x86
-  `__rip`/`__rax`/... from `mcontext`, and `x64InstructionEmulator` is x86-64-only.)
+Remaining, in order of how soon each stops a run:
 
-So the requirements are mutually exclusive on this machine: x86-64 Vulkan driver → no mesh shaders;
-mesh shaders → arm64 → cannot execute x86-64 guest code. Running PPSA10112 (or any PS5 3D title that
-uses NGG with a real geometry stage) needs one of: a mesh-shader-capable x86-64 Vulkan driver, a
-Kyty arm64 CPU backend (x86-64 interpreter/JIT for the guest), or a Kyty-side non-mesh lowering of
-the NGG path. None is a small change.
+1. **Rosetta abort on 256-bit AVX accesses to tracked pages** (about 5 of 6 runs, 4 to 10 s in).
+   Platform-level; reproduction and options in `ROSETTA_AVX_PAGE_PROTECTION.md`. BDA mode makes
+   page tracking about 20 times busier, which is what makes it fatal here.
+2. **GPU errors after the first BDA draw:** `kIOGPUCommandBufferCallbackErrorInvalidResource`
+   (code 9), or with push descriptors off `...ErrorHang` (code 2). Bisected with
+   `KYTY_MESH_EMU_SKIP=compute|draw|all`: no error when both halves of the emulated mesh draw are
+   skipped, an error when either half runs. Not caused by scratch size (16/64/256 MB) or by the
+   newer MoltenVK build. Cause not found; a GPU hang in the guest mesh program or a BDA lifetime
+   problem are the leading suspects.
+3. **GPU-driven rendering needs GPU to CPU coherence.** The title builds `SET_SH_REG_INDIRECT`
+   tables with compute shaders; with tracking disabled the PM4 parser reads zeros
+   (`unknown sh reg at 00100`). Page tracking cannot simply be turned off for this title.
 
-Cleared on the way here (kept): aliased storage-buffer views (`5f8b23d4`) and the vertex subgroup
-fallback for PPSA10112 (`652d4247`). Both are Apple/`PPSA22520`-gated and regress neither Animal Well
-nor the non-Apple path; see `harness/LOG.md`.
+Animal Well is unaffected (3 of 3 regression runs clean, title content visible, about 60 FPS).

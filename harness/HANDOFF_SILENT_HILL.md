@@ -2,23 +2,53 @@
 
 Written 2026-10-10 for continuing in Codex. Branch: `codex/animal-well-compat`.
 
-## Current state (updated 2026-10-10)
+## Current state (updated 2026-10-10, end of session)
 
 - Animal Well (PPSA22520) runs: stable gameplay, audio, ~60 FPS. Input lag fixed (`56852717`,
-  see `harness/INPUT_LAG_FIX.md`). Do not regress it.
-- Silent Hill: The Short Message (PPSA10112) still exits 65, but now **three blockers in**: the
-  first two are fixed and it reliably reaches the third, a hard host limit.
-  1. ~~MoltenVK rejects aliased buffer bindings~~ **FIXED** (`5f8b23d4`): on Apple, emit only the
-     32-bit storage-buffer view and emulate sub-word access via shift/mask.
-  2. ~~Vertex shader reads `SubgroupLocalInvocationId`~~ **FIXED** (`652d4247`): the Apple
-     vertex-subgroup fallback is no longer PPSA22520-only; it also covers PPSA10112.
-  3. **Mesh shaders — HARD HOST LIMIT.** Reaches
-     `EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled)` (`pipelineCache.cpp:625`). MoltenVK
-     1.4.2 has no `VK_EXT_mesh_shader`; KosmicKrisp has it but is arm64-only; Kyty executes PS5
-     x86-64 guest code natively and cannot run as arm64. Full analysis in `harness/BLOCKERS.md`.
-  Progress before stopping: VS 4 / PS 3 / CS 16 shaders compiled, past engine config into ATRAC9
-  audio decode. Verification: 3 consecutive runs all stop at the same mesh-shader line; Animal Well
-  regresses on none.
+  see `harness/INPUT_LAG_FIX.md`). Re-verified after every change below (3 of 3 clean runs).
+- Silent Hill: The Short Message (PPSA10112) **still does not render**; exits within 4 to 10 s.
+  Fixed on the way: aliased buffer bindings (`5f8b23d4`), vertex subgroup builtins (`652d4247`),
+  **mesh shaders** (now emulated through compute), **vertex ballot/shuffle** (one-lane subgroup
+  mode), **MoltenVK push descriptors** (ordinary sets on every Apple title).
+- What stops it now, in order (details in `harness/BLOCKERS.md`):
+  1. Rosetta aborts on 256-bit AVX accesses to tracked pages; see `harness/ROSETTA_AVX_PAGE_PROTECTION.md`.
+     Platform-level, reproduced in `harness/repro/rosetta_avx_straddle.c`.
+  2. GPU `InvalidResource` / `Hang` errors after the first buffer-device-address draw.
+  3. GPU-driven rendering needs GPU to CPU coherence, so tracking cannot just be disabled.
+
+### Implemented this session (mesh emulation, "mesh via compute")
+
+- `src/graphics/shader/meshEmulation.h`: scratch layout shared by both shaders.
+- `src/graphics/shader/meshEmulationShader.{h,cpp}`: generated vertex shader that reads triangles
+  and vertices from the scratch buffer by device address.
+- `spirvEmitterMesh.cpp` (`EmitMeshComputeEntryPoint`): guest mesh program compiled as `GLCompute`.
+- `pipeline/shaders.cpp`, `pipelineCache.*`: graphics pipeline with the generated vertex shader plus
+  a compute pipeline on the same layout (`Pipeline::mesh_compute`).
+- `renderDraw.cpp` (`ExecuteEmulatedMeshDraw`): per draw, compute dispatch, barrier, vertex draw.
+- Enabled automatically when the device lacks `VK_EXT_mesh_shader`; `KYTY_DISABLE_MESH_EMULATION=1`
+  turns it off, `KYTY_MESH_SCRATCH_MB` sizes the scratch (default 256).
+- One-lane subgroup mode: `spirvEmitterHelpers.cpp` (`EmitSubgroupBallot/FindLsb/Shuffle`), applied
+  only to Apple vertex programs that use ballot, shuffle or subgroup barriers.
+
+### Debug switches added
+
+`KYTY_MESH_TRACE`, `KYTY_MESH_VS_DUMP=<dir>`, `KYTY_MESH_EMU_SKIP=compute|draw|all`,
+`KYTY_BUFFER_LOG`, `KYTY_PAGE_PROTECT_LOG`, `KYTY_FAULT_LOG`, `KYTY_NO_PAGE_PROTECT`,
+`KYTY_ROSETTA_RUNAHEAD`, `KYTY_ENABLE_PUSH_DESCRIPTORS`.
+
+### Not verified
+
+- The emulated mesh output has never been seen on screen, so its correctness is unknown.
+- `shader_recompiler_compute` and `shader_recompiler_alignbyte` cannot run on this Mac (they need
+  fragment barycentrics and 64-bit LDS atomics); they were not run against these changes.
+
+### Suggested next steps
+
+1. Replace page-protection coherence (option 1 in `ROSETTA_AVX_PAGE_PROTECTION.md`), or stop
+   running guest code under Rosetta. Nothing else removes the abort.
+2. Bisect the GPU error further: it needs a per-encoder status from Metal (command buffer
+   `errorOptions` with encoder execution status) to name the failing command.
+3. Only then judge the emulated mesh draw visually.
 
 ## Game data
 
