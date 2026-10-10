@@ -53,9 +53,12 @@ gameplay route reached the “Wake up” scene and measured Arrow-Left at 7.35 m
 median, 17.59 ms p95, and 24.30 ms maximum to guest observation, with a 16.64 ms
 next-present maximum.
 
-The startup-only 2.88–2.99 s gap is separately characterized by a macOS process
+The startup-only 2.88–3.44 s gap is separately characterized by a macOS process
 sample: MoltenVK/Metal command encoding (`beginRendering`, image clears, and draws)
 and timeline-semaphore waits dominate the host GPU thread while the guest executes.
+Opt-in timing measured a largest guest-GPU processing slice of 724 ms and an early
+queue submission of about 456 ms; later slices stay below 60 ms, so the complete
+gap also includes guest initialization or a wait outside one GPU submission.
 `AgcSuspendPoint` itself waits only 25.5 ms initially and 8–18 ms afterward. A
 guest barrier bypass is therefore not justified without a rendering-correctness
 test. MoltenVK `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1` was also tested in

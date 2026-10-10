@@ -408,6 +408,17 @@ library. No game-specific diagnosis is valid until this is resolved.
 - A desktop screenshot could not be captured in the headless Codex session, so
   the HUD's on-screen text is not visually verified here. No emulator code or
   synchronization setting was changed.
+
+## Guest GPU submission timing — 2026-10-10
+
+- Opt-in `KYTY_GPU_SUBMIT_TIMING=1` and `KYTY_GPU_PROCESS_TIMING=1` separated
+  guest-GPU processing from presentation. The largest startup processing slice
+  was `724,262` microseconds and the corresponding early queue submission was
+  about `456` milliseconds. Later processing slices stayed below 60 ms.
+- The frame timeline still contained a roughly 3.4 s gap, so the full startup
+  stall is not one queue submission; guest initialization or a wait outside the
+  GPU process remains. The timing hooks are diagnostic only and are disabled by
+  default.
 - Three 35-second runs with the first probe event delayed to 10 seconds measured
   warm host-to-present median/p95/max of `8.94/22.68/28.62 ms`,
   `9.12/26.16/32.93 ms`, and `10.46/27.34/35.00 ms`. Guest-poll p95 was

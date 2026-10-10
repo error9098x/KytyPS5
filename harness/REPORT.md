@@ -61,6 +61,9 @@ long input-delay reports remain in progress.
   materialization and 2.4 ms for direct compute pipeline creation, versus a
   roughly 3 s present gap. The remaining startup cost is downstream of those
   Kyty-side stages and has not been changed speculatively.
+- New opt-in guest-GPU timing measured a 724 ms maximum processing slice and a
+  roughly 456 ms early Vulkan submission; later slices stayed below 60 ms. The
+  full 3.4 s startup gap therefore spans more than one queue submission.
 - Direct-memory timing measured 333 ms total across 1,172 operations, with a
   15.96 ms maximum mapping; memory setup is not the primary 3-second stall.
 - Stage 3 is stable across three runs. Fixed-point gameplay screenshot comparison
