@@ -543,7 +543,18 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 
 		EXIT_IF(!has_submission);
+		const bool process_timing = std::getenv("KYTY_GPU_PROCESS_TIMING") != nullptr;
+		const auto process_start = process_timing ? std::chrono::steady_clock::now()
+		                                         : std::chrono::steady_clock::time_point {};
 		const bool complete = gpu->Process(submission);
+		if (process_timing) {
+			const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+			                            std::chrono::steady_clock::now() - process_start)
+			                            .count();
+			LOGF("GpuProcessTiming: type=%u queue=%u complete=%d us=%" PRId64 "\n",
+			     static_cast<unsigned>(submission.type), submission.queue_id, complete ? 1 : 0,
+			     static_cast<int64_t>(elapsed_us));
+		}
 
 		Common::LockGuard lock(gpu->m_queue_mutex);
 		if (!complete) {
