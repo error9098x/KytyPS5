@@ -556,6 +556,22 @@ void Swapchain::Create() {
 	if (surface.capabilities.maxImageCount != 0) {
 		image_count = std::min(image_count, surface.capabilities.maxImageCount);
 	}
+	if (const char* value = std::getenv("KYTY_SWAPCHAIN_IMAGE_COUNT"); value != nullptr && *value != '\0') {
+		char* end = nullptr;
+		const auto requested = std::strtoul(value, &end, 10);
+		if (end != value && *end == '\0') {
+			const auto max_count = surface.capabilities.maxImageCount != 0
+			                           ? surface.capabilities.maxImageCount
+			                           : std::max<unsigned long>(requested,
+			                                                     surface.capabilities.minImageCount);
+			const auto bounded = std::clamp<unsigned long>(
+				requested, surface.capabilities.minImageCount, max_count);
+			image_count = static_cast<uint32_t>(bounded);
+			LOGF("Swapchain image count override: requested=%lu selected=%u min=%u max=%u\n",
+			     requested, image_count, surface.capabilities.minImageCount,
+			     surface.capabilities.maxImageCount);
+		}
+	}
 	const auto transform =
 	    surface.capabilities.supportedTransforms & vk::SurfaceTransformFlagBitsKHR::eIdentity
 	        ? vk::SurfaceTransformFlagBitsKHR::eIdentity
