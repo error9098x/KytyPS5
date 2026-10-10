@@ -97,6 +97,14 @@ std::string PipelineCacheTitleId() {
 	return title_id;
 }
 
+// Metal vertex functions expose no subgroup builtins, so any vertex shader that reads the
+// subgroup lane id fails to compile. The titles below only use the lane id in per-lane masks
+// that Kyty resolves from the vertex index; keep the substitution strictly per-title.
+bool PipelineCacheNeedsVertexSubgroupFallback() {
+	const auto title_id = PipelineCacheTitleId();
+	return title_id == "PPSA22520" || title_id == "PPSA10112";
+}
+
 template <typename... Args>
 void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 	auto message = fmt::format(format, std::forward<Args>(args)...);
@@ -358,7 +366,7 @@ struct PipelineCache::ProgramCache {
 		options.dump_label  = label;
 		options.input_info  = stage_input;
 #if defined(__APPLE__)
-		options.vertex_subgroup_fallback = PipelineCacheTitleId() == "PPSA22520";
+		options.vertex_subgroup_fallback = PipelineCacheNeedsVertexSubgroupFallback();
 #endif
 
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
