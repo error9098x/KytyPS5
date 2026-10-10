@@ -5,7 +5,9 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 namespace Libs::Graphics {
@@ -348,6 +350,9 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(graphics.queue == nullptr);
 
 	vk::Result result;
+	const bool timing = std::getenv("KYTY_GPU_SUBMIT_TIMING") != nullptr;
+	const auto submit_start = timing ? std::chrono::steady_clock::now()
+	                                : std::chrono::steady_clock::time_point {};
 	uint64_t   tick;
 	{
 		Common::LockGuard lock(graphics.queue_mutex);
@@ -378,6 +383,16 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		                  m_command.m_debug_submit_id, m_command.m_debug_arg0,
 		                  m_command.m_debug_arg1, m_command.m_debug_arg2, m_command.m_debug_arg3,
 		                  m_command.m_debug_arg4);
+	}
+	if (timing) {
+		const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+		                            std::chrono::steady_clock::now() - submit_start)
+		                            .count();
+		LOGF("GpuSubmitTiming: tick=%" PRIu64 " us=%" PRId64 " debug_op=%u debug_submit=%" PRIu64
+		     " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
+		     tick, static_cast<int64_t>(elapsed_us), m_command.m_debug_op,
+		     m_command.m_debug_submit_id, m_command.m_debug_arg0, m_command.m_debug_arg1,
+		     m_command.m_debug_arg2, m_command.m_debug_arg3, m_command.m_debug_arg4);
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
