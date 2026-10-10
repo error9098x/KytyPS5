@@ -26,6 +26,7 @@
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/shader/meshEmulation.h"
 #include "graphics/shader/shader.h"
 #include "kernel/eventQueue.h"
 #include "kernel/memory.h"
@@ -1104,7 +1105,14 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		mesh_groups        = (primitives - 1u) / mesh.primitives_per_group + 1u;
 		const auto& limits = m_context.GetGraphics().mesh_shader_properties;
-		if (mesh_groups > limits.maxMeshWorkGroupCount[0] ||
+		if (m_context.GetGraphics().mesh_emulation) {
+			const auto& compute = m_context.GetGraphics().GetPhysicalDeviceProperties().limits;
+			if (mesh_groups > compute.maxComputeWorkGroupCount[0] ||
+			    draw.instance_count > compute.maxComputeWorkGroupCount[1]) {
+				EXIT("emulated mesh draw exceeds compute workgroup limits: %ux%u\n", mesh_groups,
+				     draw.instance_count);
+			}
+		} else if (mesh_groups > limits.maxMeshWorkGroupCount[0] ||
 		    draw.instance_count > limits.maxMeshWorkGroupCount[1] ||
 		    static_cast<uint64_t>(mesh_groups) * draw.instance_count >
 		        limits.maxMeshWorkGroupTotalCount) {
@@ -1165,6 +1173,18 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (state.ps_active && !draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
 	}
+	const bool mesh_emulated = mesh_active && pipeline.mesh_compute != nullptr;
+	if (mesh_emulated) {
+		const uint32_t draw_data[] {
+		    draw.index_count,
+		    draw.IsIndexed() ? static_cast<uint32_t>(emit.vertex_offset) : emit.first_vertex,
+		    emit.first_instance, index_source.guest_element_size,
+		    static_cast<uint32_t>(index_source.address),
+		    static_cast<uint32_t>(index_source.address >> 32u), 0u, 0u, 0u, 0u};
+		static_assert(std::size(draw_data) == ShaderRecompiler::IR::PushData::MeshDrawDwordCount);
+		ExecuteEmulatedMeshDraw(buffer, draw, state, pipeline, stages, rendering, feedback_aspects,
+		                        draw_data, mesh_groups);
+	} else {
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
 	if (mesh_active) {
 		const uint32_t draw_data[] {
@@ -1172,7 +1192,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		    draw.IsIndexed() ? static_cast<uint32_t>(emit.vertex_offset) : emit.first_vertex,
 		    emit.first_instance, index_source.guest_element_size,
 		    static_cast<uint32_t>(index_source.address),
-		    static_cast<uint32_t>(index_source.address >> 32u)};
+		    static_cast<uint32_t>(index_source.address >> 32u), 0u, 0u, 0u, 0u};
 		static_assert(std::size(draw_data) == ShaderRecompiler::IR::PushData::MeshDrawDwordCount);
 		vk_buffer.pushConstants(pipeline.pipeline_layout,
 		                        vk::ShaderStageFlagBits::eMeshEXT |
@@ -1201,6 +1221,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
+	} // !mesh_emulated
 
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u);
@@ -1555,6 +1576,130 @@ bool RenderExecutor::ResolveColorTargets(CommandBuffer& buffer, uint32_t render_
 	destination.Resolve(source, {src.guest_mip_level, 1, src.guest_array_layer, 1},
 	                    {dst.guest_mip_level, 1, dst.guest_array_layer, 1});
 	return true;
+}
+
+
+Buffer& RenderExecutor::MeshEmulationScratch() {
+	if (m_mesh_scratch == nullptr) {
+		uint64_t megabytes = 256;
+		if (const char* value = std::getenv("KYTY_MESH_SCRATCH_MB"); value != nullptr) {
+			megabytes = std::clamp<uint64_t>(std::strtoull(value, nullptr, 10), 16u, 4096u);
+		}
+		m_mesh_scratch = std::make_unique<Buffer>(
+		    m_context.GetGraphics(), m_context.GetCommandScheduler(), MemoryUsage::DeviceLocal, 0,
+		    vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eShaderDeviceAddress,
+		    megabytes << 20u);
+		LOGF("MeshEmulation: scratch buffer %" PRIu64 " MB\n", megabytes);
+	}
+	return *m_mesh_scratch;
+}
+
+void RenderExecutor::ExecuteEmulatedMeshDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
+                                             DrawRenderState& state,
+                                             PipelineCache::Pipeline& pipeline,
+                                             std::span<PreparedBindings* const> stages,
+                                             const RenderState&                 rendering,
+                                             vk::ImageAspectFlags feedback_aspects,
+                                             std::span<const uint32_t> draw_data_in,
+                                             uint32_t                  mesh_groups) {
+	auto        vk_buffer = buffer.Handle();
+	auto&       scheduler = m_context.GetCommandScheduler();
+	const auto& mesh      = state.vertex_info[0].mesh;
+	const auto& program   = *state.vertex_info[0].stage.program;
+	const auto  layout =
+	    MeshEmulation::ComputeLayout(program.info.outputs, mesh.max_vertices, mesh.max_primitives);
+	auto&      scratch      = MeshEmulationScratch();
+	const auto item_bytes   = layout.ItemBytes();
+	const auto instances    = draw.instance_count;
+	const auto capacity     = scratch.Size() / item_bytes;
+	if (capacity < instances) {
+		EXIT("mesh emulation scratch too small: item=%" PRIu64 " instances=%u (raise "
+		     "KYTY_MESH_SCRATCH_MB)\n",
+		     item_bytes, instances);
+	}
+	const auto chunk_limit =
+	    static_cast<uint32_t>(std::min<uint64_t>(capacity / instances, mesh_groups));
+
+	std::array<uint32_t, ShaderRecompiler::IR::PushData::MeshDrawDwordCount> draw_data {};
+	std::copy(draw_data_in.begin(), draw_data_in.end(), draw_data.begin());
+	const auto address = scratch.BufferDeviceAddress();
+	draw_data[MeshEmulation::ScratchAddressLoDword] = static_cast<uint32_t>(address);
+	draw_data[MeshEmulation::ScratchAddressHiDword] = static_cast<uint32_t>(address >> 32u);
+	constexpr auto push_stages = vk::ShaderStageFlagBits::eVertex |
+	                             vk::ShaderStageFlagBits::eFragment |
+	                             vk::ShaderStageFlagBits::eCompute;
+
+	// Stage 0 is the guest mesh program (compute); the rest are graphics stages.
+	std::array<PreparedBindings*, 1> compute_stages {stages.front()};
+	const auto graphics_stages = stages.subspan(1);
+
+	// Diagnostics: KYTY_MESH_EMU_SKIP=compute|draw|all bisects which half of the emulated mesh
+	// draw is responsible for a GPU fault.
+	const char* skip_env     = std::getenv("KYTY_MESH_EMU_SKIP");
+	const bool  skip_compute = skip_env != nullptr && (std::strcmp(skip_env, "compute") == 0 ||
+	                                                    std::strcmp(skip_env, "all") == 0);
+	const bool  skip_draw    = skip_env != nullptr && (std::strcmp(skip_env, "draw") == 0 ||
+	                                                    std::strcmp(skip_env, "all") == 0);
+	for (uint32_t base = 0; base < mesh_groups; base += chunk_limit) {
+		const auto groups = std::min(chunk_limit, mesh_groups - base);
+		draw_data[MeshEmulation::GroupBaseDword]   = base;
+		draw_data[MeshEmulation::ChunkGroupsDword] = groups;
+
+		scheduler.EndRendering();
+		// Earlier draws may still read the scratch, and earlier passes wrote it.
+		vk::MemoryBarrier reuse {};
+		reuse.srcAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+		reuse.dstAccessMask = vk::AccessFlagBits::eShaderWrite;
+		vk_buffer.pipelineBarrier(
+		    vk::PipelineStageFlagBits::eVertexShader | vk::PipelineStageFlagBits::eComputeShader,
+		    vk::PipelineStageFlagBits::eComputeShader, {}, 1, &reuse, 0, nullptr, 0, nullptr);
+
+		if (!skip_compute) {
+			vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.mesh_compute);
+			CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline, compute_stages);
+			vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0,
+			                        static_cast<uint32_t>(draw_data.size() * sizeof(uint32_t)),
+			                        draw_data.data());
+			if (base == 0) {
+				vk_buffer.dispatch(groups, instances, 1);
+			} else {
+				vk_buffer.dispatchBase(base, 0, 0, groups, instances, 1);
+			}
+		}
+
+		vk::MemoryBarrier produced {};
+		produced.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+		produced.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+		vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+		                          vk::PipelineStageFlagBits::eVertexShader, {}, 1, &produced, 0,
+		                          nullptr, 0, nullptr);
+
+		if (!graphics_stages.empty()) {
+			CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, graphics_stages);
+		}
+		vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0,
+		                        static_cast<uint32_t>(draw_data.size() * sizeof(uint32_t)),
+		                        draw_data.data());
+		SetGraphicsDynamicParams(buffer, vk_buffer, state.vertex_info[0], state.depth_info,
+		                         rendering);
+		if (m_context.GetGraphics().attachment_feedback_loop_enabled) {
+			vk_buffer.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
+		}
+		scheduler.BeginRendering(rendering);
+		vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+		const uint64_t vertex_count =
+		    uint64_t {groups} * instances * mesh.max_primitives * 3u;
+		EXIT_IF(vertex_count > UINT32_MAX);
+		if (!skip_draw) {
+			vk_buffer.draw(static_cast<uint32_t>(vertex_count), 1, 0, 0);
+		}
+	}
+	static std::atomic_bool logged = false;
+	if (!logged.exchange(true, std::memory_order_relaxed)) {
+		LOGF("MeshEmulation: first draw groups=%u instances=%u item_bytes=%" PRIu64
+		     " vertex_slots=%u primitives/group=%u\n",
+		     mesh_groups, instances, item_bytes, layout.VertexSlots(), mesh.max_primitives);
+	}
 }
 
 } // namespace Libs::Graphics

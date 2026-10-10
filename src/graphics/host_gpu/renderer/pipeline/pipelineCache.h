@@ -112,6 +112,8 @@ public:
 		vk::Pipeline            pipeline              = nullptr;
 		vk::DescriptorSetLayout descriptor_set_layout = nullptr;
 		bool                    uses_push_descriptors = false;
+		// Mesh emulation: compute pass that runs the guest mesh program (shares pipeline_layout).
+		vk::Pipeline            mesh_compute          = nullptr;
 	};
 
 	struct GraphicsPrograms {

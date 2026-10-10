@@ -91,6 +91,11 @@ struct EmitterState {
 	IR::Program&                                     program;
 	ShaderStageInputInfo                             input_info;
 	bool                                              vertex_subgroup_fallback = false;
+	bool                                              mesh_compute             = false;
+	// Vertex programs on hosts whose vertex stage cannot use subgroup operations (Metal) run as
+	// one-lane subgroups: ballot is a single bit, the first lane is 0 and shuffles return the
+	// invocation's own value.
+	bool                                              single_lane_subgroup     = false;
 	uint32_t                                        void_type = 0;
 	uint32_t                                        bool_type = 0;
 	uint32_t                                        u32_type = 0;
@@ -300,6 +305,9 @@ uint32_t OutputVariableForExport(const EmitterState& state, const IR::ExportInfo
 uint32_t ConstantU32(EmitterState& state, uint32_t value);
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
+uint32_t EmitSubgroupBallot(EmitterState& state, uint32_t predicate);
+uint32_t EmitSubgroupFindLsb(EmitterState& state, uint32_t ballot);
+uint32_t EmitSubgroupShuffle(EmitterState& state, uint32_t type, uint32_t value, uint32_t lane);
 
 [[noreturn]] void ExitDescriptorBindingFailure(const EmitterState&       state,
                                                IR::DescriptorBindingKind kind, uint32_t resource,

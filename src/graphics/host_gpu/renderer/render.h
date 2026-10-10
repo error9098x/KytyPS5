@@ -4,12 +4,14 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -209,7 +211,16 @@ private:
 	                                              CommandBuffer& command, uint32_t group_x,
 	                                              uint32_t group_y, uint32_t group_z, uint32_t mode);
 
+	// Mesh emulation (no VK_EXT_mesh_shader): compute pass + generated vertex draw.
+	void ExecuteEmulatedMeshDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
+	                             DrawRenderState& state, PipelineCache::Pipeline& pipeline,
+	                             std::span<PreparedBindings* const> stages,
+	                             const RenderState& rendering, vk::ImageAspectFlags feedback_aspects,
+	                             std::span<const uint32_t> draw_data, uint32_t mesh_groups);
+	[[nodiscard]] Buffer& MeshEmulationScratch();
+
 	RenderContext&                        m_context;
+	std::unique_ptr<Buffer>               m_mesh_scratch;
 	GraphicsBindings                     m_graphics_bindings;
 	PreparedBindings                     m_compute_bindings;
 	std::vector<ImageId>                  m_bound_images;

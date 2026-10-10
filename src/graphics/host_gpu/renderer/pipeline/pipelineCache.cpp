@@ -368,6 +368,7 @@ struct PipelineCache::ProgramCache {
 #if defined(__APPLE__)
 		options.vertex_subgroup_fallback = PipelineCacheNeedsVertexSubgroupFallback();
 #endif
+		options.mesh_compute_emulation = graphics.mesh_emulation && stage == ShaderType::Mesh;
 
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			options.user_data_base = 8;
@@ -453,6 +454,9 @@ PipelineCache::~PipelineCache() {
 		for (const auto& [key, pipeline]: pipelines) {
 			(void)key;
 			m_graphics.device.destroyPipeline(pipeline->pipeline, nullptr);
+			if (pipeline->mesh_compute != nullptr) {
+				m_graphics.device.destroyPipeline(pipeline->mesh_compute, nullptr);
+			}
 			m_graphics.device.destroyPipelineLayout(pipeline->pipeline_layout, nullptr);
 			m_graphics.device.destroyDescriptorSetLayout(pipeline->descriptor_set_layout, nullptr);
 		}
@@ -621,7 +625,22 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
-	if (mesh_active) {
+	if (mesh_active && m_graphics.mesh_emulation) {
+		auto& mesh              = vertex_info[0].mesh;
+		mesh.host_subgroup_size = m_graphics.subgroup_size;
+		const auto& limits      = m_graphics.GetPhysicalDeviceProperties().limits;
+		const auto  logical_threads =
+		    mesh.threads_num[0] * mesh.threads_num[1] * mesh.threads_num[2];
+		const auto host_threads = ((logical_threads + mesh.wave_size - 1u) / mesh.wave_size) *
+		                          std::min(mesh.host_subgroup_size, mesh.wave_size);
+		if (host_threads > limits.maxComputeWorkGroupInvocations ||
+		    host_threads > limits.maxComputeWorkGroupSize[0] ||
+		    mesh.lds_size_dwords * sizeof(uint32_t) > limits.maxComputeSharedMemorySize) {
+			EXIT("emulated mesh shader exceeds compute limits: threads=%u vertices=%u "
+			     "primitives=%u LDS=%u\n",
+			     host_threads, mesh.max_vertices, mesh.max_primitives, mesh.lds_size_dwords);
+		}
+	} else if (mesh_active) {
 		EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled);
 		auto& mesh              = vertex_info[0].mesh;
 		mesh.host_subgroup_size = m_graphics.subgroup_size;

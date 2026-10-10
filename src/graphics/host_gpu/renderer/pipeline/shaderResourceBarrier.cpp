@@ -8,11 +8,25 @@
 
 namespace Libs::Graphics {
 
+namespace {
+bool g_mesh_emulation = false;
+} // namespace
+
+void SetMeshEmulation(bool enabled) {
+	g_mesh_emulation = enabled;
+}
+
+bool MeshEmulationEnabled() {
+	return g_mesh_emulation;
+}
+
 vk::ShaderStageFlagBits NativeShaderStage(ShaderType stage) {
 	switch (stage) {
 		case ShaderType::Local:
 		case ShaderType::Vertex: return vk::ShaderStageFlagBits::eVertex;
-		case ShaderType::Mesh: return vk::ShaderStageFlagBits::eMeshEXT;
+		case ShaderType::Mesh:
+			return g_mesh_emulation ? vk::ShaderStageFlagBits::eCompute
+			                        : vk::ShaderStageFlagBits::eMeshEXT;
 		case ShaderType::TessellationControl: return vk::ShaderStageFlagBits::eTessellationControl;
 		case ShaderType::TessellationEvaluation:
 			return vk::ShaderStageFlagBits::eTessellationEvaluation;

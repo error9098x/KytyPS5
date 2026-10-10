@@ -1,4 +1,6 @@
 #include "common/assert.h"
+#include <atomic>
+#include <cstdio>
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -15,6 +17,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/meshEmulationShader.h"
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
 #include "loader/systemContent.h"
@@ -200,10 +203,12 @@ static void CreateDescriptorLayout(GraphicContext& graphics, PipelineCache::Pipe
 	}
 	pipeline.uses_push_descriptors = descriptor_count <= graphics.max_push_descriptors;
 #if defined(__APPLE__)
-	// Animal Well's buffer and image descriptors fail with MoltenVK push descriptors.
-	// Ordinary descriptor sets render correctly with the original guest shaders.
-	std::string title_id;
-	if (Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id) && title_id == "PPSA22520") {
+	// MoltenVK's push-descriptor path leaves storage-buffer and image resources unusable in guest
+	// shaders (first seen in Animal Well, PPSA22520: black frames; Silent Hill, PPSA10112:
+	// kIOGPUCommandBufferCallbackErrorInvalidResource on the first draw that uses them).
+	// Ordinary descriptor sets work, so use them for every title on Apple hosts.
+	// KYTY_ENABLE_PUSH_DESCRIPTORS=1 restores push descriptors for experiments.
+	if (std::getenv("KYTY_ENABLE_PUSH_DESCRIPTORS") == nullptr) {
 		pipeline.uses_push_descriptors = false;
 	}
 #endif
@@ -240,7 +245,31 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	                        rendering.stencil_format != vk::Format::eUndefined;
 	EXIT_IF(!vs_input_info.stage);
 	const bool mesh = vs_input_info.stage.program->stage == ShaderType::Mesh;
-	EXIT_NOT_IMPLEMENTED(mesh && !graphics.mesh_shader_enabled);
+	EXIT_NOT_IMPLEMENTED(mesh && !graphics.mesh_shader_enabled && !graphics.mesh_emulation);
+	// Emulated mesh: the guest program is a compute module; draw with a generated vertex shader.
+	const bool       mesh_emulated = mesh && !graphics.mesh_shader_enabled;
+	vk::ShaderModule mesh_vertex_module = nullptr;
+	if (mesh_emulated) {
+		const auto& program = *vs_input_info.stage.program;
+		mesh_vertex_module  = CompileSPV(
+		    BuildMeshEmulationVertexShader(program.info.outputs, vs_input_info.mesh.max_vertices,
+		                                    vs_input_info.mesh.max_primitives),
+		    graphics.device);
+		EXIT_IF(mesh_vertex_module == nullptr);
+		if (const char* dump = std::getenv("KYTY_MESH_VS_DUMP"); dump != nullptr) {
+			static std::atomic_uint dumped = 0;
+			const auto words = BuildMeshEmulationVertexShader(
+			    program.info.outputs, vs_input_info.mesh.max_vertices, vs_input_info.mesh.max_primitives);
+			const auto n = dumped.fetch_add(1);
+			if (n < 4) {
+				std::FILE* file = std::fopen((std::string(dump) + "/meshvs_" + std::to_string(n) + ".spv").c_str(), "wb");
+				if (file != nullptr) {
+					std::fwrite(words.data(), sizeof(uint32_t), words.size(), file);
+					std::fclose(file);
+				}
+			}
+		}
+	}
 	const bool rect_list =
 	    !mesh && !tessellation && static_params.topology == vk::PrimitiveTopology::ePatchList;
 
@@ -269,6 +298,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	vk::PipelineShaderStageCreateInfo shader_stages[4] {};
 	uint32_t                          shader_stage_count = 0;
 	for (uint32_t i = 0; i < vertex_info.size(); i++) {
+		if (mesh_emulated) {
+			shader_stages[shader_stage_count++] = {.stage  = vk::ShaderStageFlagBits::eVertex,
+			                                       .module = mesh_vertex_module,
+			                                       .pName  = "main"};
+			continue;
+		}
 		shader_stages[shader_stage_count++] = {.stage =
 		                                           NativeShaderStage(vertex_info[i].logical_stage),
 		                                       .module = programs.vertex[i].module,
@@ -356,6 +391,11 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	input_assembly.topology = static_params.topology;
 	input_assembly.primitiveRestartEnable =
 	    static_params.primitive_restart_enable ? VK_TRUE : VK_FALSE;
+	if (mesh_emulated) {
+		vertex_input_info               = vk::PipelineVertexInputStateCreateInfo {};
+		input_assembly.topology         = vk::PrimitiveTopology::eTriangleList;
+		input_assembly.primitiveRestartEnable = VK_FALSE;
+	}
 
 	vk::PipelineViewportDepthClipControlCreateInfoEXT depth_clip_control {};
 	depth_clip_control.negativeOneToOne = (static_params.negative_one_to_one ? VK_TRUE : VK_FALSE);
@@ -449,6 +489,11 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 	std::vector<vk::DescriptorSetLayoutBinding> descriptor_bindings;
 	vk::ShaderStageFlags graphics_stages = vk::ShaderStageFlagBits::eFragment;
+	if (mesh_emulated) {
+		// The generated vertex shader and the guest mesh program (compute) both read the scratch
+		// address and draw parameters from the shared push-constant block.
+		graphics_stages |= vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eCompute;
+	}
 	for (const auto& stage: vertex_info) {
 		const auto native_stage = NativeShaderStage(stage.logical_stage);
 		AddLayoutBindings(descriptor_bindings, *stage.stage.program, native_stage);
@@ -528,8 +573,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	pipeline_info.pNext                    = &rendering_info;
 	pipeline_info.stageCount               = shader_stage_count;
 	pipeline_info.pStages                  = shader_stages;
-	pipeline_info.pVertexInputState        = mesh ? nullptr : &vertex_input_info;
-	pipeline_info.pInputAssemblyState      = mesh ? nullptr : &input_assembly;
+	pipeline_info.pVertexInputState        = mesh && !mesh_emulated ? nullptr : &vertex_input_info;
+	pipeline_info.pInputAssemblyState      = mesh && !mesh_emulated ? nullptr : &input_assembly;
 	vk::PipelineTessellationStateCreateInfo tessellation_state {};
 	tessellation_state.patchControlPoints =
 	    tessellation ? vs_input_info.tess.input_control_points : 3u;
@@ -564,6 +609,32 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
 
+	if (mesh_emulated) {
+		graphics.device.destroyShaderModule(mesh_vertex_module, nullptr);
+		vk::PipelineShaderStageCreateInfo                     stage {};
+		vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup {};
+		stage.stage  = vk::ShaderStageFlagBits::eCompute;
+		stage.module = vertex_program.module;
+		stage.pName  = "main";
+		const auto host_subgroup = vs_input_info.mesh.host_subgroup_size;
+		if (graphics.compute_subgroup_size_control_enabled && host_subgroup != 0 &&
+		    host_subgroup >= graphics.min_subgroup_size && host_subgroup <= graphics.max_subgroup_size) {
+			subgroup.requiredSubgroupSize = host_subgroup;
+			stage.pNext                   = &subgroup;
+		}
+		vk::ComputePipelineCreateInfo compute_info {};
+		compute_info.flags             = vk::PipelineCreateFlagBits::eDispatchBase;
+		compute_info.stage             = stage;
+		compute_info.layout            = pipeline.pipeline_layout;
+		compute_info.basePipelineIndex = -1;
+		result = graphics.device.createComputePipelines(driver_cache, 1, &compute_info, nullptr,
+		                                                &pipeline.mesh_compute);
+		if (graphics_debug_dump_enabled()) {
+			LOGF("PipelineTrace: mesh emulation compute pipeline result=%s pipeline=%p\n",
+			     vk::to_string(result).c_str(), static_cast<void*>(pipeline.mesh_compute));
+		}
+		EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess || pipeline.mesh_compute == nullptr);
+	}
 	if (tess_control_shader_module != nullptr) {
 		graphics.device.destroyShaderModule(tess_control_shader_module, nullptr);
 	}

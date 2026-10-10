@@ -1209,6 +1209,11 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		}
 	}
 
+	if (pipeline.mesh_compute != nullptr) {
+		// Mesh emulation shares one push range across the vertex, fragment and compute stages.
+		push_stages = vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment |
+		              vk::ShaderStageFlagBits::eCompute;
+	}
 	if (has_push_data) {
 		vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0, sizeof(push_data),
 		                        push_data.dwords.data());

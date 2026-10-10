@@ -125,6 +125,9 @@ DppTargetLane EmitDppTargetLane(EmitterState& state, const IR::DppMoveFlags& fla
 }
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state) {
+	if (state.single_lane_subgroup) {
+		return ConstantU32(state, 0);
+	}
 	if (state.vertex_subgroup_fallback &&
 	    state.program.stage == ShaderType::Vertex) {
 		return EmitInputComponentU32(state, IR::StageInputKind::VertexIndex, 0);
@@ -219,10 +222,44 @@ uint32_t EmitVertexParameterComponentU32(EmitterState& state, const InputBinding
 	return bits;
 }
 
+uint32_t EmitSubgroupBallot(EmitterState& state, uint32_t predicate) {
+	const auto ballot_type = TypeU32Vector(state, 4);
+	const auto ballot      = state.builder.AllocateId();
+	if (state.single_lane_subgroup) {
+		const auto bit = Select(state, TypeU32(state), predicate, ConstantU32(state, 1),
+		                        ConstantU32(state, 0));
+		state.builder.AddFunction(spv::OpCompositeConstruct, ballot_type, ballot, bit,
+		                          ConstantU32(state, 0), ConstantU32(state, 0),
+		                          ConstantU32(state, 0));
+		return ballot;
+	}
+	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, ballot,
+	                          ConstantU32(state, spv::ScopeSubgroup), predicate);
+	return ballot;
+}
+
+uint32_t EmitSubgroupFindLsb(EmitterState& state, uint32_t ballot) {
+	if (state.single_lane_subgroup) {
+		return ConstantU32(state, 0);
+	}
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpGroupNonUniformBallotFindLSB, TypeU32(state), result,
+	                          ConstantU32(state, spv::ScopeSubgroup), ballot);
+	return result;
+}
+
+uint32_t EmitSubgroupShuffle(EmitterState& state, uint32_t type, uint32_t value, uint32_t lane) {
+	if (state.single_lane_subgroup) {
+		return value;
+	}
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, result,
+	                          ConstantU32(state, spv::ScopeSubgroup), value, lane);
+	return result;
+}
+
 uint32_t EmitSubgroupLaneActiveBool(EmitterState& state, uint32_t lane) {
-	const auto active_ballot = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformBallot, TypeU32Vector(state, 4), active_ballot,
-	                          ConstantU32(state, spv::ScopeSubgroup), ConstantBool(state, true));
+	const auto active_ballot = EmitSubgroupBallot(state, ConstantBool(state, true));
 	return EmitBallotLaneActiveBool(state, active_ballot, lane);
 }
 uint32_t EmitBallotLaneActiveBool(EmitterState& state, uint32_t active_ballot, uint32_t lane) {

@@ -19,6 +19,8 @@ struct CompileOptions {
 	bool                        dump_ir                    = true;
 	bool                        early_dump                 = false;
 	bool                        vertex_subgroup_fallback  = false;
+	// Emit Mesh programs as GLCompute writing to a scratch buffer (no VK_EXT_mesh_shader).
+	bool                        mesh_compute_emulation    = false;
 	const char*                 dump_label                 = nullptr;
 	std::span<const uint32_t>   user_data;
 	std::span<const uint32_t>   back_code;

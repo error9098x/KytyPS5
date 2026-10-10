@@ -38,6 +38,7 @@ struct GraphicContext {
 	bool                               shader_buffer_int64_atomics_enabled      = false;
 	bool                               shader_cull_distance_enabled              = false;
 	bool                                      mesh_shader_enabled                   = false;
+	bool                                      mesh_emulation                        = false;
 	vk::PhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties                = {};
 	uint32_t                           subgroup_size                         = 0;
 	uint32_t                           min_subgroup_size                     = 0;

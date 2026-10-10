@@ -11,6 +11,7 @@
 #include "common/threads.h"
 #include "common/timer.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -517,6 +518,14 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		    workgroup_layout.workgroupMemoryExplicitLayout != VK_FALSE));
 	}
 	graphics.mesh_shader_enabled = mesh_extension && supported_mesh.meshShader;
+	// Without VK_EXT_mesh_shader (e.g. MoltenVK), guest NGG/GS programs run as compute
+	// shaders that feed a generated vertex shader. KYTY_DISABLE_MESH_EMULATION=1 turns it off.
+	graphics.mesh_emulation =
+	    !graphics.mesh_shader_enabled && std::getenv("KYTY_DISABLE_MESH_EMULATION") == nullptr;
+	SetMeshEmulation(graphics.mesh_emulation);
+	if (graphics.mesh_emulation) {
+		Log::WriteToConsoleAndLog("Mesh shaders: emulated through compute (no VK_EXT_mesh_shader)\n");
+	}
 
 	vk::PhysicalDeviceSubgroupSizeControlProperties subgroup_size_control {};
 

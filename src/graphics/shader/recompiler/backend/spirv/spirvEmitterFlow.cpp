@@ -635,6 +635,11 @@ uint32_t EmitIdentity(ValueEmitContext&, uint32_t value) {
 void EmitVoid(ValueEmitContext&) {}
 
 void EmitStoreCompletion(EmitterState& state) {
+	if (state.single_lane_subgroup) {
+		// A lone invocation observes its own stores in order; Metal vertex functions reject the
+		// subgroup execution barrier.
+		return;
+	}
 	state.builder.AddFunction(
 	    spv::OpControlBarrier, ConstantU32(state, spv::ScopeSubgroup),
 	    ConstantU32(state, spv::ScopeDevice),
