@@ -13,6 +13,10 @@
   `InvalidResource`/device-loss error; the fixed-point capture shows the real suicide/self-harm
   warning screen with the Continue prompt. Warm pacing is about 23–26 FPS, so this is a
   correctness/progress workaround with a substantial performance cost, not a final solution.
+- A late automated Continue test with `KYTY_MESH_SCRATCH_MB=64` survived 60 seconds after the
+  warning-screen transition, with no GPU loss or Unreal OOM. The 256 MB host-visible setting
+  later hit a 13 GB physical-memory OOM after longer streaming, so 64 MB is the current practical
+  launch setting while the mesh resource path is redesigned.
 
 ## What fixed what
 

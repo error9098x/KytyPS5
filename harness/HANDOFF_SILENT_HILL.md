@@ -19,7 +19,9 @@ Written 2026-10-10 for continuing in Codex. Branch: `codex/animal-well-compat`.
  3. GPU-driven rendering needs GPU to CPU coherence, so tracking cannot just be disabled.
 
 The host-visible scratch A/B passed three 35-second timeout runs with content frames and no
-device-loss error. It currently runs around 23–26 FPS warm and has not yet reached gameplay.
+device-loss error. A 64 MB host-visible scratch run also survived 60 seconds after an automated
+Continue press with no GPU loss or Unreal OOM. Use `KYTY_MESH_SCRATCH_MB=64` for interactive
+testing; 256 MB later reached a 13 GB physical-memory OOM.
 
 ### Implemented this session (mesh emulation, "mesh via compute")
 
