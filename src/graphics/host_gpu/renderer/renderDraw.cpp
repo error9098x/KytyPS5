@@ -1585,11 +1585,15 @@ Buffer& RenderExecutor::MeshEmulationScratch() {
 		if (const char* value = std::getenv("KYTY_MESH_SCRATCH_MB"); value != nullptr) {
 			megabytes = std::clamp<uint64_t>(std::strtoull(value, nullptr, 10), 16u, 4096u);
 		}
+		const auto usage = std::getenv("KYTY_MESH_SCRATCH_HOST") != nullptr
+		                       ? MemoryUsage::Upload
+		                       : MemoryUsage::DeviceLocal;
 		m_mesh_scratch = std::make_unique<Buffer>(
-		    m_context.GetGraphics(), m_context.GetCommandScheduler(), MemoryUsage::DeviceLocal, 0,
+		    m_context.GetGraphics(), m_context.GetCommandScheduler(), usage, 0,
 		    vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eShaderDeviceAddress,
 		    megabytes << 20u);
-		LOGF("MeshEmulation: scratch buffer %" PRIu64 " MB\n", megabytes);
+		LOGF("MeshEmulation: scratch buffer %" PRIu64 " MB usage=%s\n", megabytes,
+		     usage == MemoryUsage::Upload ? "host" : "device");
 	}
 	return *m_mesh_scratch;
 }
