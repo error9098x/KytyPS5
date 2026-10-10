@@ -1042,6 +1042,12 @@ Swapchain::Status Swapchain::Present() {
 	{
 		Common::LockGuard lock(m_window.graphic_ctx.queue_mutex);
 		result = m_window.graphic_ctx.queue.presentKHR(&present);
+		// Opt-in latency experiment ("GPU hard sync"): block until the GPU has
+		// drained all work so the CPU cannot run ahead of presented frames.
+		static const bool hard_sync = std::getenv("KYTY_GPU_HARD_SYNC") != nullptr;
+		if (hard_sync) {
+			(void)m_window.graphic_ctx.queue.waitIdle();
+		}
 	}
 	switch (result) {
 		case vk::Result::eSuccess: break;

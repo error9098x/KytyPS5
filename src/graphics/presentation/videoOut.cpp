@@ -1,6 +1,8 @@
 #include "graphics/presentation/videoOut.h"
 
 #include "common/abi.h"
+
+#include <cstdlib>
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
@@ -56,7 +58,23 @@ constexpr int      VIDEO_OUT_FLIP_MODE_MASTER                           = 9;
 constexpr int      VIDEO_OUT_BUFFER_INDEX_BLACK                         = -2;
 constexpr int      VIDEO_OUT_BUFFER_INDEX_BLANK                         = -1;
 constexpr int      VIDEO_OUT_BUFFER_NUM_MAX                             = 16;
-constexpr size_t   VIDEO_OUT_FLIP_QUEUE_CAPACITY                        = 16;
+constexpr size_t   VIDEO_OUT_FLIP_QUEUE_CAPACITY_DEFAULT                = 16;
+
+// Opt-in latency experiment: KYTY_MAX_PENDING_FLIPS=N (1..16) limits how many
+// guest flips may be queued ahead of presentation ("max buffered frames").
+static size_t FlipQueueCapacity() {
+	static const size_t capacity = [] {
+		if (const char* v = std::getenv("KYTY_MAX_PENDING_FLIPS"); v != nullptr && *v != '\0') {
+			long n = std::strtol(v, nullptr, 10);
+			if (n >= 1 && n <= 16) {
+				return static_cast<size_t>(n);
+			}
+		}
+		return VIDEO_OUT_FLIP_QUEUE_CAPACITY_DEFAULT;
+	}();
+	return capacity;
+}
+#define VIDEO_OUT_FLIP_QUEUE_CAPACITY (FlipQueueCapacity())
 constexpr int      VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX                   = 4;
 constexpr uint64_t VIDEO_OUT_OUTPUT_MODE_DEFAULT                        = 0x0000000000000001ULL;
 constexpr uint64_t VIDEO_OUT_OUTPUT_MODE_119_88HZ                       = 0x000000000000000FULL;
