@@ -90,6 +90,9 @@ long input-delay reports remain in progress.
 - The virtual-vblank default remains 60 Hz. A three-run 120 Hz comparison did
   not consistently improve movement latency and retained multi-second startup
   stalls, so it remains an opt-in harness setting only.
+- A legal two-image swapchain comparison also matched the three-image default
+  within run-to-run noise and retained the startup gap; the default buffering
+  remains unchanged.
 - Startup profiling attributes the repeated 2.88–2.99 s gap to first-use
   MoltenVK/Metal command encoding and timeline synchronization; no unsafe
   synchronization workaround was retained.

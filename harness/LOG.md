@@ -419,6 +419,17 @@ library. No game-specific diagnosis is valid until this is resolved.
   stall is not one queue submission; guest initialization or a wait outside the
   GPU process remains. The timing hooks are diagnostic only and are disabled by
   default.
+
+## Swapchain image-count A/B — 2026-10-10
+
+- Added opt-in `KYTY_SWAPCHAIN_IMAGE_COUNT`, clamped to the Vulkan surface's
+  legal minimum and maximum. The default remains three images; zero or one is
+  not a valid request on this surface.
+- Three default runs measured FPS medians `60.22`, `62.05`, and `60.76`, with
+  maximum frame gaps `2857`, `2863`, and `2817` ms. Three legal two-image runs
+  measured medians `60.23`, `61.38`, and `61.01`, with maximum gaps `2820`,
+  `2833`, and `2848` ms. The two-image path does not improve startup or
+  sustained pacing consistently and is not retained as a default.
 - Three 35-second runs with the first probe event delayed to 10 seconds measured
   warm host-to-present median/p95/max of `8.94/22.68/28.62 ms`,
   `9.12/26.16/32.93 ms`, and `10.46/27.34/35.00 ms`. Guest-poll p95 was
