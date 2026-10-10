@@ -17,6 +17,10 @@
   warning-screen transition, with no GPU loss or Unreal OOM. The 256 MB host-visible setting
   later hit a 13 GB physical-memory OOM after longer streaming, so 64 MB is the current practical
   launch setting while the mesh resource path is redesigned.
+- A 90-second captured Immediate-present route shows the sequence clearly: Konami intro, warning
+  screen, a long black loading/streaming interval after Continue, then content frames return.
+  The run eventually ends in Unreal's memory allocator after reaching the host's physical-memory
+  ceiling; the black interval itself is not a permanent shader failure.
 
 ## What fixed what
 

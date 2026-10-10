@@ -23,6 +23,11 @@ device-loss error. A 64 MB host-visible scratch run also survived 60 seconds aft
 Continue press with no GPU loss or Unreal OOM. Use `KYTY_MESH_SCRATCH_MB=64` for interactive
 testing; 256 MB later reached a 13 GB physical-memory OOM.
 
+The captured Immediate-present route renders the Konami intro and warning/Continue screen, then
+enters a long black loading/streaming interval; content frames return later. The eventual failure
+is Unreal memory exhaustion, so the black interval is a loading/resource problem rather than a
+permanent shader-black frame.
+
 ### Implemented this session (mesh emulation, "mesh via compute")
 
 - `src/graphics/shader/meshEmulation.h`: scratch layout shared by both shaders.
