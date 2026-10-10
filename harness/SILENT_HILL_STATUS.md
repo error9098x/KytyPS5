@@ -26,6 +26,9 @@ An attempted automatic PPSA10112/Apple default for host-visible scratch was reve
 short run still hit `InvalidResource`. The stable route remains explicitly opt-in with
 `KYTY_MESH_SCRATCH_HOST=1`; 256 MB is the most repeatable setting, while 64 MB reduces memory
 use but remains experimental.
+- A 128 MB host-visible run survived the delayed Continue route without GPU loss, Unreal OOM,
+  or a fatal error and exited cleanly after about 51 seconds. It is the current memory/stability
+  experiment; it has not yet passed the 10-minute gate.
 
 ## What fixed what
 

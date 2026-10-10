@@ -22,6 +22,8 @@ The host-visible scratch A/B passed three 35-second timeout runs with content fr
 device-loss error. A 64 MB host-visible scratch run also survived 60 seconds after an automated
 Continue press with no GPU loss or Unreal OOM. Use `KYTY_MESH_SCRATCH_MB=64` for interactive
 testing; 256 MB later reached a 13 GB physical-memory OOM.
+The 128 MB host-visible variant survived a delayed Continue run without GPU loss or OOM and
+exited cleanly after about 51 seconds; it remains an opt-in experiment pending longer stability.
 
 The captured Immediate-present route renders the Konami intro and warning/Continue screen, then
 enters a long black loading/streaming interval; content frames return later. The eventual failure
