@@ -133,6 +133,10 @@ library. No game-specific diagnosis is valid until this is resolved.
 - `KYTY_FRAME_TIMING=1` adds per-present timestamps without frame readbacks;
   `harness/fps.py` reports pacing. A 10-second probe measured median 16.91 ms
   (59.12 FPS), p95 33.37 ms, with a 2.96 s startup initialization outlier.
+- `harness/fps.py` now also prints a fixed 120-interval startup window and a
+  separate warm pacing summary. Existing cache-loaded runs report warm medians
+  around 60–62 FPS, warm p95 frame times around 20–22 ms, and warm maxima below
+  25 ms.
 - Controller buttons, controller axes, and mouse buttons now use the same
   monotonic `InputStats` clock. A follow-up automated keyboard probe produced
   no input events, so it correctly reported no matched samples rather than

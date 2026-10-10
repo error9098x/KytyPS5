@@ -57,6 +57,10 @@ long input-delay reports remain in progress.
   invalidation on the new revision, two cache-loaded Silent runs measured
   60.17–60.44 FPS median with 2.93–3.60 s max gaps, confirming the startup
   stall is not caused primarily by diagnostic file dumping.
+- `harness/fps.py` now separates the first 120 startup intervals from sustained
+  pacing. Existing runs show warm medians around 60–62 FPS, warm p95 frame times
+  around 20–22 ms, and warm maxima below 25 ms; the multi-second gap is reported
+  separately as startup.
 - Opt-in pipeline timing measured roughly 39 ms for first compute program
   materialization and 2.4 ms for direct compute pipeline creation, versus a
   roughly 3 s present gap. The remaining startup cost is downstream of those
