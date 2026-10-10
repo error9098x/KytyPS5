@@ -520,6 +520,37 @@ void GameController::CheckActive() {
 }
 
 void GameController::AddState() {
+	// Coalesce continuous updates (motion sensors, stick/trigger noise) into the
+	// newest unread sample. A real DualShock/DualSense streams motion data far
+	// faster than games poll; queueing every packet made scePadRead(num=1) return
+	// samples that were up to ~1 s old. Button/touch transitions still get their
+	// own entries so short taps are never lost.
+	if (m_states_num != 0) {
+		const auto last  = (m_first_state + m_states_num - 1) % STATES_MAX;
+		const auto& prev = m_states[last];
+		const bool same_discrete =
+		    prev.buttons == m_state.buttons && prev.touch[0].id == m_state.touch[0].id &&
+		    prev.touch[0].down == m_state.touch[0].down && prev.touch[1].id == m_state.touch[1].id &&
+		    prev.touch[1].down == m_state.touch[1].down;
+		if (!m_obtained[last] && same_discrete) {
+			m_states[last] = m_state;
+			return;
+		}
+	}
+
+	// Drop samples the guest already consumed so the ring holds only unread data.
+	while (m_states_num != 0 && m_obtained[m_first_state]) {
+		m_first_state = (m_first_state + 1) % STATES_MAX;
+		m_states_num--;
+	}
+
+	// Safety cap: never let unread input fall more than a few transitions behind.
+	constexpr uint32_t MAX_UNREAD = 8;
+	while (m_states_num >= MAX_UNREAD) {
+		m_first_state = (m_first_state + 1) % STATES_MAX;
+		m_states_num--;
+	}
+
 	if (m_states_num >= STATES_MAX) {
 		m_states_num  = STATES_MAX - 1;
 		m_first_state = (m_first_state + 1) % STATES_MAX;
