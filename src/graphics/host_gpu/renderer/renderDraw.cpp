@@ -32,7 +32,6 @@
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
-#include "loader/systemContent.h"
 
 #include <algorithm>
 #include <array>
@@ -1586,19 +1585,9 @@ Buffer& RenderExecutor::MeshEmulationScratch() {
 		if (const char* value = std::getenv("KYTY_MESH_SCRATCH_MB"); value != nullptr) {
 			megabytes = std::clamp<uint64_t>(std::strtoull(value, nullptr, 10), 16u, 4096u);
 		}
-		bool host_scratch = std::getenv("KYTY_MESH_SCRATCH_HOST") != nullptr;
-#if defined(__APPLE__)
-		std::string title_id;
-		if (std::getenv("KYTY_MESH_SCRATCH_DEVICE") == nullptr &&
-		    Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id) &&
-		    title_id == "PPSA10112") {
-			host_scratch = true;
-			if (std::getenv("KYTY_MESH_SCRATCH_MB") == nullptr) {
-				megabytes = 64;
-			}
-		}
-#endif
-		const auto usage = host_scratch ? MemoryUsage::Upload : MemoryUsage::DeviceLocal;
+		const auto usage = std::getenv("KYTY_MESH_SCRATCH_HOST") != nullptr
+		                       ? MemoryUsage::Upload
+		                       : MemoryUsage::DeviceLocal;
 		m_mesh_scratch = std::make_unique<Buffer>(
 		    m_context.GetGraphics(), m_context.GetCommandScheduler(), usage, 0,
 		    vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eShaderDeviceAddress,
