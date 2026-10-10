@@ -6,6 +6,10 @@ import statistics
 import sys
 
 text = (pathlib.Path(sys.argv[1]) / "guest-printf.log").read_text(errors="replace")
+keyboard_inputs = [
+    (int(key), int(t))
+    for key, t in re.findall(r"InputStats:.*?key=(\d+).*?t_us=(\d+)", text)
+]
 inputs = [int(t) for t in re.findall(r"InputStats:.*?kind=controller_(?:button|axis).*?t_us=(\d+)", text)]
 if not inputs:
     inputs = [int(t) for t in re.findall(r"InputStats:.*?kind=mouse_button.*?t_us=(\d+)", text)]
@@ -45,6 +49,18 @@ print("[latency] samples=%d median_ms=%.2f p95_ms=%.2f max_ms=%.2f" %
 for threshold in (40.0, 100.0, 500.0):
     print("[latency] host_to_present_over_%gms=%d" %
           (threshold, sum(delay > threshold for delay in delays)))
+
+if keyboard_inputs:
+    per_key = {}
+    for key, stamp in keyboard_inputs:
+        next_frame = next((frame for frame in frames if frame >= stamp), None)
+        if next_frame is not None:
+            per_key.setdefault(key, []).append((next_frame - stamp) / 1000.0)
+    for key in sorted(per_key):
+        values = sorted(per_key[key])
+        print("[latency] key=%d host_to_present samples=%d median_ms=%.2f p95_ms=%.2f max_ms=%.2f" %
+              (key, len(values), statistics.median(values),
+               values[min(len(values) - 1, int(0.95 * len(values)))], values[-1]))
 if poll_delays:
     poll_delays.sort()
     print("[latency] input_to_guest_poll_samples=%d median_ms=%.2f p95_ms=%.2f max_ms=%.2f" %
@@ -76,6 +92,8 @@ states = [
     )
 ]
 observed = []
+observed_per_mask = {}
+present_after_poll = []
 if states and poll_records:
     for mask, down, sample, host in states:
         for buttons, poll_sample, poll_host in poll_records:
@@ -83,7 +101,12 @@ if states and poll_records:
                 continue
             active = (buttons & mask) != 0
             if poll_sample == sample and active == down:
-                observed.append((poll_host - host) / 1000.0)
+                delay = (poll_host - host) / 1000.0
+                observed.append(delay)
+                observed_per_mask.setdefault(mask, []).append(delay)
+                next_frame = next((frame for frame in frames if frame >= poll_host), None)
+                if next_frame is not None:
+                    present_after_poll.append((next_frame - host) / 1000.0)
                 break
 if observed:
     observed.sort()
@@ -93,6 +116,17 @@ if observed:
     for threshold in (40.0, 100.0, 500.0):
         print("[latency] host_to_observed_button_over_%gms=%d" %
               (threshold, sum(delay > threshold for delay in observed)))
+    for mask in sorted(observed_per_mask):
+        values = sorted(observed_per_mask[mask])
+        print("[latency] mask=0x%08x host_to_observed_button samples=%d median_ms=%.2f p95_ms=%.2f max_ms=%.2f" %
+              (mask, len(values), statistics.median(values),
+               values[min(len(values) - 1, int(0.95 * len(values)))], values[-1]))
+if present_after_poll:
+    present_after_poll.sort()
+    print("[latency] host_to_next_present_after_observed_button samples=%d median_ms=%.2f p95_ms=%.2f max_ms=%.2f" %
+          (len(present_after_poll), statistics.median(present_after_poll),
+           present_after_poll[min(len(present_after_poll) - 1, int(0.95 * len(present_after_poll)))],
+           present_after_poll[-1]))
 if states:
     print("[latency] button_samples_unmatched=%d (latest-state reads may supersede transitions)" %
           (len(states) - len(observed)))

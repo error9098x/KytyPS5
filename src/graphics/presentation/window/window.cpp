@@ -743,11 +743,16 @@ void WindowContext::Run() {
 	struct InputProbe {
 		bool        enabled = std::getenv("KYTY_INPUT_PROBE") != nullptr;
 		bool        down    = false;
+		bool        bootstrap_enabled = false;
+		bool        bootstrap_down = false;
 		SDL_Keycode key     = SDLK_J;
+		SDL_Keycode bootstrap_key = SDLK_UNKNOWN;
 		uint64_t    next_ms = 0;
 		uint64_t    start_ms = 2000;
 		uint64_t    interval_ms = 500;
 		uint64_t    hold_ms = 16;
+		uint64_t    bootstrap_warmup_ms = 3000;
+		uint64_t    bootstrap_remaining = 1;
 	};
 	InputProbe input_probe;
 	if (input_probe.enabled) {
@@ -763,6 +768,10 @@ void WindowContext::Run() {
 		input_probe.start_ms    = read_ms("KYTY_INPUT_PROBE_START_MS", input_probe.start_ms);
 		input_probe.interval_ms = read_ms("KYTY_INPUT_PROBE_INTERVAL_MS", input_probe.interval_ms);
 		input_probe.hold_ms     = read_ms("KYTY_INPUT_PROBE_HOLD_MS", input_probe.hold_ms);
+		input_probe.bootstrap_warmup_ms =
+			read_ms("KYTY_INPUT_PROBE_BOOTSTRAP_WARMUP_MS", input_probe.bootstrap_warmup_ms);
+		input_probe.bootstrap_remaining = std::clamp<uint64_t>(
+			read_ms("KYTY_INPUT_PROBE_BOOTSTRAP_COUNT", 1), 1, 64);
 		input_probe.next_ms     = title_time + input_probe.start_ms;
 		if (const char* name = std::getenv("KYTY_INPUT_PROBE_KEY"); name != nullptr && *name != '\0') {
 			const auto key = SDL_GetKeyFromName(name);
@@ -770,10 +779,21 @@ void WindowContext::Run() {
 				input_probe.key = key;
 			}
 		}
+		if (const char* name = std::getenv("KYTY_INPUT_PROBE_BOOTSTRAP_KEY");
+		    name != nullptr && *name != '\0') {
+			const auto key = SDL_GetKeyFromName(name);
+			if (key != SDLK_UNKNOWN) {
+				input_probe.bootstrap_key     = key;
+				input_probe.bootstrap_enabled = true;
+			}
+		}
 		LOGF("InputProbe: enabled key=%s first_ms=%" PRIu64 " interval_ms=%" PRIu64
-		     " hold_ms=%" PRIu64 "\n",
+		     " hold_ms=%" PRIu64 " bootstrap=%s count=%" PRIu64 " warmup_ms=%" PRIu64 "\n",
 		     SDL_GetKeyName(input_probe.key), input_probe.start_ms, input_probe.interval_ms,
-		     input_probe.hold_ms);
+		     input_probe.hold_ms,
+		     input_probe.bootstrap_enabled ? SDL_GetKeyName(input_probe.bootstrap_key) : "none",
+		     input_probe.bootstrap_remaining,
+		     input_probe.bootstrap_warmup_ms);
 	}
 
 	while (!loop.need_exit) {
@@ -799,16 +819,33 @@ void WindowContext::Run() {
 		}
 		if (input_probe.enabled && now >= input_probe.next_ms) {
 			EventKeyboard key {};
-			key.down              = !input_probe.down;
-			key.up                = input_probe.down;
-			key.pressed           = key.down;
-			key.released          = key.up;
-			key.key_code          = input_probe.key;
+			if (input_probe.bootstrap_enabled && !input_probe.bootstrap_down) {
+				key.down                  = true;
+				key.pressed               = true;
+				key.key_code              = input_probe.bootstrap_key;
+				input_probe.bootstrap_down    = true;
+				input_probe.next_ms           = now + input_probe.hold_ms;
+			} else if (input_probe.bootstrap_enabled && input_probe.bootstrap_down) {
+				key.up                    = true;
+				key.released              = true;
+				key.key_code              = input_probe.bootstrap_key;
+				input_probe.bootstrap_down = false;
+				input_probe.bootstrap_enabled = --input_probe.bootstrap_remaining != 0;
+				input_probe.next_ms = now + (input_probe.bootstrap_enabled
+				                                ? input_probe.interval_ms
+				                                : input_probe.bootstrap_warmup_ms);
+			} else {
+				key.down        = !input_probe.down;
+				key.up          = input_probe.down;
+				key.pressed     = key.down;
+				key.released    = key.up;
+				key.key_code    = input_probe.key;
+				input_probe.down = !input_probe.down;
+				input_probe.next_ms = now + (input_probe.down ? input_probe.hold_ms
+				                                                : input_probe.interval_ms);
+			}
 			key.timestamp_seconds = timer.GetTimeS();
 			GameEventKeyboard(key);
-			input_probe.down    = !input_probe.down;
-			input_probe.next_ms = now + (input_probe.down ? input_probe.hold_ms
-			                                                : input_probe.interval_ms);
 		}
 		const auto title_wait_ms = title_interval_ms - (now - title_time);
 		const auto probe_wait_ms = input_probe.enabled && input_probe.next_ms > now
@@ -821,6 +858,13 @@ void WindowContext::Run() {
 			continue;
 		}
 		ProcessEvent(timer.GetTimeS());
+	}
+	if (input_probe.bootstrap_down) {
+		EventKeyboard key {};
+		key.up       = true;
+		key.released = true;
+		key.key_code = input_probe.bootstrap_key;
+		GameEventKeyboard(key);
 	}
 	if (input_probe.down) {
 		EventKeyboard key {};
