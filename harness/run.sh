@@ -56,6 +56,9 @@ if audio_device:
 present_mode = os.environ.get("KYTY_PRESENT_MODE")
 if present_mode:
     args += ["--present-mode", present_mode]
+vblank_frequency = os.environ.get("KYTY_VBLANK_FREQUENCY")
+if vblank_frequency:
+    args += ["--vblank-frequency", vblank_frequency]
 started = time.time()
 with log.open("w") as stream:
     proc = subprocess.Popen(args, stdout=stream, stderr=subprocess.STDOUT,

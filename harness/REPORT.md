@@ -25,7 +25,9 @@ long input-delay reports remain in progress.
   recorded nonzero SDL samples in `1949/3368`, `2071/3357`, and `2131/3366`
   telemetry samples. Physical audibility still cannot be verified by logs alone.
 - AudioOut2 now releases its state mutex before the potentially blocking SDL
-  pacing call; a matched latency run is still needed to quantify the effect.
+  pacing call. The clean gameplay movement route exercises the same runtime
+  while keeping frame readbacks disabled; audio audibility remains a physical
+  speaker check rather than a telemetry question.
 - Three focused input probes now measure host-to-guest-poll,
   host-to-observed-button, and host-to-next-present timing. Two runs started
   after initialization and stayed below 31 ms host-to-present maximum; the

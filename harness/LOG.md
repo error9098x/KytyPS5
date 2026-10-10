@@ -335,11 +335,12 @@ library. No game-specific diagnosis is valid until this is resolved.
   the other two stayed below 31 ms. Guest-poll p95 values were `41.42`,
   `19.12`, and `19.29` ms. These runs support a warm steady-state baseline,
   but do not prove that every startup transition is free of hitches.
-- The short startup probe reproduced host-to-observed-button maxima of about
-  `945` ms and host-to-present maxima of about `1.07` s. The guest then drained
-  the queued button transitions in order. This points to the guest/render
-  thread being stalled during first-use GPU work, rather than the host input
-  mutex dropping events.
+- The short startup probe reproduced roughly 0.8–1.1 s host-to-observed-button
+  and host-to-present delays. The guest then drained the queued button
+  transitions in order. The delay begins before the first pad poll; Metal
+  residency work surrounds that initialization window, while shader compilation
+  begins afterward. This points to an initialization/render-thread stall rather
+  than the host input mutex dropping events.
 
 ## Deterministic input probe — 2026-10-10
 
