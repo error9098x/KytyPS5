@@ -414,6 +414,18 @@ struct MemoryResourceAccess {
 	spv::MemoryAccessMask memory_access    = spv::MemoryAccessMaskNone;
 };
 
+// Metal's SPIR-V-Cross path rejects Kyty's aliased 8/16-bit storage-buffer views, which share
+// DescriptorSet 0 / Binding 0 with the 32-bit view (see the Buffers case in spirvEmitterModule).
+// On Apple hosts, emit only the 32-bit view and emulate sub-word access with shift/mask through
+// the word path in Load/StoreSubwordInBounds; every other platform keeps the real views.
+[[nodiscard]] constexpr bool UseSubwordStorageBufferViews() {
+#if defined(__APPLE__)
+	return false;
+#else
+	return true;
+#endif
+}
+
 uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t mapping_offset,
                                    uint32_t search_iterations, uint32_t default_resource);
 MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::MemoryInfo& mem);

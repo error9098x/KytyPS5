@@ -273,14 +273,20 @@ void DefineDescriptors(EmitterState& state) {
 		};
 		switch (kind) {
 			case IR::DescriptorBindingKind::Buffers: {
-				const std::array used {info.buffer_u8, info.buffer_u16, true, info.buffer_int64_atomics};
+				const auto subword_views = UseSubwordStorageBufferViews();
+				const std::array used {info.buffer_u8 && subword_views,
+				                       info.buffer_u16 && subword_views, true,
+				                       info.buffer_int64_atomics};
+				const auto view_count =
+				    static_cast<uint32_t>(std::ranges::count(used, true));
 				constexpr std::array names {"buffers_u8", "buffers_u16", "buffers", "buffers_u64"};
 				for (uint32_t alias = 0; alias < used.size(); ++alias) {
 					if (!used[alias]) continue;
 					auto& buffer = state.storage_buffers[alias];
 					const auto type = StorageBufferType(state, buffer, 8u << alias);
 					buffer.variable = Define(ArrayType(type), names[alias]);
-					if (info.buffer_u8 || info.buffer_u16 || info.buffer_int64_atomics) {
+					// One binding, several views: only then is it an alias Metal must reconcile.
+					if (view_count > 1u) {
 						state.builder.AddAnnotation(spv::OpDecorate, buffer.variable, spv::DecorationAliased);
 					}
 					// RDNA2 stores publish to L2 even without GLC; every alias of the buffer
@@ -730,11 +736,11 @@ void DefineModule(EmitterState& state) {
 
 	state.builder.RequireCapability(spv::CapabilityShader);
 	state.builder.RequireCapability(spv::CapabilitySignedZeroInfNanPreserve);
-	if (state.program.info.buffer_u8) {
+	if (UseSubwordStorageBufferViews() && state.program.info.buffer_u8) {
 		state.builder.RequireExtension("SPV_KHR_8bit_storage");
 		state.builder.RequireCapability(spv::CapabilityStorageBuffer8BitAccess);
 	}
-	if (state.program.info.buffer_u16) {
+	if (UseSubwordStorageBufferViews() && state.program.info.buffer_u16) {
 		state.builder.RequireCapability(spv::CapabilityStorageBuffer16BitAccess);
 	}
 	if (state.program.info.uses_dma) {

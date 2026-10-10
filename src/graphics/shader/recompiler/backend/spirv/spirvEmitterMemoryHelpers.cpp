@@ -209,14 +209,17 @@ MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::
 		case IR::ResourceKind::Buffer: {
 			const auto bits = mem.kind == IR::ResourceKind::Buffer
 			                      ? IR::StorageBufferElementBits(state.program, mem) : 32u;
+			// Apple hosts omit the aliased 8/16-bit views, so sub-word access is emulated
+			// through the 32-bit view by Load/StoreSubwordInBounds.
+			const auto view_bits = UseSubwordStorageBufferViews() ? bits : 32u;
 			auto* buffer = &state.storage_buffers[2];
-			if (bits == 8u) {
+			if (view_bits == 8u) {
 				buffer = &state.storage_buffers[0];
-			} else if (bits == 16u) {
+			} else if (view_bits == 16u) {
 				buffer = &state.storage_buffers[1];
 			}
 			access = PrepareStorageBufferResourceAccess(state, mem, *buffer);
-			access.element_bits = bits;
+			access.element_bits = view_bits;
 			return access;
 		}
 		default: EXIT("unsupported memory resource kind: %u\n", static_cast<unsigned>(mem.kind));
