@@ -130,3 +130,42 @@ long input-delay reports remain in progress.
 - Compare fixed-point screenshots against a reference and remove major visual defects.
 - Reduce the startup guest/host initialization hitch and measure sustained gameplay performance.
 - Resolve the remaining 108 load-time imports only when a call trace proves they matter.
+
+# Silent Hill: The Short Message (PPSA10112) — bring-up report — 2026-10-10
+
+Stage reached: **1 not met** (does not render), but the failure point moved from a fixable emulator
+bug to a host capability limit. Two blockers fixed, one remains and is not an emulator edit.
+
+## Before / after
+
+| | Before | After |
+|---|---|---|
+| Exit | 65 at ~3.5 s | 65 at ~3-5 s |
+| First fatal | `shaders.cpp:632` — MSL "Attempting to alias same binding" | `pipelineCache.cpp:625` — `mesh_shader_enabled` |
+| Shaders compiled | 0 (first compute shader failed) | VS 4 / PS 3 / CS 16 |
+| Frames | 11 sampled, all black | 11 sampled, all black |
+
+Verification: 3 consecutive runs each reach the same mesh-shader line. Animal Well regression:
+3 × 45 s runs, stage 2, 41–43 content frames each, unchanged.
+
+## Kept changes
+
+1. `5f8b23d4` — Apple: emit a single 32-bit storage-buffer view, emulate sub-word access by
+   shift/mask. Fixes Metal's alias rejection at DescriptorSet 0 / Binding 0.
+2. `652d4247` — extend the Apple vertex-subgroup fallback to PPSA10112 (vertex shader read
+   `SubgroupLocalInvocationId`, which Metal vertex functions cannot expose). Small, per-title.
+
+Both are gated to Apple (and the subgroup one per-title), so they cannot affect other platforms,
+and neither regresses Animal Well.
+
+## Reverted / not attempted
+
+Nothing was reverted. A pipeline-creation "log and skip" fallback was considered but not needed
+once blocker 1 was fixed properly.
+
+## Remaining issue (blocking, host capability)
+
+Mesh shaders. MoltenVK 1.4.2 (the only x86-64 Vulkan driver here) has no `VK_EXT_mesh_shader`;
+KosmicKrisp (which does) is arm64-only; Kyty executes PS5 x86-64 guest code natively and cannot run
+as arm64. So PPSA10112 cannot progress past its NGG/mesh geometry on this machine. Full evidence and
+the three possible unblock paths are in `harness/BLOCKERS.md`.

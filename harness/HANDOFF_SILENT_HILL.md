@@ -2,13 +2,23 @@
 
 Written 2026-10-10 for continuing in Codex. Branch: `codex/animal-well-compat`.
 
-## Current state
+## Current state (updated 2026-10-10)
 
 - Animal Well (PPSA22520) runs: stable gameplay, audio, ~60 FPS. Input lag fixed (`56852717`,
   see `harness/INPUT_LAG_FIX.md`). Do not regress it.
-- Silent Hill: The Short Message **crashes ~3.5 s after launch** (exit code 65). Nothing is
-  drawn; sampled frames are all black. Only the first blocker has been found. No code has been
-  changed for this game yet.
+- Silent Hill: The Short Message (PPSA10112) still exits 65, but now **three blockers in**: the
+  first two are fixed and it reliably reaches the third, a hard host limit.
+  1. ~~MoltenVK rejects aliased buffer bindings~~ **FIXED** (`5f8b23d4`): on Apple, emit only the
+     32-bit storage-buffer view and emulate sub-word access via shift/mask.
+  2. ~~Vertex shader reads `SubgroupLocalInvocationId`~~ **FIXED** (`652d4247`): the Apple
+     vertex-subgroup fallback is no longer PPSA22520-only; it also covers PPSA10112.
+  3. **Mesh shaders — HARD HOST LIMIT.** Reaches
+     `EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled)` (`pipelineCache.cpp:625`). MoltenVK
+     1.4.2 has no `VK_EXT_mesh_shader`; KosmicKrisp has it but is arm64-only; Kyty executes PS5
+     x86-64 guest code natively and cannot run as arm64. Full analysis in `harness/BLOCKERS.md`.
+  Progress before stopping: VS 4 / PS 3 / CS 16 shaders compiled, past engine config into ATRAC9
+  audio decode. Verification: 3 consecutive runs all stop at the same mesh-shader line; Animal Well
+  regresses on none.
 
 ## Game data
 
@@ -39,9 +49,10 @@ Output goes to `harness/runs/<name>/` (`kyty.log`, `guest-printf.log`, `scan.txt
 Add `KYTY_GRAPHICS_DEBUG_DUMP=true KYTY_SHADER_LOG_DIRECTION=File` to dump SPIR-V into
 `harness/runs/<name>/shaders/`.
 
-Runs so far: `shtsm-first-1`, `shtsm-argbuf-1`, `shtsm-dump-1` (the last has the SPIR-V).
+Runs so far: `shtsm-first-1`, `shtsm-argbuf-1`, `shtsm-dump-1` (SPIR-V), `shtsm-fix1`,
+`shtsm-fix2`, `shtsm-verify-1..3`.
 
-## Blocker 1 (found): MoltenVK rejects aliased buffer bindings
+## Blocker 1 (FIXED, `5f8b23d4`): MoltenVK rejected aliased buffer bindings
 
 Log (`harness/runs/shtsm-first-1/kyty.log`):
 
@@ -56,31 +67,29 @@ Not implemented (result != vk::Result::eSuccess) in src/graphics/host_gpu/render
 - Failing shader: `harness/runs/shtsm-dump-1/shaders/0007_new_shader_cs_80b8f1b01227d2c4.spv`
   (6 other compute shaders and 1 vertex shader compile fine).
 - Cause: it declares `%buffers_u8` and `%buffers` as two variables at the **same
-  DescriptorSet 0 / Binding 0**, both `Aliased`, as arrays of 2 storage buffers (one is a
-  byte array, one a uint array). Vulkan allows this; Metal's SPIRV-Cross path does not.
-- Emitted in `src/graphics/shader/recompiler/backend/spirv/spirvEmitterModule.cpp` ~lines 275-292:
-  the `Buffers` kind loops over `{buffer_u8, buffer_u16, true, buffer_int64_atomics}`, defines one
-  variable per alias via `Define(...)` with the same binding, and adds `DecorationAliased`.
-- The `%buffers_u8` variable here is only used for `OpArrayLength` (13 references, no loads or stores
-  in this shader), so a read-only workaround would unblock it.
-- `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1` made no difference (tried in `shtsm-argbuf-1`).
+  DescriptorSet 0 / Binding 0**, both `Aliased`. Vulkan allows this; Metal's SPIRV-Cross path does not.
+- **Fix applied** (option 1 below, Apple-gated via `UseSubwordStorageBufferViews()` in
+  `spirvEmitterInternal.h`): declare only the 32-bit view; sub-word access goes through the
+  existing shift/mask path in `Load/StoreSubwordInBounds`. `pipelineCache.cpp`'s
+  `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1` experiment (`shtsm-argbuf-1`) made no difference.
 
-Related code: `spirvEmitterMemory.cpp` lines ~336 and ~442 (`storage_buffers[bits == 8u ? 0 : 1]`),
-`spirvEmitterMemoryHelpers.cpp` ~212-216, `spirvEmitterModule.cpp` ~144-150 and ~733-737.
+Touched: `spirvEmitterInternal.h`, `spirvEmitterModule.cpp` (declaration + capabilities),
+`spirvEmitterMemoryHelpers.cpp` (view selection).
 
-### Fix options (none implemented)
+## Blocker 2 (FIXED, `652d4247`): vertex shader subgroup builtins
 
-1. Apple-only: when `buffer_u8`/`buffer_u16` are used, drop the extra aliased variables and emit
-   byte/16-bit **loads** as 32-bit loads with shift and mask on the single `buffers` variable.
-   Use `OpArrayLength` from that variable, adjusted to byte units.
-2. Byte/16-bit **stores** need an atomic read-modify-write (`OpAtomicAnd`/`OpAtomicOr` on the
-   containing uint); this is slower and needs care. This shader has no stores; others may.
-3. Alternative: give each alias its own binding number and have the host bind the same buffer to
-   each. This touches the descriptor layout and `IR::NativeBinding`; likely more invasive.
-4. Keep any fix gated to Apple (`__APPLE__`) so Animal Well's validated path and other platforms
-   don't change. Check the existing Apple gating in `pipelineCache.cpp` and `ShaderRecompiler.cpp`.
-5. Separately consider making a failed pipeline non-fatal (log and skip the draw) so later
-   problems surface in the same run. It is currently `Not implemented` at `shaders.cpp:632`.
+`[mvk-error] SPIR-V to MSL conversion error: Subgroup builtins are not available in this type of
+function.` — a vertex shader loads `SubgroupLocalInvocationId`
+(`shtsm-sgdump/shaders/0005_new_shader_vs_*.spv`), used only as `(0xFFFFFFFF >> (lane & 31)) & 1`,
+which is always 1. The Apple vertex-subgroup fallback (lane id from the vertex index) existed but was
+PPSA22520-only; named it `PipelineCacheNeedsVertexSubgroupFallback()` and added PPSA10112.
+
+## Blocker 3 (OPEN, HARD HOST LIMIT): mesh shaders
+
+`EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled)` — see `harness/BLOCKERS.md`. This machine
+cannot provide host mesh shaders to an x86-64 Kyty. No Kyty-side change is available (the NGG path
+has no non-mesh lowering), so this needs an external capability, not an emulator edit.
+
 
 ## Expected next problems (not yet observed)
 
