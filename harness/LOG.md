@@ -480,3 +480,12 @@ library. No game-specific diagnosis is valid until this is resolved.
 - Next experiments (each with 3 runs, compare `[frames]`): (a) env-gated disable of the clip guard,
   (b) log first draws' vertex-buffer sizes/addresses and the shader's computed positions,
   (c) check pixel shader outputs and whether the render target feeds the presented buffer.
+
+## Controller input-lag fix — 2026-10-10
+
+- User reported ~1 s lag with a physical DS4 even after the "verified" low-latency config.
+- Re-run with the controller connected: Arrow-Left host→guest median 430 ms, max 944 ms.
+  Presentation hacks (hard sync, 1 pending flip, 2 swapchain images) did not help (median 813 ms).
+- Root cause: `GameController::AddState()` queued every motion/stick packet; `scePadRead(num=1)`
+  returned the oldest sample. Fixed by coalescing non-discrete updates (`56852717`).
+- After fix: median 14.17 ms, max 18.68 ms; next present max 33.42 ms. See `INPUT_LAG_FIX.md`.
