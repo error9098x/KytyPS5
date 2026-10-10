@@ -66,7 +66,9 @@ The remaining work is outside the basic render path:
 4. The deterministic synthetic input probe now supplies matched host, guest-poll,
    observed-button, and present samples without a focused controller. Two
    post-initialization runs stayed below 31 ms host-to-present maximum; the
-   pre-poll initialization hitch remains a separate blocker.
+   bootstrap route reaches the gameplay “Wake up” scene, and Arrow-Left
+   movement stays below 25 ms observed-button maximum. The pre-poll
+   initialization hitch remains a separate blocker.
 5. Fixed-point screenshot/reference comparison is still needed for visual stage 4.
 
 ---------------------------------------------------------------------------------------------------

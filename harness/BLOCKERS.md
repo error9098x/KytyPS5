@@ -48,7 +48,10 @@ begun its first pad poll. Exact-state traces show the queued transitions are
 drained in order. Sampling places Metal residency work around `vkQueueSubmit`
 before/around the first poll; shader compilation begins afterward, so prewarming
 is not yet justified as the fix. Two of three new post-initialization probes stay
-below 31 ms host-to-present maximum; the first still overlaps startup.
+below 31 ms host-to-present maximum; the first still overlaps startup. A separate
+gameplay route reached the “Wake up” scene and measured Arrow-Left at 7.35 ms
+median, 17.59 ms p95, and 24.30 ms maximum to guest observation, with a 16.64 ms
+next-present maximum.
 
 The startup-only 2.88–2.99 s gap is separately characterized by a macOS process
 sample: MoltenVK/Metal command encoding (`beginRendering`, image clears, and draws)

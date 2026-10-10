@@ -365,6 +365,18 @@ library. No game-specific diagnosis is valid until this is resolved.
   `318.6/2376.9/2394.4` ms, host-to-guest-poll to
   `306.1/2142.8/2160.3` ms, host-to-observed-button max to `4140.8` ms, and
   startup max to `3810` ms. The setting is rejected and was not retained.
+
+## Gameplay input route — 2026-10-10
+
+- The synthetic probe now supports a bounded Cross bootstrap followed by a
+  separate movement key after a configurable warm-up. A fixed-point screenshot
+  from the route reached the gameplay `Wake up` scene.
+- With frame readbacks disabled, Arrow-Left movement transitions were observed
+  at `7.35/17.59/24.30` ms median/p95/max. Their next-present maximum was
+  `16.64` ms. The same run's roughly one-second samples were confined to the
+  initial Cross bootstrap and first guest initialization.
+- Readback-enabled visual runs are kept separate because frame dumps stall the
+  GPU and inflate latency tails.
 - Three 35-second runs with the first probe event delayed to 10 seconds measured
   warm host-to-present median/p95/max of `8.94/22.68/28.62 ms`,
   `9.12/26.16/32.93 ms`, and `10.46/27.34/35.00 ms`. Guest-poll p95 was

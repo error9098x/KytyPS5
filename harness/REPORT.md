@@ -31,6 +31,12 @@ long input-delay reports remain in progress.
   after initialization and stayed below 31 ms host-to-present maximum; the
   first still overlapped startup and reached 98 ms. The harness reports the
   count of samples over 40, 100, and 500 ms.
+- Added a bootstrap route that sends bounded Cross presses to enter the game,
+  waits for initialization, and then measures Arrow-Left movement. In a clean
+  run, movement was observed at `7.35/17.59/24.30` ms median/p95/max, and the
+  next-present maximum was `16.64` ms. A separate fixed-point screenshot run
+  reached the gameplay “Wake up” scene, confirming the route is no longer
+  measuring the splash screen.
 - The deterministic input probe reproduces roughly one-second host-to-poll and
   host-to-present samples when the probe fires before the game has begun its
   first pad poll. The exact state trace measured about 1.07 s to the guest
