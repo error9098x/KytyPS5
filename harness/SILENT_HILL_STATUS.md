@@ -8,6 +8,11 @@
 - Harness, 90 s runs: 4 to 10 frames with content per run, about 17–22 FPS, 2 of 4 runs reached
   the 90 s timeout with no fatal error. The other runs ended in a GPU "device lost" error.
 - No Rosetta aborts any more.
+- A new opt-in `KYTY_MESH_SCRATCH_HOST=1` path places the mesh-emulation scratch buffer in
+  host-visible memory. Three 35-second runs reached the timeout with content frames and no
+  `InvalidResource`/device-loss error; the fixed-point capture shows the real suicide/self-harm
+  warning screen with the Continue prompt. Warm pacing is about 23–26 FPS, so this is a
+  correctness/progress workaround with a substantial performance cost, not a final solution.
 
 ## What fixed what
 
@@ -38,7 +43,7 @@ cherry-pick; **not yet re-checked after it.**
      encoder execution status) to name the failing encoder; dump the scratch buffer after one
      emulated draw and check triangle counts and positions.
 2. **Mesh emulation output is unverified.** Never confirmed on screen.
-3. **Performance:** about 17–22 FPS warm, with 2.7 s stalls.
+3. **Performance:** host-visible scratch runs are about 23–26 FPS warm, with 2.3 s stalls.
 4. The stale-data issue from GPU-driven indirect register tables only appears with
    `KYTY_NO_PAGE_PROTECT=1`; do not use that flag for this game.
 

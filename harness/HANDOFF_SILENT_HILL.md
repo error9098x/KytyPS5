@@ -6,15 +6,20 @@ Written 2026-10-10 for continuing in Codex. Branch: `codex/animal-well-compat`.
 
 - Animal Well (PPSA22520) runs: stable gameplay, audio, ~60 FPS. Input lag fixed (`56852717`,
   see `harness/INPUT_LAG_FIX.md`). Re-verified after every change below (3 of 3 clean runs).
-- Silent Hill: The Short Message (PPSA10112) **still does not render**; exits within 4 to 10 s.
+- Silent Hill: The Short Message (PPSA10112) now renders real warning/Continue screens when
+  launched with the opt-in `KYTY_MESH_SCRATCH_HOST=1` workaround; the default device-local
+  scratch path still reaches the Metal `InvalidResource` failure.
   Fixed on the way: aliased buffer bindings (`5f8b23d4`), vertex subgroup builtins (`652d4247`),
   **mesh shaders** (now emulated through compute), **vertex ballot/shuffle** (one-lane subgroup
   mode), **MoltenVK push descriptors** (ordinary sets on every Apple title).
 - What stops it now, in order (details in `harness/BLOCKERS.md`):
   1. Rosetta aborts on 256-bit AVX accesses to tracked pages; see `harness/ROSETTA_AVX_PAGE_PROTECTION.md`.
      Platform-level, reproduced in `harness/repro/rosetta_avx_straddle.c`.
-  2. GPU `InvalidResource` / `Hang` errors after the first buffer-device-address draw.
-  3. GPU-driven rendering needs GPU to CPU coherence, so tracking cannot just be disabled.
+ 2. GPU `InvalidResource` / `Hang` errors after the first buffer-device-address draw.
+ 3. GPU-driven rendering needs GPU to CPU coherence, so tracking cannot just be disabled.
+
+The host-visible scratch A/B passed three 35-second timeout runs with content frames and no
+device-loss error. It currently runs around 23–26 FPS warm and has not yet reached gameplay.
 
 ### Implemented this session (mesh emulation, "mesh via compute")
 
