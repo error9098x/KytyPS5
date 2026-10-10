@@ -22,6 +22,11 @@
   The run eventually ends in Unreal's memory allocator after reaching the host's physical-memory
   ceiling; the black interval itself is not a permanent shader failure.
 
+An attempted automatic PPSA10112/Apple default for host-visible scratch was reverted after a
+short run still hit `InvalidResource`. The stable route remains explicitly opt-in with
+`KYTY_MESH_SCRATCH_HOST=1`; 256 MB is the most repeatable setting, while 64 MB reduces memory
+use but remains experimental.
+
 ## What fixed what
 
 | Problem | Fix | Commit |
