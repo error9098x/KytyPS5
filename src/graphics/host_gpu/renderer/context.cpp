@@ -25,11 +25,17 @@ bool CommandBuffer::IsInvalid() const {
 
 vk::CommandBuffer CommandBuffer::Handle() const {
 	EXIT_IF(IsInvalid());
+	RunFlushHook(MeshBatch::FlushReason::Handle);
+	return m_buffer;
+}
+
+vk::CommandBuffer CommandBuffer::RawHandle() const {
+	EXIT_IF(IsInvalid());
 	return m_buffer;
 }
 
 void CommandBuffer::Begin() {
-	EXIT_IF(m_rendering || IsInvalid());
+	EXIT_IF(m_rendering || IsInvalid() || m_flush_hook != nullptr);
 	auto buffer = Handle();
 
 	vk::CommandBufferBeginInfo begin_info {};
@@ -61,6 +67,7 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
 }
 
 void CommandBuffer::BeginRendering(const RenderState& state) const {
+	RunFlushHook(MeshBatch::FlushReason::BeginRendering);
 	if (m_rendering && m_render_state == state) {
 		return;
 	}
@@ -116,6 +123,7 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 }
 
 void CommandBuffer::EndRendering() const {
+	RunFlushHook(MeshBatch::FlushReason::EndRendering);
 	if (!m_rendering) {
 		return;
 	}

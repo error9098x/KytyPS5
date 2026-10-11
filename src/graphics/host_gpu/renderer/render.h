@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+#include "graphics/host_gpu/renderer/meshBatchPolicy.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
@@ -145,6 +146,26 @@ public:
 	void EndRendering() const;
 
 	[[nodiscard]] vk::CommandBuffer Handle() const;
+
+	// KYTY_MESH_BATCH: a pending batch of captured mesh draws registers a hook that replays them
+	// before anything else is recorded. Handle(), BeginRendering() and EndRendering() run it
+	// first; RawHandle() does not (only for code that orders itself against the batch). With
+	// the flag unset the hook is never set and these are the unchanged functions.
+	using FlushHook = void (*)(void* context, const CommandBuffer& buffer,
+	                           MeshBatch::FlushReason reason);
+	void SetFlushHook(FlushHook hook, void* context) const noexcept {
+		m_flush_hook         = hook;
+		m_flush_hook_context = context;
+	}
+	[[nodiscard]] bool HasFlushHook() const noexcept { return m_flush_hook != nullptr; }
+	void               RunFlushHook(MeshBatch::FlushReason reason) const {
+		if (m_flush_hook != nullptr) {
+			const auto hook    = m_flush_hook;
+			m_flush_hook       = nullptr;
+			hook(m_flush_hook_context, *this, reason);
+		}
+	}
+	[[nodiscard]] vk::CommandBuffer RawHandle() const;
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
 	[[nodiscard]] RenderContext&    GetContext() const noexcept { return m_context; }
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
@@ -174,11 +195,112 @@ private:
 	uint64_t            m_debug_arg4      = 0;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
+	mutable FlushHook   m_flush_hook  = nullptr;
+	mutable void*       m_flush_hook_context = nullptr;
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
 	HW::Shader*         m_shaders     = nullptr;
 
 	friend class CommandScheduler;
+};
+
+// KYTY_MESH_BATCH: the graphics-bind-point part of CommitBindings, captured instead of recorded.
+struct MeshGraphicsCapture {
+	vk::PipelineLayout                    layout = nullptr;
+	vk::ShaderStageFlags                  push_stages;
+	bool                                  has_push_data = false;
+	ShaderRecompiler::IR::PushData        push_data;
+	bool                                  push_descriptors = false;
+	vk::DescriptorSet                     set              = nullptr;
+	std::vector<vk::WriteDescriptorSet>   writes;
+	std::vector<vk::DescriptorBufferInfo> buffer_infos;
+	std::vector<vk::DescriptorImageInfo>  image_infos;
+	// Per write: index of its first buffer/image info, or UINT32_MAX.
+	std::vector<std::pair<uint32_t, uint32_t>> info_starts;
+
+	void Record(vk::CommandBuffer cmd) const;
+};
+
+// KYTY_MESH_BATCH: the dynamic state SetGraphicsDynamicParams records, captured by value. The
+// member functions mirror the vk::CommandBuffer calls it makes, so the same template records into
+// either; Record() replays them in the original order.
+struct MeshDynamicState {
+	static constexpr uint32_t MaxViewports = 16;
+	uint32_t                                viewport_count = 0;
+	std::array<vk::Viewport, MaxViewports>  viewports {};
+	std::array<vk::Rect2D, MaxViewports>    scissors {};
+	float                                   line_width = 1.0f;
+	std::array<float, 4>                    blend {};
+	vk::Bool32                              depth_test  = VK_FALSE;
+	vk::Bool32                              depth_write = VK_FALSE;
+	vk::CompareOp                           depth_compare {};
+	bool                                    has_bounds_test = false;
+	vk::Bool32                              bounds_test     = VK_FALSE;
+	bool                                    has_bounds      = false;
+	float                                   bounds_min = 0.0f, bounds_max = 0.0f;
+	vk::Bool32                              bias_enable = VK_FALSE;
+	bool                                    has_bias    = false;
+	float                                   bias_constant = 0.0f, bias_clamp = 0.0f,
+	                                        bias_slope = 0.0f;
+	vk::Bool32                              stencil_test = VK_FALSE;
+	struct StencilFace {
+		bool          op_set = false, compare_set = false, write_set = false, ref_set = false;
+		vk::StencilOp fail {}, pass {}, depth_fail {};
+		vk::CompareOp compare {};
+		uint32_t      compare_mask = 0, write_mask = 0, reference = 0;
+	};
+	std::array<StencilFace, 2>                              faces {};
+	uint32_t                                                color_write_count = 0;
+	std::array<vk::Bool32, RENDER_COLOR_ATTACHMENTS_MAX>    color_write {};
+
+	void setViewportWithCount(uint32_t count, const vk::Viewport* v);
+	void setScissorWithCount(uint32_t count, const vk::Rect2D* r);
+	void setLineWidth(float w) { line_width = w; }
+	void setBlendConstants(const float* c) { std::copy(c, c + 4, blend.begin()); }
+	void setDepthTestEnable(vk::Bool32 v) { depth_test = v; }
+	void setDepthWriteEnable(vk::Bool32 v) { depth_write = v; }
+	void setDepthCompareOp(vk::CompareOp op) { depth_compare = op; }
+	void setDepthBoundsTestEnable(vk::Bool32 v) {
+		has_bounds_test = true;
+		bounds_test     = v;
+	}
+	void setDepthBounds(float mn, float mx) {
+		has_bounds = true;
+		bounds_min = mn;
+		bounds_max = mx;
+	}
+	void setDepthBiasEnable(vk::Bool32 v) { bias_enable = v; }
+	void setDepthBias(float c, float clamp, float slope) {
+		has_bias      = true;
+		bias_constant = c;
+		bias_clamp    = clamp;
+		bias_slope    = slope;
+	}
+	void setStencilTestEnable(vk::Bool32 v) { stencil_test = v; }
+	void setStencilOp(vk::StencilFaceFlagBits face, vk::StencilOp f, vk::StencilOp p,
+	                  vk::StencilOp d, vk::CompareOp c);
+	void setStencilCompareMask(vk::StencilFaceFlagBits face, uint32_t m);
+	void setStencilWriteMask(vk::StencilFaceFlagBits face, uint32_t m);
+	void setStencilReference(vk::StencilFaceFlagBits face, uint32_t r);
+	void setColorWriteEnableEXT(uint32_t count, const vk::Bool32* enable);
+	void setColorWriteEnableEXT(vk::ArrayProxy<const vk::Bool32> enable) {
+		setColorWriteEnableEXT(enable.size(), enable.data());
+	}
+
+	void Record(vk::CommandBuffer cmd) const;
+};
+
+struct PendingMeshDraw {
+	vk::Pipeline                     pipeline = nullptr;
+	vk::PipelineLayout               layout   = nullptr;
+	MeshGraphicsCapture              bindings;
+	bool                             commit_bindings = false;
+	std::array<uint32_t, ShaderRecompiler::IR::PushData::MeshDrawDwordCount> draw_data {};
+	MeshDynamicState                 dynamic;
+	bool                             set_feedback = false;
+	vk::ImageAspectFlags             feedback_aspects;
+	RenderState                      rendering;
+	uint32_t                         vertex_count = 0;
 };
 
 class RenderExecutor {
@@ -198,7 +320,10 @@ public:
 	void                           RebindImages(PreparedBindings& bindings);
 	void CommitBindings(CommandBuffer& buffer, vk::PipelineBindPoint pipeline_bind_point,
 	                    const PipelineCache::Pipeline&     pipeline,
-	                    std::span<PreparedBindings* const> bindings);
+	                    std::span<PreparedBindings* const> bindings,
+	                    MeshGraphicsCapture*               capture = nullptr);
+	// KYTY_MESH_BATCH: replay the captured mesh draws (no-op when none are pending).
+	void FlushMeshBatch(const CommandBuffer& buffer, MeshBatch::FlushReason reason);
 
 private:
 	// KYTY_GPU_INDIRECT (renderDraw.cpp). Returns false, before recording anything that the CPU
@@ -267,6 +392,17 @@ private:
 	                             const RenderState& rendering, vk::ImageAspectFlags feedback_aspects,
 	                             std::span<const uint32_t> draw_data, uint32_t mesh_groups);
 	[[nodiscard]] Buffer& MeshEmulationScratch();
+	[[nodiscard]] bool MeshDrawBatchable(const DrawCallInfo& draw, DrawRenderState& state,
+	                                     std::span<PreparedBindings* const> stages,
+	                                     uint32_t mesh_groups, uint64_t& scratch_bytes);
+	void ExecuteBatchedMeshDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
+	                            DrawRenderState& state, PipelineCache::Pipeline& pipeline,
+	                            std::span<PreparedBindings* const> stages,
+	                            const RenderState& rendering, vk::ImageAspectFlags feedback_aspects,
+	                            std::span<const uint32_t> draw_data, uint32_t mesh_groups,
+	                            uint64_t scratch_bytes);
+	static void MeshBatchFlushHook(void* context, const CommandBuffer& buffer,
+	                               MeshBatch::FlushReason reason);
 
 	RenderContext&                        m_context;
 	std::unique_ptr<Buffer>               m_mesh_scratch;
@@ -286,6 +422,14 @@ private:
 	std::vector<ImageId>                  m_bound_images;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;
+	// KYTY_MESH_BATCH state. m_mesh_scratch_offset is the scratch byte offset CommitBindings
+	// binds (always 0 unless a batched draw is being recorded).
+	uint64_t                              m_mesh_scratch_offset = 0;
+	std::vector<PendingMeshDraw>          m_mesh_pending;
+	MeshBatch::PendingTargets             m_mesh_pending_targets;
+	MeshBatch::ScratchRing                m_mesh_ring;
+	MeshBatch::Stats                      m_mesh_stats;
+	bool                                  m_mesh_flushing = false;
 
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;

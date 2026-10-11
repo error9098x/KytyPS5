@@ -350,7 +350,9 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
 	}
 }
 
-static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuffer vk_buffer,
+// Cmd is vk::CommandBuffer (record now) or MeshDynamicState (KYTY_MESH_BATCH capture).
+template <typename Cmd>
+static void SetGraphicsDynamicParams(const CommandBuffer& buffer, Cmd& vk_buffer,
                                      const ShaderVertexInputInfo& vs_input_info,
                                      const RenderDepthInfo& depth, const RenderState& rendering) {
 	KYTY_PROFILER_FUNCTION();
@@ -364,6 +366,7 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 		    return output.kind == ShaderRecompiler::IR::StageOutputKind::ViewportIndex;
 	    });
 	constexpr uint32_t viewport_slots = std::size(HW::ScreenViewport {}.viewports);
+	static_assert(viewport_slots <= MeshDynamicState::MaxViewports);
 	std::array<vk::Viewport, viewport_slots> viewports {};
 	std::array<vk::Rect2D, viewport_slots>   scissors {};
 	const uint32_t viewport_count = indexed_viewports ? viewport_slots : 1;
@@ -565,7 +568,7 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		image.Transit(layout, target_access,
 		              ImageSubresourceRange {view.base_level, view.level_count, view.base_layer,
 		                                     view.layer_count},
-		              buffer.Handle());
+		              buffer.RawHandle());
 		const auto extent       = target.Extent();
 		state.width             = std::min(state.width, extent.width);
 		state.height            = std::min(state.height, extent.height);
@@ -625,10 +628,27 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		image.binding.attachment_layout = layout;
 		image.binding.attachment_access = access;
 		const auto& view                = depth.desc.view_info;
-		image.Transit(layout, access,
+		// KYTY_DEPTH_READ_UNION=1: when this draw samples the depth target only through aspects
+		// that its attachment layout keeps read-only (the layout was not widened for sampling, so
+		// no draw in this layout can write a sampled aspect), request the access CommitBindings
+		// is about to request for it (attachment + shader read). Baseline asks for the
+		// attachment access first and then for attachment + shader read, so every such draw
+		// records two image barriers on the same layout, and the first one ends the open render
+		// pass, although no sampled aspect is written between consecutive such draws.
+		// Only for a view of the whole image: CommitBindings transitions the whole image, so the
+		// two requests are then the same request and the union never adds a barrier call.
+		auto       request    = access;
+		const bool whole_view = view.base_level == 0 && view.level_count == image.info.resources.levels &&
+		                        view.base_layer == 0 && view.layer_count == image.info.resources.layers;
+		if (MeshBatch::DepthReadUnionEnabled() && sampled_aspects && !feedback_aspects &&
+		    whole_view && layout == depth_attachment_layout(depth) &&
+		    !(sampled_aspects & ~DepthReadableAspects(layout)) && !image.binding.shader_write) {
+			request |= vk::AccessFlagBits2::eShaderRead;
+		}
+		image.Transit(layout, request,
 		              ImageSubresourceRange {view.base_level, view.level_count, view.base_layer,
 		                                     view.layer_count},
-		              buffer.Handle());
+		              buffer.RawHandle());
 		state.width               = std::min(state.width, depth.desc.info.extent.width);
 		state.height              = std::min(state.height, depth.desc.info.extent.height);
 		state.num_layers          = std::min(state.num_layers, view.layer_count);
@@ -1198,7 +1218,19 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory.
-	auto vk_buffer = buffer.Handle();
+	//
+	// KYTY_MESH_BATCH: a pending batch of captured mesh draws is replayed here unless this draw
+	// joins it; everything recorded before this point went through EndRendering/Handle, which
+	// replay it first.
+	const bool mesh_emulated = mesh_active && pipeline.mesh_compute != nullptr;
+	uint64_t   mesh_batch_bytes = 0;
+	const bool mesh_batched =
+	    mesh_emulated && MeshBatch::Enabled() &&
+	    MeshDrawBatchable(draw, state, stages, mesh_groups, mesh_batch_bytes);
+	if (!mesh_batched) {
+		FlushMeshBatch(buffer, MeshBatch::FlushReason::Draw);
+	}
+	auto vk_buffer = buffer.RawHandle();
 	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u);
 	if (!mesh_active) {
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
@@ -1206,7 +1238,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (state.ps_active && !draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
 	}
-	const bool mesh_emulated = mesh_active && pipeline.mesh_compute != nullptr;
 	if (mesh_emulated) {
 		const uint32_t draw_data[] {
 		    draw.index_count,
@@ -1215,8 +1246,13 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		    static_cast<uint32_t>(index_source.address),
 		    static_cast<uint32_t>(index_source.address >> 32u), 0u, 0u, 0u, 0u};
 		static_assert(std::size(draw_data) == ShaderRecompiler::IR::PushData::MeshDrawDwordCount);
-		ExecuteEmulatedMeshDraw(buffer, draw, state, pipeline, stages, rendering, feedback_aspects,
-		                        draw_data, mesh_groups);
+		if (mesh_batched) {
+			ExecuteBatchedMeshDraw(buffer, draw, state, pipeline, stages, rendering,
+			                       feedback_aspects, draw_data, mesh_groups, mesh_batch_bytes);
+		} else {
+			ExecuteEmulatedMeshDraw(buffer, draw, state, pipeline, stages, rendering,
+			                        feedback_aspects, draw_data, mesh_groups);
+		}
 	} else {
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
 	if (mesh_active) {
@@ -1754,7 +1790,7 @@ void RenderExecutor::ExecuteEmulatedMeshDraw(CommandBuffer& buffer, const DrawCa
                                              vk::ImageAspectFlags feedback_aspects,
                                              std::span<const uint32_t> draw_data_in,
                                              uint32_t                  mesh_groups) {
-	auto        vk_buffer = buffer.Handle();
+	auto        vk_buffer = buffer.RawHandle(); // ExecutePreparedDraw flushed KYTY_MESH_BATCH
 	auto&       scheduler = m_context.GetCommandScheduler();
 	const auto& mesh      = state.vertex_info[0].mesh;
 	const auto& program   = *state.vertex_info[0].stage.program;
@@ -2390,6 +2426,314 @@ bool RenderExecutor::DrawIndirectGpu(uint64_t submit_id, CommandBuffer& buffer,
 	m_gpu_last_ref = {ref, 0, args.args_addr, args.indexed};
 	GpuIndirectCount(GpuIndirectReason::Gpu)++;
 	return true;
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// KYTY_MESH_BATCH (see meshBatchPolicy.h)
+
+void MeshDynamicState::setViewportWithCount(uint32_t count, const vk::Viewport* v) {
+	EXIT_IF(count > MaxViewports);
+	viewport_count = count;
+	std::copy(v, v + count, viewports.begin());
+}
+
+void MeshDynamicState::setScissorWithCount(uint32_t count, const vk::Rect2D* r) {
+	EXIT_IF(count != viewport_count);
+	std::copy(r, r + count, scissors.begin());
+}
+
+static size_t MeshStencilFaceIndex(vk::StencilFaceFlagBits face) {
+	EXIT_IF(face != vk::StencilFaceFlagBits::eFront && face != vk::StencilFaceFlagBits::eBack);
+	return face == vk::StencilFaceFlagBits::eFront ? 0 : 1;
+}
+
+void MeshDynamicState::setStencilOp(vk::StencilFaceFlagBits face, vk::StencilOp f,
+                                    vk::StencilOp p, vk::StencilOp d, vk::CompareOp c) {
+	auto& s  = faces[MeshStencilFaceIndex(face)];
+	s.op_set = true;
+	s.fail = f, s.pass = p, s.depth_fail = d, s.compare = c;
+}
+void MeshDynamicState::setStencilCompareMask(vk::StencilFaceFlagBits face, uint32_t m) {
+	auto& s       = faces[MeshStencilFaceIndex(face)];
+	s.compare_set = true;
+	s.compare_mask = m;
+}
+void MeshDynamicState::setStencilWriteMask(vk::StencilFaceFlagBits face, uint32_t m) {
+	auto& s     = faces[MeshStencilFaceIndex(face)];
+	s.write_set = true;
+	s.write_mask = m;
+}
+void MeshDynamicState::setStencilReference(vk::StencilFaceFlagBits face, uint32_t r) {
+	auto& s   = faces[MeshStencilFaceIndex(face)];
+	s.ref_set = true;
+	s.reference = r;
+}
+void MeshDynamicState::setColorWriteEnableEXT(uint32_t count, const vk::Bool32* enable) {
+	EXIT_IF(count > color_write.size());
+	color_write_count = count;
+	std::copy(enable, enable + count, color_write.begin());
+}
+
+void MeshDynamicState::Record(vk::CommandBuffer cmd) const {
+	// The order of SetGraphicsDynamicParams.
+	cmd.setViewportWithCount(viewport_count, viewports.data());
+	cmd.setScissorWithCount(viewport_count, scissors.data());
+	cmd.setLineWidth(line_width);
+	cmd.setBlendConstants(blend.data());
+	cmd.setDepthTestEnable(depth_test);
+	cmd.setDepthWriteEnable(depth_write);
+	cmd.setDepthCompareOp(depth_compare);
+	if (has_bounds_test) {
+		cmd.setDepthBoundsTestEnable(bounds_test);
+	}
+	if (has_bounds) {
+		cmd.setDepthBounds(bounds_min, bounds_max);
+	}
+	cmd.setDepthBiasEnable(bias_enable);
+	if (has_bias) {
+		cmd.setDepthBias(bias_constant, bias_clamp, bias_slope);
+	}
+	cmd.setStencilTestEnable(stencil_test);
+	for (size_t i = 0; i < faces.size(); i++) {
+		const auto  face = i == 0 ? vk::StencilFaceFlagBits::eFront : vk::StencilFaceFlagBits::eBack;
+		const auto& s    = faces[i];
+		if (s.op_set) cmd.setStencilOp(face, s.fail, s.pass, s.depth_fail, s.compare);
+		if (s.compare_set) cmd.setStencilCompareMask(face, s.compare_mask);
+		if (s.write_set) cmd.setStencilWriteMask(face, s.write_mask);
+		if (s.ref_set) cmd.setStencilReference(face, s.reference);
+	}
+	if (color_write_count != 0) {
+		cmd.setColorWriteEnableEXT(
+		    vk::ArrayProxy<const vk::Bool32>(color_write_count, color_write.data()));
+	}
+}
+
+static uint64_t MeshBatchImageKey(ImageId id) {
+	return (uint64_t {id.index} << 32u) | id.generation;
+}
+
+bool RenderExecutor::MeshDrawBatchable(const DrawCallInfo& draw, DrawRenderState& state,
+                                       std::span<PreparedBindings* const> stages,
+                                       uint32_t mesh_groups, uint64_t& scratch_bytes) {
+	m_mesh_stats.MaybePrint([](const char* line) { LOGF("%s\n", line); });
+	static const bool diagnostics = std::getenv("KYTY_MESH_EMU_SKIP") != nullptr;
+	if (diagnostics) {
+		m_mesh_stats.NoteReject(MeshBatch::RejectReason::Diagnostics);
+		return false;
+	}
+	const auto& mesh    = state.vertex_info[0].mesh;
+	const auto& program = *state.vertex_info[0].stage.program;
+	const auto  layout =
+	    MeshEmulation::ComputeLayout(program.info.outputs, mesh.max_vertices, mesh.max_primitives);
+	auto& scratch = MeshEmulationScratch();
+	if (m_mesh_ring.capacity == 0) {
+		m_mesh_ring.capacity = scratch.Size();
+		m_mesh_ring.align    = std::max<uint64_t>(
+            256u, m_context.GetGraphics().GetPhysicalDeviceProperties().limits.minStorageBufferOffsetAlignment);
+	}
+	// Exactly one chunk (the baseline loop runs once) and a legal vertex count.
+	const uint64_t items = uint64_t {mesh_groups} * draw.instance_count;
+	scratch_bytes        = items * layout.ItemBytes();
+	if (scratch_bytes == 0 || scratch_bytes > scratch.Size() ||
+	    items * mesh.max_primitives * 3u > UINT32_MAX) {
+		m_mesh_stats.NoteReject(MeshBatch::RejectReason::Chunked);
+		return false;
+	}
+	// Draws that record barriers of their own (GDS, ShaderWriteBarrier) or write images through
+	// storage (no barrier follows those) keep the baseline path.
+	for (const auto* stage: stages) {
+		if (stage->gds.buffer != nullptr) {
+			m_mesh_stats.NoteReject(MeshBatch::RejectReason::Gds);
+			return false;
+		}
+		if (stage->runtime->program->has_address_writes || HasShaderBufferWrites(*stage->runtime)) {
+			m_mesh_stats.NoteReject(MeshBatch::RejectReason::Writes);
+			return false;
+		}
+		for (const auto& binding: stage->images) {
+			const auto* image = m_context.GetTextureCache().m_slot_images.try_get(binding.image_id);
+			if (binding.desc.type == TextureCache::BindingType::Storage ||
+			    (image != nullptr && image->binding.shader_write)) {
+				m_mesh_stats.NoteReject(MeshBatch::RejectReason::Storage);
+				return false;
+			}
+		}
+	}
+	// The compute half runs before the graphics halves of the pending draws: it must not read
+	// anything they write, i.e. any of their attachments.
+	if (!m_mesh_pending_targets.Empty()) {
+		for (const auto& binding: stages.front()->images) {
+			const auto* image = m_context.GetTextureCache().m_slot_images.try_get(binding.image_id);
+			bool conflict = m_mesh_pending_targets.Conflicts(MeshBatchImageKey(binding.image_id), 0, 0);
+			if (image != nullptr) {
+				for (const auto range: {image->info.data, image->info.stencil, image->info.metadata.range}) {
+					conflict |= m_mesh_pending_targets.Conflicts(0, range.address, range.size);
+				}
+			}
+			if (conflict) {
+				m_mesh_stats.NoteReject(MeshBatch::RejectReason::Hazard);
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+void RenderExecutor::MeshBatchFlushHook(void* context, const CommandBuffer& buffer,
+                                        MeshBatch::FlushReason reason) {
+	static_cast<RenderExecutor*>(context)->FlushMeshBatch(buffer, reason);
+}
+
+void RenderExecutor::ExecuteBatchedMeshDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
+                                            DrawRenderState& state,
+                                            PipelineCache::Pipeline& pipeline,
+                                            std::span<PreparedBindings* const> stages,
+                                            const RenderState&                 rendering,
+                                            vk::ImageAspectFlags feedback_aspects,
+                                            std::span<const uint32_t> draw_data_in,
+                                            uint32_t mesh_groups, uint64_t scratch_bytes) {
+	auto&       scheduler = m_context.GetCommandScheduler();
+	auto&       scratch   = MeshEmulationScratch();
+	const auto  vk_buffer = buffer.RawHandle();
+	const auto& mesh      = state.vertex_info[0].mesh;
+	const auto  instances = draw.instance_count;
+
+	if (m_mesh_pending.size() >= MeshBatch::MaxDraws) {
+		FlushMeshBatch(buffer, MeshBatch::FlushReason::Full);
+	}
+	uint64_t offset = 0;
+	auto     result = m_mesh_ring.Try(scratch_bytes, offset);
+	if (result == MeshBatch::ScratchRing::Result::NeedsNewEpoch) {
+		if (!m_mesh_pending.empty()) {
+			FlushMeshBatch(buffer, MeshBatch::FlushReason::Overflow);
+		}
+		// Baseline's per-draw prologue, once per epoch: earlier draws may still read the scratch,
+		// and earlier passes wrote it.
+		scheduler.EndRendering();
+		vk::MemoryBarrier reuse {};
+		reuse.srcAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+		reuse.dstAccessMask = vk::AccessFlagBits::eShaderWrite;
+		vk_buffer.pipelineBarrier(
+		    vk::PipelineStageFlagBits::eVertexShader | vk::PipelineStageFlagBits::eComputeShader,
+		    vk::PipelineStageFlagBits::eComputeShader, {}, 1, &reuse, 0, nullptr, 0, nullptr);
+		m_mesh_ring.NewEpoch();
+		result = m_mesh_ring.Try(scratch_bytes, offset);
+	}
+	EXIT_IF(result != MeshBatch::ScratchRing::Result::Fits);
+
+	std::array<uint32_t, ShaderRecompiler::IR::PushData::MeshDrawDwordCount> draw_data {};
+	std::copy(draw_data_in.begin(), draw_data_in.end(), draw_data.begin());
+	const bool descriptor_scratch = Config::MeshScratchDescriptorEnabled();
+	if (descriptor_scratch) {
+		draw_data[MeshEmulation::ScratchAddressLoDword] = 0;
+		draw_data[MeshEmulation::ScratchAddressHiDword] = 0;
+	} else {
+		const auto address = scratch.BufferDeviceAddress() + offset;
+		draw_data[MeshEmulation::ScratchAddressLoDword] = static_cast<uint32_t>(address);
+		draw_data[MeshEmulation::ScratchAddressHiDword] = static_cast<uint32_t>(address >> 32u);
+	}
+	draw_data[MeshEmulation::GroupBaseDword]   = 0;
+	draw_data[MeshEmulation::ChunkGroupsDword] = mesh_groups;
+	constexpr auto push_stages = vk::ShaderStageFlagBits::eVertex |
+	                             vk::ShaderStageFlagBits::eFragment |
+	                             vk::ShaderStageFlagBits::eCompute;
+	std::array<PreparedBindings*, 1> compute_stages {stages.front()};
+	const auto graphics_stages = stages.subspan(1);
+
+	// Compute half, recorded now into the open compute encoder. A barrier recorded by the
+	// bindings (an image transition) replays the pending draws first via EndRendering.
+	m_mesh_scratch_offset = offset;
+	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.mesh_compute);
+	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline, compute_stages);
+	vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0,
+	                        static_cast<uint32_t>(draw_data.size() * sizeof(uint32_t)),
+	                        draw_data.data());
+	vk_buffer.dispatch(mesh_groups, instances, 1);
+
+	// Graphics half, captured.
+	PendingMeshDraw pending;
+	if (!graphics_stages.empty() || descriptor_scratch) {
+		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, graphics_stages,
+		               &pending.bindings);
+		pending.commit_bindings = true;
+	}
+	m_mesh_scratch_offset = 0;
+	pending.pipeline  = pipeline.pipeline;
+	pending.layout    = pipeline.pipeline_layout;
+	pending.draw_data = draw_data;
+	SetGraphicsDynamicParams(buffer, pending.dynamic, state.vertex_info[0], state.depth_info,
+	                         rendering);
+	pending.set_feedback     = m_context.GetGraphics().attachment_feedback_loop_enabled;
+	pending.feedback_aspects = feedback_aspects;
+	pending.rendering        = rendering;
+	pending.vertex_count     = static_cast<uint32_t>(uint64_t {mesh_groups} * instances *
+                                                     mesh.max_primitives * 3u);
+	m_mesh_pending.push_back(std::move(pending));
+
+	auto& cache = m_context.GetTextureCache();
+	const auto note_target = [&](ImageId id) {
+		if (!id) return;
+		const auto* image = cache.m_slot_images.try_get(id);
+		m_mesh_pending_targets.Add(MeshBatchImageKey(id), 0, 0);
+		if (image != nullptr) {
+			for (const auto range: {image->info.data, image->info.stencil, image->info.metadata.range}) {
+				m_mesh_pending_targets.Add(0, range.address, range.size);
+			}
+		}
+	};
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		note_target(state.color_info[i].image_id);
+	}
+	note_target(state.depth_info.image_id);
+	// A flush during this draw closed the epoch; this draw's region is live in it again.
+	m_mesh_ring.epoch = true;
+	m_mesh_stats.batched++;
+	buffer.SetFlushHook(&RenderExecutor::MeshBatchFlushHook, this);
+}
+
+void RenderExecutor::FlushMeshBatch(const CommandBuffer& buffer, MeshBatch::FlushReason reason) {
+	if (m_mesh_pending.empty()) {
+		return;
+	}
+	EXIT_IF(m_mesh_flushing);
+	m_mesh_flushing = true;
+	buffer.SetFlushHook(nullptr, nullptr);
+	auto&      scheduler = m_context.GetCommandScheduler();
+	const auto vk_buffer = buffer.RawHandle();
+
+	// Baseline's per-draw "produced" barrier, once for every dispatch recorded since the last one.
+	vk::MemoryBarrier produced {};
+	produced.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+	produced.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+	                          vk::PipelineStageFlagBits::eVertexShader, {}, 1, &produced, 0,
+	                          nullptr, 0, nullptr);
+	constexpr auto push_stages = vk::ShaderStageFlagBits::eVertex |
+	                             vk::ShaderStageFlagBits::eFragment |
+	                             vk::ShaderStageFlagBits::eCompute;
+	// Baseline's per-draw epilogue, in draw order.
+	for (const auto& pending: m_mesh_pending) {
+		if (pending.commit_bindings) {
+			pending.bindings.Record(vk_buffer);
+		}
+		vk_buffer.pushConstants(pending.layout, push_stages, 0,
+		                        static_cast<uint32_t>(pending.draw_data.size() * sizeof(uint32_t)),
+		                        pending.draw_data.data());
+		pending.dynamic.Record(vk_buffer);
+		if (pending.set_feedback) {
+			vk_buffer.setAttachmentFeedbackLoopEnableEXT(pending.feedback_aspects);
+		}
+		scheduler.BeginRendering(pending.rendering);
+		vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pending.pipeline);
+		vk_buffer.draw(pending.vertex_count, 1, 0, 0);
+	}
+	m_mesh_stats.NoteFlush(reason, m_mesh_pending.size());
+	m_mesh_pending.clear();
+	m_mesh_pending_targets.Clear();
+	m_mesh_ring.Close();
+	m_mesh_flushing = false;
+	m_mesh_stats.MaybePrint([](const char* line) { LOGF("%s\n", line); });
 }
 
 } // namespace Libs::Graphics

@@ -1111,9 +1111,13 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     vk::PipelineBindPoint              pipeline_bind_point,
                                     const PipelineCache::Pipeline&     pipeline,
-                                    std::span<PreparedBindings* const> prepared_bindings) {
+                                    std::span<PreparedBindings* const> prepared_bindings,
+                                    MeshGraphicsCapture*               capture) {
 	KYTY_PROFILER_FUNCTION();
-	auto   vk_buffer        = buffer.Handle();
+	// Every caller either flushed a pending KYTY_MESH_BATCH batch already (graphics draws,
+	// compute dispatches) or is that batch's own recording; out-of-pass commands below go
+	// through EndRendering, which runs the flush hook.
+	auto   vk_buffer        = buffer.RawHandle();
 	size_t image_descriptor_count = 0;
 	size_t write_count      = 0;
 	ShaderRecompiler::IR::PushData push_data;
@@ -1311,8 +1315,8 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 						break;
 					}
 					case BindingKind::MeshScratch:
-						mesh_scratch_view = {MeshEmulationScratch().Handle(), 0,
-						                     MeshEmulationScratch().Size()};
+						mesh_scratch_view = {MeshEmulationScratch().Handle(), m_mesh_scratch_offset,
+						                     MeshEmulationScratch().Size() - m_mesh_scratch_offset};
 						write.pBufferInfo = &mesh_scratch_view;
 						break;
 					case BindingKind::Samplers:
@@ -1357,7 +1361,8 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		    ShaderType::Mesh, BindingKind::MeshScratch);
 		write.descriptorType = vk::DescriptorType::eStorageBuffer;
 		write.descriptorCount = 1;
-		mesh_scratch_view = {MeshEmulationScratch().Handle(), 0, MeshEmulationScratch().Size()};
+		mesh_scratch_view = {MeshEmulationScratch().Handle(), m_mesh_scratch_offset,
+		                     MeshEmulationScratch().Size() - m_mesh_scratch_offset};
 		write.pBufferInfo = &mesh_scratch_view;
 		m_descriptor_writes.push_back(write);
 	}
@@ -1367,6 +1372,54 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		push_stages = vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment |
 		              vk::ShaderStageFlagBits::eCompute;
 	}
+	if (capture != nullptr) {
+		// KYTY_MESH_BATCH: keep the commands for the replay. Non-push sets are allocated and
+		// written now (host-side), exactly as below; only the binds are deferred.
+		EXIT_IF(pipeline_bind_point != vk::PipelineBindPoint::eGraphics);
+		capture->layout        = pipeline.pipeline_layout;
+		capture->push_stages   = push_stages;
+		capture->has_push_data = has_push_data;
+		capture->push_data     = push_data;
+		capture->push_descriptors = pipeline.uses_push_descriptors;
+		capture->set              = nullptr;
+		capture->writes.clear();
+		capture->buffer_infos.clear();
+		capture->image_infos.clear();
+		capture->info_starts.clear();
+		if (!m_descriptor_writes.empty()) {
+			EXIT_IF(pipeline.descriptor_set_layout == nullptr);
+			if (pipeline.uses_push_descriptors) {
+				for (const auto& write: m_descriptor_writes) {
+					uint32_t buffer_start = UINT32_MAX;
+					uint32_t image_start  = UINT32_MAX;
+					if (write.pBufferInfo != nullptr) {
+						buffer_start = static_cast<uint32_t>(capture->buffer_infos.size());
+						capture->buffer_infos.insert(capture->buffer_infos.end(), write.pBufferInfo,
+						                             write.pBufferInfo + write.descriptorCount);
+					}
+					if (write.pImageInfo != nullptr) {
+						image_start = static_cast<uint32_t>(capture->image_infos.size());
+						capture->image_infos.insert(capture->image_infos.end(), write.pImageInfo,
+						                            write.pImageInfo + write.descriptorCount);
+					}
+					EXIT_IF(write.pTexelBufferView != nullptr || write.pNext != nullptr);
+					capture->writes.push_back(write);
+					capture->info_starts.emplace_back(buffer_start, image_start);
+				}
+			} else {
+				const auto set = m_context.GetDescriptorHeap().Commit(pipeline.descriptor_set_layout);
+				for (auto& write: m_descriptor_writes) {
+					write.dstSet = set;
+				}
+				m_context.GetGraphics().device.updateDescriptorSets(
+				    static_cast<uint32_t>(m_descriptor_writes.size()), m_descriptor_writes.data(), 0,
+				    nullptr);
+				capture->set = set;
+			}
+		}
+		return;
+	}
+
 	if (has_push_data) {
 		vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0, sizeof(push_data),
 		                        push_data.dwords.data());
@@ -1389,6 +1442,29 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			vk_buffer.bindDescriptorSets(pipeline_bind_point, pipeline.pipeline_layout, 0, 1, &set,
 			                             0, nullptr);
 		}
+	}
+}
+
+void MeshGraphicsCapture::Record(vk::CommandBuffer cmd) const {
+	// Same commands, same order as the tail of RenderExecutor::CommitBindings.
+	if (has_push_data) {
+		cmd.pushConstants(layout, push_stages, 0, sizeof(push_data), push_data.dwords.data());
+	}
+	if (push_descriptors) {
+		if (writes.empty()) {
+			return;
+		}
+		std::vector<vk::WriteDescriptorSet> fixed(writes);
+		for (size_t i = 0; i < fixed.size(); i++) {
+			const auto [buffer_start, image_start] = info_starts[i];
+			fixed[i].pBufferInfo =
+			    buffer_start != UINT32_MAX ? buffer_infos.data() + buffer_start : nullptr;
+			fixed[i].pImageInfo = image_start != UINT32_MAX ? image_infos.data() + image_start : nullptr;
+		}
+		cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, layout, 0,
+		                         static_cast<uint32_t>(fixed.size()), fixed.data());
+	} else if (set != nullptr) {
+		cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, layout, 0, 1, &set, 0, nullptr);
 	}
 }
 
