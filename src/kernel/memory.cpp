@@ -241,12 +241,13 @@ static bool IsPrivateCommittedRangeType(VirtualRangeType type) {
 static bool g_test_fail_next_range_replace = false;
 #endif
 
-// KYTY_FAST_VRANGES=1: O(log n + k) VirtualRanges updates (binary search, in-place splice,
-// local merge) instead of linear scans, whole-vector copies and full sorts. Same results.
+// O(log n + k) VirtualRanges updates (binary search, in-place splice, local merge) instead of
+// linear scans, whole-vector copies and full sorts. Same results. Default on (validated with
+// Animal Well 3/3 and Silent Hill 4K); KYTY_FAST_VRANGES=0 restores the linear path.
 static bool FastVirtualRanges() {
 	static const bool enabled = [] {
 		const char* value = std::getenv("KYTY_FAST_VRANGES");
-		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+		return value == nullptr || !(std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0);
 	}();
 	return enabled;
 }
