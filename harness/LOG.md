@@ -550,3 +550,66 @@ Two Apple/MoltenVK blockers cleared; the game now reaches mesh shaders.
 - Debug tip: to symbolize a host-side PC, subtract the module base and use
   `atos -arch x86_64 -o harness/tools/MoltenVK-1.4.2/libMoltenVK.dylib -l <base> <pc>`; the fat-file
   x86-64 slice starts at file offset 0x4000.
+
+## 2026-10-11 (afternoon): Silent Hill OOM root-caused to unpaced AvPlayer video (fixed, `78019f9f`)
+
+- Diagnostics committed: `06298f5e` (`KYTY_MEM_TRACE=1` batch-map accounting), `4095c468`
+  (`KYTY_EOP_TRACE=1` EOP interrupt counters), `42f83087` (`KYTY_AVPLAYER_TRACE=1` video delivery),
+  `21c3ffb4` (symbolized host frame-pointer backtrace in the unhandled-exception report, macOS).
+- EOP trace (`shtsm-eoptrace-2`): requested = executed = delivered at all times,
+  `no_registration=0`. EOP delivery was never broken. After ~35 s Kyty simply stops seeing any
+  `release_mem` packets because the guest stops submitting GPU work.
+- `sample` of the live process (`shtsm-sample-3`, ~55 s): RHIThread and AgcSubmissionThread idle in
+  condition waits; **RenderThread 1 spins in guest 0x900e63d20**, called in a loop from
+  0x900e63b50..0x900e63c01. That function is Unreal's media video-sample converter: per sample
+  it creates two GPU buffers of `pitch*height` and `pitch/2*height` (NV12 Y/UV) through RHI
+  vtable+0x590, i.e. the 64 KB batch maps seen in the memory trace. The caller drains a sample
+  queue (`0x90574df20` = try-dequeue) and never empties it.
+- AvPlayer trace (`shtsm-avtrace-1`): the title movie `shpc/content/movies/ui_titlemovie01.mp4`
+  (378x150 H.264, 29.97 fps, 9.1 s, no audio) runs with `sceAvPlayerSetAvSyncMode(1 = None)` and
+  looping on. Kyty delivered frames unpaced in sync-None mode: from ~24 s player clock the guest
+  pulled ~1,000 frames/s and frame timestamps ran to 397 s at a 42 s clock. Unreal's render thread
+  never finished a frame, so per-frame allocations were never retired: ~230 MB/s until the 12.5 GiB
+  pool is exhausted (the "Ran out of memory" LowLevelFatalError).
+- Fix `78019f9f`: sync mode None only drops the audio lock; video is still paced against the player
+  clock (`time_stamp + loop offset <= now`). Opt-out: `KYTY_AVPLAYER_UNPACED_SYNC_NONE=1`.
+  (shadPS4 also delivers unpaced in sync None; this title shows that is wrong.)
+- Verification: `shtsm-avpace-b-1` ran the full 110 s with no OOM; live memory rose in load steps
+  and plateaued at ~5.9 GB (was 12.5 GB and abort at ~70 s). AvPlayer delivery stays ~30 frames/s
+  with frame time tracking the clock. `shtsm-avpace-b-2/-3` reached 60 s at ~4.2 GB before the
+  separate crash below.
+
+## 2026-10-11: new first blocker: intermittent host use-after-free in compute dispatch (MoltenVK/AGX)
+
+- About 60% of Silent Hill runs (descriptor route, 256 MB) die at 40-60 s with
+  `Unhandled host exception ... address=0x1b0` (once a garbage pointer). New backtrace:
+  `-[AGXG17GFamilyComputeContext setTexture:atIndex:]` <- MoltenVK `bindMetalResources` <-
+  `MVKMetalComputeCommandEncoderState::prepareComputeDispatch` <- `MVKCmdDispatch::encode` <-
+  `vkQueueSubmit` <- `CommandScheduler::Submit/Flush` <- `GuestGpu::Process`. One run instead
+  failed GPU-side with `kIOGPUCommandBufferCallbackErrorInvalidResource` (device lost). A Metal
+  texture bound to a compute dispatch was freed after recording but before or during execution.
+- `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2` (MoltenVK encodes at record time): 2 of 2 runs clean
+  to 90 s (vs ~6 of 9 crashing without it). This points to the texture dying between vkCmd recording
+  and vkQueueSubmit.
+- Ruled out: texture-cache image deletion (deferred to tick completion), descriptor-pool recycling
+  (tick-gated, same master semaphore), slot-vector moves (`Image` is non-movable), texel buffer
+  views (none used), tiler/fault-manager compute (buffers only), and stale views written through
+  `MakeImageInfo` (`KYTY_VIEW_CHECK=1` registry found none in 2 crashing runs).
+- Open: find the freed object (candidates: views reached outside `MakeImageInfo`, e.g. mesh/compute
+  paths that build `DescriptorImageInfo` directly; presentation `FrameImage::Configure` destroying
+  an image immediately). Workaround candidate: set `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2` on
+  the Silent Hill route.
+
+## 2026-10-11: title-menu black background
+
+- The menu background is the AvPlayer movie `ui_titlemovie01.mp4` (live-action footage of the
+  protagonist) plus a 3D scene. `shtsm-menu-1` (no input probe, internal frame stats):
+  - Movie path works: Unreal's NV12->RGB conversion writes 244x150 B8G8R8A8Srgb media textures with
+    100% non-black pixels; the dumps show the correct movie frames.
+  - The 3D scene renders: 3840x2160 RGBA16F scene colour (`0x80a1640000`, `0x809d640000`) is 64%
+    non-zero, avg RGB ~(0.19, 0.13, 0.07), peak 2406.
+  - Everything after that is black: an RGBA16F 3840x2160 target is (0,0,0,1), and every 8-bit
+    3840x2160 B8G8R8A8 target is 0% non-black. The UI is drawn afterwards and composites correctly.
+  - So the scene is lost in the post-process/tonemap chain. Suspects: the tonemap LUT
+    (A2B10G10R10, possibly a 3D texture) and eye adaptation (R32G32B32A32F); zero exposure or a black
+    LUT both produce exactly this. The stats tool skipped these formats; extended to decode them.
