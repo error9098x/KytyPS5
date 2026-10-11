@@ -2,12 +2,14 @@
 
 ## Where it is now
 
-**Update 2026-10-11 16:30 IST (supersedes conflicting lines below):**
+**Update 2026-10-11 18:50 IST (supersedes conflicting lines below):**
 - Boots, plays the intro video, shows the warning screen, accepts Cross, and reaches the title menu
   (`/tmp/titlerun.sh`). The OOM after Continue is fixed (`78019f9f`).
 - The title-menu 3D background is still black (first blocker; see BLOCKERS.md). The tonemap LUT is
-  now correct (`86ec37b3`) and exposure is consistent with the scene; the black starts in the DOF
-  chain (DOF recombine output ~4.4x too dark, gather ~0.8% coverage, some indirect DOF dispatches 0 groups).
+  correct (`86ec37b3`) and exposure is consistent with the scene. The black comes from Unreal FFT bloom's
+  pre-filter (cs `0x2bfb24830d8fcfaa`) clamping the non-pre-exposed scene (lum ~500 vs Max 50).
+  Disabling the pre-filter with a debug poke lights the menu (shtsm-prefilter-off-3); this is not a fix yet.
+  Suspected root: View.PreExposure = 1 (eye-adaptation CPU readback).
 - Route: `KYTY_MESH_SCRATCH_HOST=1 KYTY_MESH_SCRATCH_MB=256 KYTY_MESH_SCRATCH_DESCRIPTOR=1
   MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2`
   (PREFILL works around an intermittent MoltenVK compute use-after-free; clean 5/5).
