@@ -693,3 +693,37 @@ Two Apple/MoltenVK blockers cleared; the game now reaches mesh shaders.
 - Next: extend the force hook to render-target writes (or a VGPR bisect of the tonemap ps with
   `KYTY_DEBUG_EXPORT_VGPR`) to find which tonemap input zeroes the output: scene-colour UV/viewport
   scale (60% dynamic resolution), bloom, or the exposure read.
+
+## 2026-10-11 ~17:15 IST — title-menu black background traced from tonemap/exposure back to the DOF chain
+
+
+Commits (all opt-in diagnostics, off by default):
+- `07f27f9d` KYTY_DEBUG_EXPORT_VGPR now keeps the shader's own B/A export. Before, dropping B/A let dead-code elimination remove image samples, which caused an EXIT in ResourceMaterialization.cpp:486 on the tonemap PS.
+- `70800d2d` KYTY_RESOURCE_DUMP_OFFSET=<bytes> and KYTY_RESOURCE_DUMP_SKIP=<n> for KYTY_RESOURCE_DUMP_HASH.
+- `dc9820c6` KYTY_DEBUG_FORCE_EXPOSURE also forces pixel-shader-written 1x1 RGBA32F targets (the eye-adaptation rt) after the draw.
+- `1e3ac3cf` KYTY_DEBUG_FORCE_EXPOSURE=<value> (for example 0.003). Frame stats gain lum_p10_90/lum_median metering for B10G11R11 and RGBA16F, and lit_avg_bytes for 8-bit targets.
+- `638298ad` KYTY_IMAGE_TRACE_HASH=<hash> (KYTY_IMAGE_TRACE_EVERY=n) logs each image's source, first-use pc, guest T#, and resolved cache image for one shader.
+- UNCOMMITTED on the Mac: renderCompute.cpp KYTY_DISPATCH_TRACE=1 (+ _MIN_FRAME / _MIN_SECONDS). It logs cs hash and group counts, and reads indirect args back from the GPU. Built OK, and run shtsm-disp-2 used it. Commit it.
+
+Findings:
+- Exposure is NOT the bug.
+  - Forced exposure 1.0 makes the menu background white (shtsm-forceexp-4 frame_000720.png).
+  - Forced 0.003 shows a foggy, very blurred blue-grey scene (shtsm-forceexp-5 frame_000720.png).
+  - The real exposure (0.0003–0.0006) matches the metered pre-post scene: scene colour rt 0x80a7..0000 lum_p10_90 ≈ 190–220, eye-adaptation avg lum 313–386.
+  - EA params: 0.1/0.9 percentiles, min/max lum 0.000176/188743, histogram scale 1/30, bias 1/3.
+  - View UB: PreExposure 1, OneOverPreExposure (tonemap s31 @2168) 1.
+- The tonemap PS 0x8b3b4df51624ff13 is fine. Disassembly is in work/tmps.txt.
+  - KYTY_IMAGE_TRACE_HASH (shtsm-imgtrace-1) shows that on menu frames its scene input t0 (user SGPR s0) = 0x80d5..0000. That is a 4K B10G11R11 written by cs 0x2bfb24830d8fcfaa (dispatch 1x1x1296), not the pre-post scene 0x80a7..0000.
+  - Bloom (s8) and lens (s16) are 1x1 dummies on the menu.
+- cs 0x2bfb24830d8fcfaa (DOF recombine, by its role) outputs a scene ~4.4x darker and almost uniform:
+  - output: lum_p10_90 48.8, median 48.8, max (194, 57, 88)
+  - input scene: lum_p10_90 213, max 15000
+  - x ≈ 48.8 × 0.0005 ≈ 0.02 → LUT toe → near black. That is the black background.
+- The DOF gather outputs (cs 0x778f33d239f78462 direct 240x135; 0x254033019fc671c8 and 0x2213d0ab109940c8 indirect 469x1x1) are only 0.7–0.8% non-zero over 1920x1080. 2304x1296/2 = 1152x648 should be fully covered.
+- Two other indirect dispatches get 0 groups: cs 0xc3c3f948c9c86e1a and 0x447abe57e0af3240 (shtsm-disp-2).
+- Leading hypothesis: DOF tile classification and indirect-arg building under-count tiles. The cs is wave64 on host subgroup 32 (lane_count=2 emulation; MoltenVK reports subgroup 32, size_control=false). Ballot/mbcnt/atomic/DPP/permlanex16 wave-reduction emulation is the suspect.
+  - Example: cs 0xe0c73b753a708b2b (disassembly in work/mb.txt) is an 8x8 CoC min/max reduction using DPP row_shr + permlanex16 + readlane 31/63.
+- Rejected:
+  - A k10_11_11 storage-swizzle (R/B swap) fix was tried in ResourceMaterialization. The velocity-flatten output is unchanged, so that image is k11_11_10. Reverted, not committed.
+  - VGPR bisect numbers: v13@0x1c8 ≈ 42 (pre-exposure red), v8@0x198 ≈ 0.675 (s44 constant, lens term 0), v5@0x180 ≈ 0 (bloom dummy).
+- The title menu needs ≥ 82 s runs: the menu appears at dump frame 660–720.
