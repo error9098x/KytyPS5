@@ -771,3 +771,21 @@ Causal proof (opt-in debug poke, commit 2de0bc80):
 - Animal Well 3/3 after aeddbf04 (aw-regress-{1,2,3}-rblinear: stage 2, 32-33/42-43 content frames, the same 10 black boot frames as the 33/43 baseline). Readback is not enabled for PPSA22520.
 - Supporting commits: def6fafe (harness KYTY_EXTRA_ARGS), 2de0bc80 (KYTY_DEBUG_BUFFER_POKE), 51945a2b (frame-stats rows_clamped / raw dumps).
 - Still stage 2. No gameplay soak or reference-image check has passed. The menu still presents at ~1 fps.
+
+## 2026-10-11 ~19:40 IST — KYTY_VIDEOOUT_RES=720|1080 (opt-in), title-menu FPS, "New Game crash" triage
+
+- New opt-in `KYTY_VIDEOOUT_RES=720|1080` (unset / 2160 / anything else = unchanged default).
+  - `sceVideoOutGetOutputStatus` reports resolution code 1 (non-4K) instead of 2.
+  - Silent Hill ignores that: its RHI only reads `dynamicRange` from the status (eboot 0x90114c82d) and sizes the display buffers from the `PS5.DefaultBackBufferWidth/Height` cvars, registered with hard-coded defaults 0xf00/0x870 (eboot rva 0x174d7d7 / 0x174d84a). Tried codes 0 and 1 first: the game still registered 3840x2160 (shtsm-vres1080-1, shtsm-vrescode0-1).
+  - So for PPSA10112 only, `Loader::GamePatch::ApplyVideoOutResolution` rewrites those two immediates after relocation, after verifying the 19 surrounding bytes (lea of the cvar name + `mov edx, imm32`). Other titles: log only.
+  - The presenter already blits any registered buffer size to the swapchain (vkCmdBlitImage, linear).
+- Evidence: shtsm-vres720-ng-1 registers 1280x720 (log "VideoOut resolution patch: PPSA10112 default back buffer set to 1280x720"; RegisterBuffers2 width 1280 height 720); shtsm-fps-1080-1 registers 1920x1080. Title menu background is lit at 720: harness/runs/shtsm-vres720-ng-1/frames/frame_001260.png (unforced, no exposure forcing).
+- Title-menu FPS (KYTY_FRAME_TIMING presents/s on the menu, FRAME_STATS off; noisy, Alan was using the machine during several runs):
+  - default 4K: 0.45-1.5 fps (shtsm-fps-def-1, shtsm-newgame-1, shtsm-vres1080-1 had stats on)
+  - 1080: 0.9-1.4 fps (shtsm-fps-1080-1)
+  - 720: ~1.9 fps (shtsm-vres720-ng-1); boot/warning screens 46 fps vs 25-28 at 4K.
+  - Conclusion: resolution is NOT the main menu bottleneck; 720 helps only marginally. Next: profile the per-frame CPU/GPU cost on the menu (present timing, readback/texture-cache stalls).
+- "Crash on NEW GAME" (shtsm-play-1): not a guest crash. The log ends with `Event: quit` = SDL_EVENT_QUIT (window close / Cmd+Q / SIGTERM; a harness timeout produces the same line). No kyty_emulator .ips in DiagnosticReports. exit 0. kyty.log ending mid-line is unflushed stdout (same in normal runs). In that run only two Cross (J) presses were made (19.8 s, 22.3 s); the menu needs three, so NEW GAME was probably never selected.
+  - Repro shtsm-vres720-ng-1: Cross x3, then Cross every 4 s from 78 s on the menu (NEW GAME). The game kept running for 70 s after NEW GAME until the harness timeout; screen after NEW GAME is black (frames 1320-1560) and presents ~2-8 fps. Not a crash; what the black screen is (loading, cutscene, or missing rendering) is still open. aeddbf04 / MVK prefill not implicated (no crash to attribute).
+- Animal Well 3/3 with KYTY_VIDEOOUT_RES unset after 60f1fb0c (aw-regress-{1,2,3}-vres: stage 2, 31/41, 33/43, 32/42 content; same 10 black boot frames as baseline; no resolution-patch log lines).
+- Still stage 2. No gameplay or visual acceptance passed.
