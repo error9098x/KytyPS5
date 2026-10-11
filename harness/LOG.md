@@ -860,3 +860,110 @@ All arms: same route as shtsm-ab-base-1 (F10 probe, J bootstrap x12, 480 s, PREF
 - Animal Well x3 with the full batch-3 stack (aw-regress-*-b3full): stage 2, 33/43 content in 3/3.
 - Default-candidate set going into batch 4: batch-2 flags + FAULT_WAIT_ON_CALLER + BDA_DIRTY_REGIONS + THREAD_QOS + FLUSH_ON_LABEL=1 (no FLUSH_DRAWS). All flags stay opt-in. Claims stay at stage 2.
 - 181eb078 (KYTY_RT_FEEDBACK_UNION, committed by the chain3 job) reviewed: is_bound/shader_write are set by the binding pre-pass before AcquireRenderTargets (the layout choice already depends on is_bound), and the requested access is a superset, so it is correct; arm shtsm-b3-rtfu-1 measures it.
+
+## 2026-10-12 ~00:25 IST — Perf batch 4 results (runner kyty-runner-r6, ex perf4): 8886d9b5..3223f2ef
+
+Commits (one per swarm entry, all opt-in or measure-only): 8886d9b5 AUDIO2_POLL_PACE, b4f4dce1 GPU_BLOCKED_BACKOFF, d384c3df SYNC_AUDIT, dc6db616 BUFFER_CACHE_STATS/BUFFER_GROWTH, 7fde5c50 READBACK_PRODUCER_TICK(_STATS), 86b1e488 RETIRE_ON_LAST_USE, 5a327c02 MESH_PSB_TRIM, c6e94326 SEM_SPIN, 814d5e7f FAULT_WAIT_ON_CALLER safeguards, cde9eb25 SRT_MEMO=2 (+VERIFY), 67744f19 SUBMIT_THREAD, 15ff4df2 WRITE_FAULT_STATS, 3223f2ef EVICT_STATS/SMART/ALIAS.
+
+All b4 arms ran with BEST = batch-2 flags (incl. CLEAR_META_NOSYNC) + FAULT_WAIT_ON_CALLER + BDA_DIRTY_REGIONS + THREAD_QOS + FLUSH_ON_LABEL, tr2.sh route (probe start 25 s / 4 s / 250 ms, F10 + J bootstrap x12) — NOT the shtsm-b3-label-1 route (b2run.sh: start 60 s / 3 s / 100 ms + REMAP/READBACK stats).
+
+PREFILL arms (120 s, BEST + RETIRE_ON_LAST_USE), fps per 40 s window (python3 /tmp/fpsw.py <run> 40):
+
+| arm | 0-40 | 40-80 | 80-120 | result |
+|---|---|---|---|---|
+| pfA PREFILL=2 | 11.9 | 6.2 | 2.6 | stage 2, clean |
+| pfB PREFILL=1 | 12.0 | 6.4 | 2.2 | stage 2, clean (no gain vs pfA) |
+| pfC PREFILL=1 + SUBMIT_THREAD | - | - | - | crash at 33 s: host exception, null deref (address 0x20) in the CommandScheduler::SubmitAsync thread |
+| pfD PREFILL=0 + SYNC_QUEUE_SUBMITS=0 | - | - | - | device lost at 31 s: kIOGPUCommandBufferCallbackErrorInvalidResource (3.8 GiB used) — RETIRE_ON_LAST_USE does not cover every PREFILL=0 lifetime |
+
+- Verdict: keep MVK PREFILL=2 default. PREFILL=1+RETIRE is safe but no fps. SUBMIT_THREAD races (MoltenVK useResources / pool) — stays opt-in, do not promote.
+- SRT_MEMO=2 VERIFY: SH 120 s and AW 45 s, 0 mismatches (verify_exit=0). Hit rate only ~5 % (calls=753664 hits=38740 key_miss=66287 bypassed=648637): adaptive bypass shuts it off; no fps value in SH. Keep opt-in.
+- shtsm-b4-all-1 (BEST + RETIRE + AUDIO2_POLL_PACE + GPU_BLOCKED_BACKOFF + MESH_PSB_TRIM + SEM_SPIN + SRT_MEMO=2 + all stats + WIDE_STORE_HOT record mode, moved=0) STALLED: 216 presents in 0-40 s then none to 480 s (stage 1, black frames, no exception). sample at 360 s (/tmp/samp-b4all.sym.txt): RenderThread in pthread_cond_wait, GuestGpu::ThreadRun idle in CondVar::WaitFor, main thread in KernelWaitEventFlag, AK::EventManager 88 % in AudioOut2ContextGetQueueLevel -> SleepMicro (pace sleep), PresentThread sleeping. Reproduced by shtsm-b4-widehot-1 (same set + 9 HOT-relocated sites): 177 presents then stall. Bisect -> batch 5 / r6 entry.
+- KYTY_WIDE_STORE_HOT: swarm 33 found its relocation can silently corrupt state on an unseen jump into S+4 (valid opcode at the displacement high byte). Never in a default set; widehot-1 results are suspect (and it stalled anyway).
+- EVICT_SMART check skipped: evcheck saw 0 EvictStats lines (the all-1 run never left the intro), inconclusive, not a negative.
+- Animal Well (45 s, PREFILL=2): b4def 34/44, 33/43, 33/43; b4all (BEST+new+SRT_MEMO=2) 31/41, 29/39, 29/39; b4wide 31/41, 33/43, 34/44; b4evict (EVICT_SMART+ALIAS+STATS) 34/44, 33/43, 34/44 (reclaim never triggered). 12/12 stage 2 with content. aw-srtv-b4 34/44, verify 0.
+
+## 2026-10-12 ~00:50 IST — Perf batch 5: swarm 06 / 31 / 32 (70583ab8, 2d05b32c, ad369982)
+
+- 70583ab8 KYTY_GPU_INDIRECT (06), 2d05b32c KYTY_MESH_BATCH + KYTY_DEPTH_READ_UNION (31), ad369982 KYTY_SPEC_READ_HOIST + KYTY_STATE_CACHE (32). One build, one commit each, all opt-in.
+- shtsm-b5-gpuind-1 (BEST + GPU_INDIRECT + READBACK_STATS + SYNC_AUDIT, 480 s, tr2 route): stage 2, timed out, no exception. GpuIndirect per 2 s: gpu=54-128, cpu_multi=0, cpu_dest=0, resolve=0/0 drains/0 us, seq_miss=0, overflow=0, oob=0, fallback only not_mesh (3-4 in the intro, ~250-290 in game). The GPU path is taken and never needs a CPU resolve. Frame 1320 (phone message) visually sane. Not reverted.
+- shtsm-b5-mb-1 (BEST + MESH_BATCH + DEPTH_READ_UNION + SPEC_READ_HOIST): stage 2, timed out, no exception. MeshBatch mean_run median 1.30 over 220 lines, 1.24 in the second half (in game), last 10 lines 1.0-1.61; rejects 0; all flushes at end_rendering. Below the 1.3 bar in game -> MESH_BATCH stays off. StateCache (hoist only): 4.42 M draws, spec_reads 143.8 M (32.5/draw), spec_bound_pairs 2.19 G (~496 per draw, ~15 bound images walked per read), spec_range_pairs 2.26 G.
+
+FPS per 40 s window (same tr2 route; no same-route best-set 480 s baseline exists — b3-label-1 used the b2run route, see r6 confirmation entry):
+
+| window | b5-gpuind-1 | b5-mb-1 |
+|---|---|---|
+| 0-40 | 12.3 | 11.6 |
+| 40-80 | 6.1 | 6.4 |
+| 80-120 | 2.9 | 2.7 |
+| 120-160 | 1.5 | 1.4 |
+| 160-200 | 1.0 | 1.1 |
+| 200-240 | 1.35 | 1.85 |
+| 240-320 | 1.8-1.95 | 1.8 |
+| 320-480 | 1.2-1.6 | 1.3-1.6 |
+
+- Both arms are the phone-message scene from ~160 s to 480 s; neither reached free walking on this route.
+- Animal Well (45 s): b5off 30/40, 33/43, 33/43; b5gpuind 33/43, 34/44, 33/43; b5mb 32/42, 31/41, 32/42. 9/9 stage 2 with content.
+
+## Label-run exit (shtsm-b3-label-1, 462 s, exit 0, timed_out false)
+
+- Ended by a clean SDL_EVENT_QUIT ("Event: quit", window.cpp GameEventQuit) at 23:20:15; no exception/OOM line. Kyty only gets SDL_EVENT_QUIT from SIGINT/SIGTERM or an app quit; the harness's own timeout SIGTERM gives the same exit 0 but sets timed_out. Nothing in b10.sh/b2run.sh pkills mid-run; the time matches the perf4 runner takeover (23:19). Conclusion: external termination, not an emulator failure. Recheck: the r6 480 s confirmation runs count "Event: quit" and must report timed_out=true.
+
+## 2026-10-12 ~04:00 IST — r6 batches 6/7 invalid (disk full), r7 reruns (runner r7, MCP my-computer3)
+
+**Root cause of the 01:10 outage and of the b6/b7 "stalls": the Data volume was full.**
+- At 02:40 there was 3.7 GB free and harness/runs held 163 GB. shtsm-b6-best-1 and shtsm-b7-best-1 died with `spdlog fatal error: ... guest-printf.log: No space left on device`. The other b6/b7 arms ran with swap unable to grow.
+- So every b6/b7 number is void, including the "SEM_SPIN collapses to 0.05 fps" lead and the b6-backoff 445 s run. The b7 NOTRAP smoke (exit -9 at 97 s) is void too. b7 stopped at 01:07 at the start of best-1. No b7 480 s run, NOTRAP AW, or sample was ever produced.
+- Cleanup, approved by Alan:
+  1. gzip of 18 non-shtsm logs over 100 MB took free space from 3.7 to 45 GB.
+  2. Alan then cleared space himself and ordered all runs deleted except shtsm-ab-base-1, shtsm-ab-all-2 and shtsm-b3-label-1. Their frames/ were removed, logs kept, and the b3-label route kept in shtsm-b3-label-1/route/ (b2run.sh, tr2.sh, b10.sh, invocations.txt). Free space went from 100.5 to 163.1 GiB.
+- New runner rules:
+  - df ≥ 20 GB is checked before every run.
+  - Frames are trimmed to every 240th present plus the last one, as JPEG.
+  - /tmp/r7memmon.sh logs footprint, swap and free% every 5 s to /tmp/r7mem.log. It kills kyty when footprint > 24 GB, swap > 12 GB or free < 6 %. The first thresholds were 13 GB and then 21 GB; both killed normal runs (best-1, backoff-1, best480-3).
+
+**SH in-game memory:** footprint 22–23 GB (sample: Physical footprint 22.8 G, peak 23.1 G in win480-3), swap peak about 9.5 GB, free% 11–15. The tunnel survived this once disk space was available.
+
+**b6 bisect rerun (120 s, F10 + J×12 tr2 route, best = FAULT_COALESCE BDA_SYNC_SKIP GC_DRAIN_INTERVAL=16 UNMAP_FASTPATH FAULT_WAIT_ON_CALLER BDA_DIRTY_REGIONS THREAD_QOS FLUSH_ON_LABEL), fps per 20 s:**
+
+| arm | 0-20 | 20-40 | 40-60 | 60-80 | 80-100 | 100-120 | end |
+|---|---|---|---|---|---|---|---|
+| best-2 | 27.8 | 12.0 | 9.0 | 3.85 | 2.9 | 2.0 | timed out, stage 2, intro text |
+| +AUDIO2_POLL_PACE (pace-2) | 12.0 | 4.1 | 2.95 | 2.15 | 1.3 | 0.8 | timed out, still on the title card at 462 presents |
+| +GPU_BLOCKED_BACKOFF (backoff-2) | 27.8 | 12.5 | 9.95 | 2.65 | 1.75 | 1.2 | timed out, intro text |
+| +SEM_SPIN (semspin-2) | 22.75 | 9.3 | 7.1 | 6.9 | 2.2 | 1.9 | timed out; SemSpin spin_hits=0 (69/69 waits blocked) |
+
+- No arm stalls; the shtsm-b4-all-1 "stall" bisect is closed as a disk-full artefact.
+- **AUDIO2_POLL_PACE is a regression on this route** (about half the presents, slower intro) → revert from any candidate set.
+- **SEM_SPIN**: zero spin hits and slower in the first 60 s → no value, keep off.
+- **GPU_BLOCKED_BACKOFF**: neutral to slightly worse after 60 s (one run) → keep off.
+
+**NOTRAP (9211bfe2, entry 33) smoke shtsm-r7-notrap-smoke-3 (120 s):**
+- Self-test OK (sentinel 0x0e, hits=1 at the zone).
+- `candidates=178761, patched=178761 (padding=3861, ud2=162)`, `notrap=9703, notrap_kept=162`. This confirms the handoff prediction: patched = 178772 − 11, the 11 being wide-store pairs consumed in one trampoline. N + K + pairs = 9876.
+- wide-store-trap hits over 120 s: 16 384, vs 2 097 152 for best-2 (128× fewer SIGILL traps).
+- fps 26.25 / 11.2 / 5.9 / 2.9 / 2.75 / 0.9, the same shape as best-2. Clean, timed out, stage 2.
+- Animal Well with NOTRAP (45 s): 33/43, 34/44, 34/44 content/sampled, stage 2, 3/3 (eboot notrap=1143 kept=33, libc notrap=35).
+
+**480 s confirmations (b3-label probe: J at 60 s / 3 s / 100 ms + REMAP/READBACK stats, plus F10 + J×12 bootstrap; best flags in every arm), fps per 40 s:**
+
+| window | best480-3 (killed 293 s) | win480-3 (+GPU_INDIRECT +SPEC_READ_HOIST +DEPTH_READ_UNION) | notrap480-3 (+WIDE_STORE_NOTRAP) |
+|---|---|---|---|
+| 0-40 | 24.1 | 21.75 | 18.9 |
+| 40-80 | 13.7 | 12.4 | 11.05 |
+| 80-120 | 6.55 | 7.5 | 3.9 |
+| 120-160 | 1.88 | 2.0 | 1.8 |
+| 160-200 | 0.97 | 1.07 | 0.70 |
+| 200-240 | 0.95 | 0.95 | 0.88 |
+| 240-280 | 1.32 | 1.23 | 1.20 |
+| 280-320 | (killed) | 1.65 | 1.60 |
+| 320-360 | - | 1.77 | 1.62 |
+| 360-400 | - | 1.40 | 1.48 |
+| 400-440 | - | 1.50 | 1.60 |
+| 440-480 | - | 1.40 | 1.55 |
+
+- best480-3 was killed by the then-21 GB memmon limit (fp 22.5 GB, swap 8.5 GB); it is being rerun as shtsm-r7-best480-4.
+- Scenes: win480-3 is on the phone message (frame 2160) and best480-3 in the in-engine room at 290 s. **Neither reached free walking.** win and notrap timed out cleanly, exc 0, quit 0.
+- win480-3: GpuIndirect gpu=54/2 s, resolve 0, fallback not_mesh=252. Peak footprint 23.1 G, swap peak 9.5 GB.
+- notrap480-3: trap hits 16 384 total in 480 s. RenderThread `_sigtramp` share in the 360 s sample is 5.7 % vs 14.7 % in win480-3 (target < 2 % not met; the remainder is presumably write-fault SIGSEGV). Peak footprint 24.0 G, swap 10.1 GB.
+- In game (320-480 s), notrap ≈ win (1.48-1.62 vs 1.40-1.77). There is no same-run best baseline yet.
