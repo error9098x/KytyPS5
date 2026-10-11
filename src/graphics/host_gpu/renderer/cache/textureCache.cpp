@@ -1916,15 +1916,21 @@ bool TextureCache::DebugForceExposure(ImageId id) {
 	    (address != 0 && image.info.data.address != address)) {
 		return false;
 	}
+	// The env value is the forced exposure (KYTY_DEBUG_FORCE_EXPOSURE=1 forces 1.0, =0.003 forces 0.003).
+	static const float value = [] {
+		const char* text  = std::getenv("KYTY_DEBUG_FORCE_EXPOSURE");
+		const float parsed = text != nullptr ? std::strtof(text, nullptr) : 0.0f;
+		return parsed > 0.0f ? parsed : 1.0f;
+	}();
 	vk::ClearValue clear {};
-	clear.color = vk::ClearColorValue(std::array<float, 4> {1.0f, 1.0f, 1.0f, 1.0f});
+	clear.color = vk::ClearColorValue(std::array<float, 4> {value, value, value, 1.0f});
 	const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
 	ClearImage(m_scheduler.Current(), id, image.backing.format, range, clear);
 	static uint32_t logged = 0;
 	if (logged < 8) {
 		logged++;
-		LOGF("DebugForceExposure: forced 1x1 RGBA32F at 0x%016" PRIx64 " to (1,1,1,1)\n",
-		     image.info.data.address);
+		LOGF("DebugForceExposure: forced 1x1 RGBA32F at 0x%016" PRIx64 " to %g\n",
+		     image.info.data.address, value);
 	}
 	return true;
 }
@@ -2040,6 +2046,7 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 		uint64_t              nonzero = 0;
 		const auto*           base    = static_cast<const uint8_t*>(mapped);
 		std::vector<uint32_t> slice_nonzero(depth3d, 0u);
+		std::vector<float>    log_lum;
 		const uint64_t        slice_pixels = static_cast<uint64_t>(width) * height;
 		for (uint64_t i = 0; i < pixels; ++i) {
 			std::array<float, 4> v {};
@@ -2070,12 +2077,27 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 			}
 			nonzero += any;
 			slice_nonzero[i / slice_pixels] += any ? 1u : 0u;
+			if (b10g11r11 && any) {
+				log_lum.push_back(std::log2(std::max(0.3f * v[0] + 0.59f * v[1] + 0.11f * v[2], 1e-6f)));
+			}
 		}
-		std::string slices;
+		// B10G11R11 (scene colour): auto-exposure style metering of the lit pixels, the exp2 of the
+		// mean log2 luminance between the 10th and 90th percentile, plus the median.
+		std::string metering;
+		if (!log_lum.empty()) {
+			std::sort(log_lum.begin(), log_lum.end());
+			const size_t lo = log_lum.size() / 10, hi = log_lum.size() * 9 / 10;
+			double       acc = 0.0;
+			for (size_t i = lo; i < hi; i++) acc += log_lum[i];
+			metering = fmt::format(" lum_p10_90={:.3f} lum_median={:.3f}",
+			                       std::exp2(acc / static_cast<double>(std::max<size_t>(hi - lo, 1))),
+			                       std::exp2(log_lum[log_lum.size() / 2]));
+		}
+		std::string slices = metering;
 		if (is_3d) {
 			uint32_t lit = 0;
 			for (uint32_t z = 0; z < depth3d; z++) lit += slice_nonzero[z] != 0 ? 1u : 0u;
-			slices = " slices_nonzero=" + std::to_string(lit) + "/" + std::to_string(depth3d) +
+			slices += " slices_nonzero=" + std::to_string(lit) + "/" + std::to_string(depth3d) +
 			         " slice0=" + std::to_string(slice_nonzero[0]) +
 			         " slice_last=" + std::to_string(slice_nonzero[depth3d - 1]);
 		}
@@ -2100,6 +2122,7 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 		std::array<double, 4> sum {};
 		std::array<float, 4> mx {};
 		uint64_t nonzero = 0;
+		std::vector<float> log_lum;
 		for (uint64_t i = 0; i < pixels; ++i) {
 			bool any = false;
 			for (uint32_t c = 0; c < channels; ++c) {
@@ -2109,12 +2132,27 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 				any |= (halves[i * channels + c] & 0x7FFFu) != 0;
 			}
 			nonzero += any;
+			if (rgba16f) {
+				const float l = 0.3f * to_float(halves[i * 4]) + 0.59f * to_float(halves[i * 4 + 1]) +
+				                0.11f * to_float(halves[i * 4 + 2]);
+				if (l > 0.0f) log_lum.push_back(std::log2(l));
+			}
+		}
+		std::string metering;
+		if (!log_lum.empty()) {
+			std::sort(log_lum.begin(), log_lum.end());
+			const size_t lo = log_lum.size() / 10, hi = log_lum.size() * 9 / 10;
+			double       acc = 0.0;
+			for (size_t i = lo; i < hi; i++) acc += log_lum[i];
+			metering = fmt::format(" lum_p10_90={:.3f} lum_median={:.3f} lum_pixels={}",
+			                       std::exp2(acc / static_cast<double>(std::max<size_t>(hi - lo, 1))),
+			                       std::exp2(log_lum[log_lum.size() / 2]), log_lum.size());
 		}
 		LOGF("InternalFrameStats: sample=%u role=%s address=0x%016" PRIx64 " format=%s extent=%ux%u "
-		     "mip=%u layer=%u nonzero=%.4f%% avg=(%.3f,%.3f,%.3f,%.3f) max=(%.3f,%.3f,%.3f,%.3f) "
+		     "mip=%u layer=%u nonzero=%.4f%%%s avg=(%.3f,%.3f,%.3f,%.3f) max=(%.3f,%.3f,%.3f,%.3f) "
 		     "vs=0x%016" PRIx64 " ps=0x%016" PRIx64 "\n", sample, role, image.info.data.address,
 		     vk::to_string(backing.format).c_str(), width, height, mip, layer,
-		     100.0 * nonzero / pixels, sum[0] / pixels, sum[1] / pixels, sum[2] / pixels,
+		     100.0 * nonzero / pixels, metering.c_str(), sum[0] / pixels, sum[1] / pixels, sum[2] / pixels,
 		     sum[3] / pixels, mx[0], mx[1], mx[2], mx[3], vertex_hash, pixel_hash);
 		return;
 	}
@@ -2131,15 +2169,21 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 		}
 	}
 	uint64_t nonblack = 0, alpha = 0;
+	std::array<uint64_t, 3> lit_sum {};
 	for (uint64_t i = 0; i < pixels; ++i) {
-		nonblack += bytes[i * 4] != 0 || bytes[i * 4 + 1] != 0 || bytes[i * 4 + 2] != 0;
+		const bool lit = bytes[i * 4] != 0 || bytes[i * 4 + 1] != 0 || bytes[i * 4 + 2] != 0;
+		nonblack += lit;
 		alpha += bytes[i * 4 + 3];
+		for (int k = 0; k < 3 && lit; k++) lit_sum[k] += bytes[i * 4 + k];
 	}
+	// lit_avg: memory-order bytes 0..2 (B,G,R for B8G8R8A8) averaged over the non-black pixels.
+	const double lit_count = static_cast<double>(std::max<uint64_t>(nonblack, 1));
 	LOGF("InternalFrameStats: sample=%u role=%s address=0x%016" PRIx64 " format=%s extent=%ux%u "
-	     "mip=%u layer=%u rgb_nonblack=%.4f%% alpha_avg=%.2f vs=0x%016" PRIx64
+	     "mip=%u layer=%u rgb_nonblack=%.4f%% lit_avg_bytes=(%.2f,%.2f,%.2f) alpha_avg=%.2f vs=0x%016" PRIx64
 	     " ps=0x%016" PRIx64 "\n", sample, role, image.info.data.address,
 	     vk::to_string(backing.format).c_str(), width, height, mip, layer,
-	     100.0 * nonblack / pixels, static_cast<double>(alpha) / pixels, vertex_hash, pixel_hash);
+	     100.0 * nonblack / pixels, lit_sum[0] / lit_count, lit_sum[1] / lit_count, lit_sum[2] / lit_count,
+	     static_cast<double>(alpha) / pixels, vertex_hash, pixel_hash);
 }
 
 bool TextureCache::DownloadImageMemory(ImageId id) {
