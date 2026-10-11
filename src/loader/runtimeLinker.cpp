@@ -32,6 +32,10 @@
 #include <magic_enum.hpp>
 #include <memory>
 #include <vector>
+#if defined(__APPLE__)
+#include <cinttypes>
+#include <dlfcn.h>
+#endif
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #ifndef NOMINMAX
@@ -748,6 +752,40 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			}
 			std::printf("\n");
 		}
+#if defined(__APPLE__)
+		// Host frame-pointer backtrace, symbolized with dladdr, so faults inside host libraries
+		// (MoltenVK, the Metal driver) name their callers.
+		{
+			std::printf("host backtrace:\n");
+			auto print_frame = [](int idx, uint64_t pc) {
+				Dl_info dl {};
+				if (dladdr(reinterpret_cast<void*>(pc), &dl) != 0 && dl.dli_fname != nullptr) {
+					const char* base = std::strrchr(dl.dli_fname, '/');
+					std::printf("  #%02d 0x%016" PRIx64 " %s+0x%" PRIx64 " %s+0x%" PRIx64 "\n", idx,
+					            pc, base != nullptr ? base + 1 : dl.dli_fname,
+					            pc - reinterpret_cast<uint64_t>(dl.dli_fbase),
+					            dl.dli_sname != nullptr ? dl.dli_sname : "?",
+					            dl.dli_saddr != nullptr ? pc - reinterpret_cast<uint64_t>(dl.dli_saddr)
+					                                    : 0);
+				} else {
+					std::printf("  #%02d 0x%016" PRIx64 " ?\n", idx, pc);
+				}
+			};
+			print_frame(0, info->exception_address);
+			uint64_t fp = info->rbp;
+			for (int i = 1; i < 32 && fp != 0 && (fp & 7u) == 0 && IsReadableRange(fp, 16); i++) {
+				const auto* frame = reinterpret_cast<const uint64_t*>(fp);
+				if (frame[1] == 0) {
+					break;
+				}
+				print_frame(i, frame[1]);
+				if (frame[0] <= fp) {
+					break;
+				}
+				fp = frame[0];
+			}
+		}
+#endif
 		std::fflush(stdout);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
