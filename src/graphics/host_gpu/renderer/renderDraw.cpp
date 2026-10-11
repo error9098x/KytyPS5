@@ -547,7 +547,21 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		image.binding.attachment_layout = layout;
 		image.binding.attachment_access =
 		    vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite;
-		image.Transit(layout, image.binding.attachment_access,
+		// KYTY_RT_FEEDBACK_UNION=1 (opt-in): a color target that this draw also samples is
+		// requested with the same access CommitBindings asks for (attachment + shader read
+		// [+ write]). Otherwise the two requests differ only in their access masks, and every
+		// such draw records a redundant image barrier that also ends the open render pass.
+		static const bool feedback_union = [] {
+			const char* v = std::getenv("KYTY_RT_FEEDBACK_UNION");
+			return v != nullptr && *v != '\0' && *v != '0';
+		}();
+		auto target_access = image.binding.attachment_access;
+		if (feedback_union && image.binding.is_bound) {
+			target_access |= vk::AccessFlagBits2::eShaderRead |
+			                 (image.binding.shader_write ? vk::AccessFlagBits2::eShaderWrite
+			                                             : vk::AccessFlags2 {});
+		}
+		image.Transit(layout, target_access,
 		              ImageSubresourceRange {view.base_level, view.level_count, view.base_layer,
 		                                     view.layer_count},
 		              buffer.Handle());
