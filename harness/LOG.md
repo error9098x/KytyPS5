@@ -613,3 +613,34 @@ Two Apple/MoltenVK blockers cleared; the game now reaches mesh shaders.
   - So the scene is lost in the post-process/tonemap chain. Suspects: the tonemap LUT
     (A2B10G10R10, possibly a 3D texture) and eye adaptation (R32G32B32A32F); zero exposure or a black
     LUT both produce exactly this. The stats tool skipped these formats; extended to decode them.
+
+## 2026-10-11 (afternoon): title/warning black background fixed: MeshScratch binding collided with pixel Buffers (`86ec37b3`)
+
+- Diagnostics committed: `4d939946` (`KYTY_VIEW_CHECK`), `9262422d` + `1d2e62da` (internal frame
+  stats decode post-process formats, compute-written images, whole 3D volumes with per-slice
+  coverage), `86c1a4ce` (`KYTY_RESOURCE_DUMP_HASH=<hash>` dumps a shader's bound buffers at draw
+  time), `78f749ea` (`KYTY_DEBUG_EXPORT_VGPR=<hash>:<pc>:<vgpr>` replaces one pixel shader's
+  compressed MRT0 export with a captured VGPR as (|v|, |v|/1024, 1, 1), for bisecting).
+- `shtsm-menu-2` / `shtsm-lut-1`: the 3D colour-grading LUT (32x32x32 A2B10G10R10, guest
+  `0x80472a0000`) was **all zero in every slice and every frame**. The tonemap pass
+  (ps `0x8b3b4df51624ff13`) samples it, so the whole scene went black. Eye adaptation was fine
+  (1x1 RGBA32F = 1, 0.36, 1, 2).
+- `KYTY_DEBUG_SOLID_PS` (`shtsm-lut-solid-3`): the LUT filled magenta in 32/32 slices, so
+  rasterization and the layer export work. The LUT pixel shader (ps `0x4a992c93b3630c1f`, Unreal
+  CombineLUTs) itself computed 0.
+- `shtsm-resdump-1`: guest memory for its uniform buffer was valid (LUTSize = 32.0 at +244, film
+  slope 0.88, ...); the embedded ACES tables read through `s_getpc_b64` + `TBUFFER_LOAD` were
+  valid too. The IR before and after passes was correct.
+- VGPR bisect (`shtsm-bis-2..4`): rcp(LUTSize) = inf, LUTSize - 1 = -1, and UB[256]*UB[416] = 0,
+  so **every uniform-buffer read in that draw returned 0** (bounds-checked load out of range).
+  Forcing small read-only buffers to stream from guest memory changed nothing (diagnostic
+  reverted).
+- SPIR-V dump (`shtsm-spv-1`): the pixel shader's storage-buffer array is `Binding 56`.
+  `NativeBinding(Pixel, Buffers)` = 0 + 1*56 = 56 and `NativeBinding(Mesh/Vertex, MeshScratch)` =
+  56 + 0*56 = 56. On the descriptor-scratch route (`KYTY_MESH_SCRATCH_DESCRIPTOR=1`), every
+  emulated mesh draw wrote the mesh scratch buffer over the pixel shader's buffers (and the set
+  layout had a duplicate binding).
+- Fix `86ec37b3`: MeshScratch gets its own binding, 4*56 = 224, after the last stage group. Only
+  the opt-in descriptor-scratch route emits it.
+- Verification `shtsm-fix-1`: LUT 32/32 slices non-zero, avg RGB (0.72, 0.70, 0.66). The warning
+  screen now shows the 3D room (a lit doorway) behind the text instead of black.
