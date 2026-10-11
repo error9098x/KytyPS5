@@ -70,6 +70,15 @@ public:
 			m_fd = shm_open(shm_name, O_RDWR | O_CREAT | O_EXCL, 0600);
 			if (m_fd >= 0) {
 				shm_unlink(shm_name);
+			} else if (errno == EPERM) {
+				// Some macOS sandbox contexts deny POSIX shared-memory names while
+				// permitting ordinary temporary files.  An unlinked file has the
+				// same process-local shared-fd lifetime and mmap semantics here.
+				char file_name[] = "/tmp/kyty-dm-XXXXXX";
+				m_fd = mkstemp(file_name);
+				if (m_fd >= 0) {
+					(void)unlink(file_name);
+				}
 			}
 		}
 #else

@@ -1588,9 +1588,12 @@ Buffer& RenderExecutor::MeshEmulationScratch() {
 		const auto usage = std::getenv("KYTY_MESH_SCRATCH_HOST") != nullptr
 		                       ? MemoryUsage::Upload
 		                       : MemoryUsage::DeviceLocal;
+		const auto flags = vk::BufferUsageFlagBits::eStorageBuffer |
+		                   (std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") == nullptr
+		                        ? vk::BufferUsageFlagBits::eShaderDeviceAddress
+		                        : vk::BufferUsageFlags {});
 		m_mesh_scratch = std::make_unique<Buffer>(
-		    m_context.GetGraphics(), m_context.GetCommandScheduler(), usage, 0,
-		    vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eShaderDeviceAddress,
+		    m_context.GetGraphics(), m_context.GetCommandScheduler(), usage, 0, flags,
 		    megabytes << 20u);
 		LOGF("MeshEmulation: scratch buffer %" PRIu64 " MB usage=%s\n", megabytes,
 		     usage == MemoryUsage::Upload ? "host" : "device");
@@ -1626,9 +1629,15 @@ void RenderExecutor::ExecuteEmulatedMeshDraw(CommandBuffer& buffer, const DrawCa
 
 	std::array<uint32_t, ShaderRecompiler::IR::PushData::MeshDrawDwordCount> draw_data {};
 	std::copy(draw_data_in.begin(), draw_data_in.end(), draw_data.begin());
-	const auto address = scratch.BufferDeviceAddress();
-	draw_data[MeshEmulation::ScratchAddressLoDword] = static_cast<uint32_t>(address);
-	draw_data[MeshEmulation::ScratchAddressHiDword] = static_cast<uint32_t>(address >> 32u);
+	if (std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr) {
+		// The descriptor-backed emulated shaders do not read the legacy address.
+		draw_data[MeshEmulation::ScratchAddressLoDword] = 0;
+		draw_data[MeshEmulation::ScratchAddressHiDword] = 0;
+	} else {
+		const auto address = scratch.BufferDeviceAddress();
+		draw_data[MeshEmulation::ScratchAddressLoDword] = static_cast<uint32_t>(address);
+		draw_data[MeshEmulation::ScratchAddressHiDword] = static_cast<uint32_t>(address >> 32u);
+	}
 	constexpr auto push_stages = vk::ShaderStageFlagBits::eVertex |
 	                             vk::ShaderStageFlagBits::eFragment |
 	                             vk::ShaderStageFlagBits::eCompute;

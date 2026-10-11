@@ -92,6 +92,7 @@ struct EmitterState {
 	ShaderStageInputInfo                             input_info;
 	bool                                              vertex_subgroup_fallback = false;
 	bool                                              mesh_compute             = false;
+	bool                                              mesh_scratch_descriptor  = false;
 	// Vertex programs on hosts whose vertex stage cannot use subgroup operations (Metal) run as
 	// one-lane subgroups: ballot is a single bit, the first lane is 0 and shuffles return the
 	// invocation's own value.
@@ -124,6 +125,7 @@ struct EmitterState {
 	uint32_t                                         bvh_intersect_function  = 0;
 	uint32_t                                         gds_variable            = 0;
 	uint32_t                                         gds_length              = 0;
+	uint32_t                                         mesh_scratch_variable   = 0;
 	uint32_t                                         push_constant_variable  = 0;
 	uint32_t                                         shader_data_storage_variable = 0;
 	uint32_t                                         flattened_srt_variable  = 0;

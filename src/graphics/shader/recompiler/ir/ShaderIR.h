@@ -306,11 +306,16 @@ enum class DescriptorBindingKind : uint32_t {
 	FlattenedSrt,
 	ShaderData,
 	SharedMemory,
+	// Scratch storage used only by the host-side mesh-shader emulation path.  Keep
+	// this after the existing kinds so native bindings for all guest resources stay
+	// unchanged; NativeBinding uses the legacy stride below.
+	MeshScratch,
 	Count,
 };
 
 static_assert(static_cast<uint32_t>(DescriptorBindingKind::Samplers) == 49u);
-static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 56u);
+static_assert(static_cast<uint32_t>(DescriptorBindingKind::MeshScratch) == 56u);
+static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 57u);
 
 struct PushData {
 	static constexpr uint32_t DwordCount = 32;
@@ -330,12 +335,16 @@ static_assert(sizeof(PushData) == 128);
 constexpr uint32_t NativePushConstantSize = sizeof(PushData);
 
 [[nodiscard]] constexpr uint32_t NativeBinding(ShaderType stage, DescriptorBindingKind kind) {
+	// Existing descriptor groups use a stride of 56.  MeshScratch is a new
+	// binding at the end of group 0 and is emitted only for the emulated mesh
+	// compute program, so adding it must not renumber any existing stage.
+	constexpr uint32_t NativeBindingStride = 56u;
 	const uint32_t group = stage == ShaderType::Pixel                    ? 1u
 	                       : stage == ShaderType::TessellationControl    ? 2u
 	                       : stage == ShaderType::TessellationEvaluation ? 3u
 	                                                                     : 0u;
 	return static_cast<uint32_t>(kind) +
-	       group * static_cast<uint32_t>(DescriptorBindingKind::Count);
+	       group * NativeBindingStride;
 }
 
 [[nodiscard]] constexpr ImageResourceClass ImageBindingResourceClass(DescriptorBindingKind kind) {

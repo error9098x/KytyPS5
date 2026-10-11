@@ -191,7 +191,11 @@ static void AddLayoutBindings(std::vector<vk::DescriptorSetLayoutBinding>& descr
 		const auto kind = static_cast<ShaderRecompiler::IR::DescriptorBindingKind>(index);
 		descriptor_bindings.push_back(
 		    {ShaderRecompiler::IR::NativeBinding(program.stage, kind), NativeDescriptorType(kind),
-		     program.bindings.descriptor_counts[index], stage, nullptr});
+		     program.bindings.descriptor_counts[index],
+		     kind == ShaderRecompiler::IR::DescriptorBindingKind::MeshScratch
+		         ? stage | vk::ShaderStageFlagBits::eVertex
+		         : stage,
+		     nullptr});
 	}
 }
 

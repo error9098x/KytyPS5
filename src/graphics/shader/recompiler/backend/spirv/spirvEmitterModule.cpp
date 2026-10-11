@@ -245,6 +245,11 @@ void DefineDescriptors(EmitterState& state) {
 	    IR::PushData::StartFor(bindings.push_data_start_dword, bindings.ShaderDataDwords());
 	counts[static_cast<size_t>(Kind::ShaderData)] =
 	    bindings.ShaderDataDwords() != 0 && !bindings.UsesPushData();
+	if (state.mesh_scratch_descriptor) {
+		// The emulated mesh compute pass and the generated vertex shader share a
+		// normal storage-buffer descriptor for their output scratch.
+		counts[static_cast<size_t>(Kind::MeshScratch)] = 1;
+	}
 	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh) {
 		const auto type              = PushConstantBlockType(state);
 		state.push_constant_variable = state.builder.DefineGlobalVariable(
@@ -334,6 +339,10 @@ void DefineDescriptors(EmitterState& state) {
 						state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationAliased);
 					}
 				}
+				break;
+			case IR::DescriptorBindingKind::MeshScratch:
+				state.mesh_scratch_variable =
+				    Define(StorageBufferType(state, state.storage_buffers[2]), "mesh_scratch");
 				break;
 			default: {
 				EXIT_IF(IR::ImageBindingResourceClass(kind) ==

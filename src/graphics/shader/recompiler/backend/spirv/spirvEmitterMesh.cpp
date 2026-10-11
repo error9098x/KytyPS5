@@ -144,8 +144,9 @@ namespace {
 // Pointer to dword `dword` of the scratch item, reached through a buffer device address.
 struct ScratchWriter {
 	EmitterState& state;
-	uint32_t      item_address = 0; // u64
+	uint32_t      item_address = 0; // u64 value id for the legacy BDA path
 	uint32_t      element_pointer_type = 0;
+	uint32_t      physical_element_pointer_type = 0;
 	uint32_t      array_pointer_type = 0;
 
 	explicit ScratchWriter(EmitterState& state_): state(state_) {
@@ -158,7 +159,11 @@ struct ScratchWriter {
 		     {spv::OpDecorate, {spv::DecorationBlock}}},
 		    runtime_array);
 		array_pointer_type   = TypePointer(state, spv::StorageClassPhysicalStorageBuffer, block);
-		element_pointer_type = TypePointer(state, spv::StorageClassPhysicalStorageBuffer, u32);
+		physical_element_pointer_type =
+		    TypePointer(state, spv::StorageClassPhysicalStorageBuffer, u32);
+		element_pointer_type = state.mesh_scratch_variable != 0
+		                           ? TypePointer(state, spv::StorageClassStorageBuffer, u32)
+		                           : physical_element_pointer_type;
 	}
 
 	uint32_t PushDword(uint32_t index) {
@@ -172,34 +177,58 @@ struct ScratchWriter {
 	}
 
 	void ComputeItemAddress(const MeshEmulation::Layout& layout) {
-		const auto u64  = TypeU64(state);
-		const auto lo   = Unary(state, spv::OpUConvert, u64,
-		                        PushDword(MeshEmulation::ScratchAddressLoDword));
-		const auto hi   = Unary(state, spv::OpUConvert, u64,
-		                        PushDword(MeshEmulation::ScratchAddressHiDword));
-		const auto base = Binary(state, spv::OpBitwiseOr, u64, lo,
-		                         Binary(state, spv::OpShiftLeftLogical, u64, hi, ConstantU32(state, 32)));
 		// slot = WorkgroupId.y * chunk_groups + (WorkgroupId.x - group_base)
 		const auto group_x = EmitInputComponentU32(state, IR::StageInputKind::WorkgroupId, 0);
 		const auto group_y = EmitInputComponentU32(state, IR::StageInputKind::WorkgroupId, 1);
 		const auto local_x = EmitBinaryU32(state, spv::OpISub, group_x,
 		                                   PushDword(MeshEmulation::GroupBaseDword));
-		const auto slot    = EmitBinaryU32(
+		const auto slot = EmitBinaryU32(
 		    state, spv::OpIAdd, local_x,
 		    EmitBinaryU32(state, spv::OpIMul, group_y, PushDword(MeshEmulation::ChunkGroupsDword)));
-		const auto offset  = Binary(state, spv::OpIMul, u64, Unary(state, spv::OpUConvert, u64, slot),
-		                            ConstantU64(state, layout.ItemBytes()));
-		item_address       = Binary(state, spv::OpIAdd, u64, base, offset);
+		if (state.mesh_scratch_variable != 0) {
+			// The emulation scratch is a regular storage-buffer descriptor.  Keeping
+			// it out of the physical-BDA path lets MoltenVK track the resource in
+			// Metal command encoders.
+			item_index = slot;
+		} else {
+			const auto u64  = TypeU64(state);
+			const auto lo   = Unary(state, spv::OpUConvert, u64,
+			                        PushDword(MeshEmulation::ScratchAddressLoDword));
+			const auto hi   = Unary(state, spv::OpUConvert, u64,
+			                        PushDword(MeshEmulation::ScratchAddressHiDword));
+			const auto base = Binary(
+			    state, spv::OpBitwiseOr, u64, lo,
+			    Binary(state, spv::OpShiftLeftLogical, u64, hi, ConstantU32(state, 32)));
+			const auto offset = Binary(
+			    state, spv::OpIMul, u64, Unary(state, spv::OpUConvert, u64, slot),
+			    ConstantU64(state, layout.ItemBytes()));
+			item_address = Binary(state, spv::OpIAdd, u64, base, offset);
+		}
 	}
 
 	void Store(uint32_t dword, uint32_t value_u32) {
-		const auto array = state.builder.AllocateId();
-		state.builder.AddFunction(spv::OpConvertUToPtr, array_pointer_type, array, item_address);
 		const auto element = state.builder.AllocateId();
-		state.builder.AddFunction(spv::OpAccessChain, element_pointer_type, element, array,
-		                          ConstantU32(state, 0), dword);
+		if (state.mesh_scratch_variable != 0) {
+			const auto index = EmitBinaryU32(
+			    state, spv::OpIAdd,
+			    EmitBinaryU32(state, spv::OpIMul, item_index,
+			                  ConstantU32(state, current_layout->ItemDwords())),
+			    dword);
+			state.builder.AddFunction(spv::OpAccessChain, element_pointer_type, element,
+			                          state.mesh_scratch_variable, ConstantU32(state, 0), index);
+		} else {
+			const auto array = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpConvertUToPtr, array_pointer_type, array, item_address);
+			state.builder.AddFunction(spv::OpAccessChain, physical_element_pointer_type, element, array,
+			                          ConstantU32(state, 0), dword);
+		}
 		state.builder.AddFunction(spv::OpStore, element, value_u32, spv::MemoryAccessAlignedMask, 4u);
 	}
+
+	void SetLayout(const MeshEmulation::Layout& layout) { current_layout = &layout; }
+
+	const MeshEmulation::Layout* current_layout = nullptr;
+	uint32_t                    item_index = 0;
 };
 
 uint32_t DwordIndex(EmitterState& state, uint32_t base, uint32_t index, uint32_t stride) {
@@ -224,6 +253,7 @@ void EmitMeshComputeEntryPoint(EmitterState& state) {
 	                                 TypeU32(state), ConstantU32(state, 1));
 	ScratchWriter writer(state);
 	writer.ComputeItemAddress(layout);
+	writer.SetLayout(layout);
 	const auto vertex_stride = layout.VertexStrideDwords();
 	for (uint32_t half = 0; half < state.lane_count; half++) {
 		state.lane_half      = half;

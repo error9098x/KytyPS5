@@ -17,7 +17,7 @@ namespace {
 	std::abort();
 }
 
-void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
+void ValidateNativeProgram(const IR::Program& program, bool lds_storage, bool mesh_compute) {
 	uint64_t live_buffers = 0;
 	bool uses_lds = false;
 	bool uses_gds = false;
@@ -172,6 +172,8 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 	expected[static_cast<size_t>(Kind::FlattenedSrt)] = uses_flattened_srt;
 	expected[static_cast<size_t>(Kind::ShaderData)] =
 	    program.bindings.ShaderDataDwords() != 0 && !program.bindings.UsesPushData();
+	expected[static_cast<size_t>(Kind::MeshScratch)] =
+	    mesh_compute && program.stage == ShaderType::Mesh;
 	uint64_t descriptor_mask = 0;
 	for (uint32_t index = 0; index < expected.size(); ++index) {
 		if (expected[index] != 0) descriptor_mask |= uint64_t{1} << index;
@@ -218,6 +220,8 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	program.bindings = {.push_data_start_dword = push_data_start_dword};
 	EmitterState state(program, input_info, vertex_subgroup_fallback);
 	state.mesh_compute = mesh_compute_emulation && program.stage == ShaderType::Mesh;
+	state.mesh_scratch_descriptor =
+	    state.mesh_compute && std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr;
 	state.single_lane_subgroup =
 	    vertex_subgroup_fallback && program.stage == ShaderType::Vertex &&
 	    (program.info.subgroup_ballot || program.info.subgroup_shuffle ||
@@ -229,7 +233,8 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	        : 1u;
 	DefineModule(state);
 	ValidateNativeProgram(program, program.stage == ShaderType::Compute &&
-	                                   input_info.compute != nullptr && input_info.compute->lds_storage);
+	                                   input_info.compute != nullptr && input_info.compute->lds_storage,
+	                      state.mesh_scratch_descriptor);
 	EmitProgram(state);
 	state.builder.AddEntryPoint(state.mesh_compute ? spv::ExecutionModelGLCompute
 	                                               : ExecutionModelForStage(state.program.stage),

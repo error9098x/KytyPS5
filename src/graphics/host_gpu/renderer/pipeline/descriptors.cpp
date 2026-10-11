@@ -71,7 +71,8 @@ vk::DescriptorType NativeDescriptorType(BindingKind kind) {
 		case BindingKind::FaultBuffer:
 		case BindingKind::FlattenedSrt:
 		case BindingKind::ShaderData:
-		case BindingKind::SharedMemory: return vk::DescriptorType::eStorageBuffer;
+		case BindingKind::SharedMemory:
+		case BindingKind::MeshScratch: return vk::DescriptorType::eStorageBuffer;
 		case BindingKind::Count: EXIT("invalid native descriptor binding kind");
 	}
 	EXIT("invalid native descriptor binding kind");
@@ -1056,11 +1057,20 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			}
 		}
 	}
+	if (pipeline.mesh_compute != nullptr &&
+	    std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr &&
+	    pipeline_bind_point == vk::PipelineBindPoint::eGraphics) {
+		// The generated vertex shader is not represented by a PreparedBindings
+		// stage, but it shares the mesh compute pipeline layout and needs the same
+		// scratch storage descriptor.
+		write_count++;
+	}
 	m_descriptor_images.resize(image_descriptor_count);
 	m_descriptor_writes.clear();
 	m_descriptor_writes.reserve(write_count);
 	size_t image_cursor = 0;
 	std::array<vk::DescriptorBufferInfo, 2> address_buffers;
+	vk::DescriptorBufferInfo mesh_scratch_view;
 
 	for (auto* prepared: prepared_bindings) {
 		const auto& program       = *prepared->runtime->program;
@@ -1174,6 +1184,11 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 						write.pBufferInfo = view;
 						break;
 					}
+					case BindingKind::MeshScratch:
+						mesh_scratch_view = {MeshEmulationScratch().Handle(), 0,
+						                     MeshEmulationScratch().Size()};
+						write.pBufferInfo = &mesh_scratch_view;
+						break;
 					case BindingKind::Samplers:
 						for (const auto sampler: descriptors.samplers) {
 							EXIT_IF(sampler == nullptr);
@@ -1207,6 +1222,18 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			                  push_data.dwords.begin() + program.bindings.push_data_start_dword);
 			has_push_data = true;
 		}
+	}
+	if (pipeline.mesh_compute != nullptr &&
+	    std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr &&
+	    pipeline_bind_point == vk::PipelineBindPoint::eGraphics) {
+		vk::WriteDescriptorSet write {};
+		write.dstBinding = ShaderRecompiler::IR::NativeBinding(
+		    ShaderType::Mesh, BindingKind::MeshScratch);
+		write.descriptorType = vk::DescriptorType::eStorageBuffer;
+		write.descriptorCount = 1;
+		mesh_scratch_view = {MeshEmulationScratch().Handle(), 0, MeshEmulationScratch().Size()};
+		write.pBufferInfo = &mesh_scratch_view;
+		m_descriptor_writes.push_back(write);
 	}
 
 	if (pipeline.mesh_compute != nullptr) {

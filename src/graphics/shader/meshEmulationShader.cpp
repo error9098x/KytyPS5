@@ -6,6 +6,7 @@
 
 #include <array>
 #include <bit>
+#include <cstdlib>
 
 namespace Libs::Graphics {
 
@@ -18,13 +19,18 @@ class MeshEmulationVertexEmitter {
 public:
 	MeshEmulationVertexEmitter(std::span<const ShaderRecompiler::IR::StageOutput> outputs_,
 	                           const MeshEmulation::Layout&                       layout_)
-	    : outputs(outputs_), layout(layout_) {}
+	    : outputs(outputs_), layout(layout_),
+	      descriptor_scratch(std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr) {}
 
 	std::vector<uint32_t> Emit() {
-		builder.AddMemoryModel(spv::AddressingModelPhysicalStorageBuffer64, spv::MemoryModelGLSL450);
+		builder.AddMemoryModel(descriptor_scratch ? spv::AddressingModelLogical
+		                                         : spv::AddressingModelPhysicalStorageBuffer64,
+		                       spv::MemoryModelGLSL450);
 		builder.RequireCapability(spv::CapabilityShader);
-		builder.RequireCapability(spv::CapabilityInt64);
-		builder.RequireCapability(spv::CapabilityPhysicalStorageBufferAddresses);
+		if (!descriptor_scratch) {
+			builder.RequireCapability(spv::CapabilityInt64);
+			builder.RequireCapability(spv::CapabilityPhysicalStorageBufferAddresses);
+		}
 		DefineTypes();
 		DefineInterface();
 
@@ -39,16 +45,27 @@ public:
 		const auto slot      = Result(spv::OpUDiv, uint_type, triangle, Uint(layout.max_primitives));
 		const auto primitive = Result(spv::OpUMod, uint_type, triangle, Uint(layout.max_primitives));
 
-		const auto lo   = Result(spv::OpUConvert, u64_type, PushDword(MeshEmulation::ScratchAddressLoDword));
-		const auto hi   = Result(spv::OpUConvert, u64_type, PushDword(MeshEmulation::ScratchAddressHiDword));
-		const auto base = Result(spv::OpBitwiseOr, u64_type, lo,
-		                         Result(spv::OpShiftLeftLogical, u64_type, hi, Uint(32)));
-		const auto offset = Result(spv::OpIMul, u64_type, Result(spv::OpUConvert, u64_type, slot),
-		                           builder.Constant(spv::OpConstant, u64_type,
-		                                            static_cast<uint32_t>(layout.ItemBytes()),
-		                                            static_cast<uint32_t>(layout.ItemBytes() >> 32u)));
-		item = Result(spv::OpConvertUToPtr, ptr_psb_block,
-		              Result(spv::OpIAdd, u64_type, base, offset));
+		if (descriptor_scratch) {
+			// Keep the base dword index; each read then indexes the runtime array
+			// directly. A runtime-array element is a scalar, so treating it as a
+			// nested block would generate invalid Metal member accesses.
+			item = Result(spv::OpIMul, uint_type, slot, Uint(layout.ItemDwords()));
+		} else {
+			const auto lo = Result(spv::OpUConvert, u64_type,
+			                       PushDword(MeshEmulation::ScratchAddressLoDword));
+			const auto hi = Result(spv::OpUConvert, u64_type,
+			                       PushDword(MeshEmulation::ScratchAddressHiDword));
+			const auto base = Result(
+			    spv::OpBitwiseOr, u64_type, lo,
+			    Result(spv::OpShiftLeftLogical, u64_type, hi, Uint(32)));
+			const auto offset = Result(
+			    spv::OpIMul, u64_type, Result(spv::OpUConvert, u64_type, slot),
+			    builder.Constant(spv::OpConstant, u64_type,
+			                     static_cast<uint32_t>(layout.ItemBytes()),
+			                     static_cast<uint32_t>(layout.ItemBytes() >> 32u)));
+			item = Result(spv::OpConvertUToPtr, ptr_psb_block,
+			              Result(spv::OpIAdd, u64_type, base, offset));
+		}
 
 		const auto prim_base = Result(spv::OpIMul, uint_type, primitive, Uint(4));
 		const auto PrimitiveDword = [&](uint32_t component) {
@@ -157,6 +174,19 @@ private:
 		    runtime_array);
 		ptr_psb_block = Pointer(spv::StorageClassPhysicalStorageBuffer, block);
 		ptr_psb_uint  = Pointer(spv::StorageClassPhysicalStorageBuffer, uint_type);
+		if (descriptor_scratch) {
+			ptr_scratch_block = Pointer(spv::StorageClassStorageBuffer, block);
+			ptr_scratch_uint  = Pointer(spv::StorageClassStorageBuffer, uint_type);
+			scratch_variable  = builder.DefineGlobalVariable(ptr_scratch_block,
+			                                                spv::StorageClassStorageBuffer);
+			builder.AddAnnotation(spv::OpDecorate, scratch_variable,
+			                      spv::DecorationDescriptorSet, 0u);
+			builder.AddAnnotation(spv::OpDecorate, scratch_variable,
+			                      spv::DecorationBinding,
+			                      ShaderRecompiler::IR::NativeBinding(
+			                          ShaderType::Vertex,
+			                          ShaderRecompiler::IR::DescriptorBindingKind::MeshScratch));
+		}
 
 		const auto push_array = builder.DecoratedType(
 		    spv::OpTypeArray, {{spv::OpDecorate, {spv::DecorationArrayStride, 4u}}}, uint_type,
@@ -229,7 +259,14 @@ private:
 	}
 
 	uint32_t ReadDword(uint32_t dword) {
-		const auto pointer = Result(spv::OpAccessChain, ptr_psb_uint, item, Uint(0), dword);
+		uint32_t pointer = 0;
+		if (descriptor_scratch) {
+			const auto index = Result(spv::OpIAdd, uint_type, item, dword);
+			pointer = Result(spv::OpAccessChain, ptr_scratch_uint, scratch_variable,
+			                 Uint(0), index);
+		} else {
+			pointer = Result(spv::OpAccessChain, ptr_psb_uint, item, Uint(0), dword);
+		}
 		const auto value   = builder.AllocateId();
 		builder.AddFunction(spv::OpLoad, uint_type, value, pointer, spv::MemoryAccessAlignedMask, 4u);
 		return value;
@@ -272,15 +309,17 @@ private:
 
 	std::span<const ShaderRecompiler::IR::StageOutput> outputs;
 	const MeshEmulation::Layout&                       layout;
+	bool                                               descriptor_scratch = false;
 	Builder                                            builder {0x00010500u};
 	std::vector<uint32_t>                              interfaces;
 	std::vector<uint32_t>                              output_variables;
 	uint32_t main = 0, glsl = 0, void_type = 0, bool_type = 0, uint_type = 0, int_type = 0;
 	uint32_t u64_type = 0, float_type = 0, vec4_type = 0, function_type = 0;
-	uint32_t ptr_psb_block = 0, ptr_psb_uint = 0, ptr_push_uint = 0;
+	uint32_t ptr_psb_block = 0, ptr_psb_uint = 0;
+	uint32_t ptr_scratch_block = 0, ptr_scratch_uint = 0, ptr_push_uint = 0;
 	uint32_t ptr_output_vec4 = 0, ptr_output_float = 0;
 	uint32_t push_constants = 0, vertex_index_input = 0, per_vertex = 0;
-	uint32_t clip_distance = 0, cull_distance = 0, layer = 0, item = 0;
+	uint32_t clip_distance = 0, cull_distance = 0, layer = 0, item = 0, scratch_variable = 0;
 };
 
 } // namespace
