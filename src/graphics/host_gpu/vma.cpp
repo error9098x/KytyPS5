@@ -20,7 +20,14 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
+#include <cstdlib>
+#include <cstring>
+
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 
 namespace Libs::Graphics {
 
@@ -120,12 +127,50 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 			usage += CanReportMemoryUsage() ? budgets[heap].usage : 0;
 		}
 	}
+	uint64_t result = 0;
 	if (discrete) {
-		return budget - std::min<uint64_t>(budget / 8, 1024ull * 1024 * 1024);
+		result = budget - std::min<uint64_t>(budget / 8, 1024ull * 1024 * 1024);
+	} else {
+		constexpr uint64_t system_reserve = 8ull * 1024 * 1024 * 1024;
+		const auto         available      = budget > usage ? budget - usage : uint64_t {0};
+		result = std::max(local, available > system_reserve ? available - system_reserve : uint64_t {0});
+#if defined(__APPLE__)
+		// Unified memory: Vulkan allocations share physical RAM with guest memory, the host
+		// process and macOS. The device-local heap (Metal recommendedMaxWorkingSetSize, ~12 GB
+		// on a 16 GB Mac) is not a usable cache budget; caches sized from it filled RAM until
+		// Metal failed residency (kIOGPUCommandBufferCallbackErrorOutOfMemory, device lost).
+		// Cap at physical RAM minus max(RAM/2, 8 GiB). KYTY_GPU_BUDGET_LEGACY=1 restores the
+		// old value.
+		const char* legacy = std::getenv("KYTY_GPU_BUDGET_LEGACY");
+		if (legacy == nullptr || std::strcmp(legacy, "1") != 0) {
+			uint64_t phys = 0;
+			size_t   len  = sizeof(phys);
+			if (sysctlbyname("hw.memsize", &phys, &len, nullptr, 0) == 0 && phys != 0) {
+				const uint64_t reserve = std::max<uint64_t>(phys / 2, 8ull << 30);
+				const uint64_t cap     = phys > reserve ? phys - reserve : local / 2;
+				result                 = std::min(local, cap);
+			}
+		}
+#endif
 	}
-	constexpr uint64_t system_reserve = 8ull * 1024 * 1024 * 1024;
-	const auto         available      = budget > usage ? budget - usage : uint64_t {0};
-	return std::max(local, available > system_reserve ? available - system_reserve : uint64_t {0});
+	// KYTY_GPU_BUDGET_MB=<n>: explicit cache budget override (all platforms), for tuning.
+	if (const char* value = std::getenv("KYTY_GPU_BUDGET_MB"); value != nullptr) {
+		char*      end = nullptr;
+		const auto mb  = std::strtoull(value, &end, 10);
+		if (end != value && *end == '\0' && mb != 0) {
+			result = mb << 20u;
+		} else {
+			LOGF("KYTY_GPU_BUDGET_MB=%s ignored (expected a positive integer)\n", value);
+		}
+	}
+	static std::atomic_bool logged {false};
+	if (!logged.exchange(true)) {
+		LOGF("GPU cache memory budget: %" PRIu64 " MiB (%s, device-local heap %" PRIu64 " MiB)\n",
+		     result >> 20u, discrete ? "discrete" : "unified", local >> 20u);
+		std::printf("GPU cache memory budget: %" PRIu64 " MiB (%s, device-local heap %" PRIu64 " MiB)\n",
+		            result >> 20u, discrete ? "discrete" : "unified", local >> 20u);
+	}
+	return result;
 }
 
 bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image) {
