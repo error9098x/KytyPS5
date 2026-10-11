@@ -396,7 +396,8 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
-	m_command.m_buffer = nullptr;
+	m_command.m_buffer  = nullptr;
+	m_work_since_submit = 0;
 	return tick;
 }
 

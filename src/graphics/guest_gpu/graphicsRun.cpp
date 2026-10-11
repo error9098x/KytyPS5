@@ -891,6 +891,7 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 }
 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
+	GetScheduler().NoteWork();
 	LogGraphicsCommand("draw_index");
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
@@ -904,6 +905,7 @@ void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 }
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count) {
+	GetScheduler().NoteWork();
 	uint64_t index_size = 0;
 	switch (m_index_type_and_size) {
 		case 0: index_size = 2; break;
@@ -936,6 +938,7 @@ static void PatchIndirectDrawOffsets(CommandProcessor& cp, IndirectDrawRegisters
 
 void CommandProcessor::DrawIndirect(uint32_t data_offset, IndirectDrawRegisters registers,
                                     uint32_t draw_initiator, bool indexed) {
+	GetScheduler().NoteWork();
 	const auto args_size = indexed ? sizeof(DrawIndexedIndirectArgs) : sizeof(DrawIndirectArgs);
 	DrawIndirectMulti(data_offset, 1, nullptr, args_size, registers, draw_initiator, indexed);
 }
@@ -944,6 +947,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
                                          const volatile uint32_t* count_addr,
                                          uint32_t stride_in_bytes, IndirectDrawRegisters registers,
                                          uint32_t draw_initiator, bool indexed) {
+	GetScheduler().NoteWork();
 	EXIT_NOT_IMPLEMENTED((draw_initiator & ~0x20u) != (indexed ? 0u : 2u));
 	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
 
@@ -1021,6 +1025,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
                                       uint32_t thread_group_z, uint32_t mode) {
+	GetScheduler().NoteWork();
 	LogGraphicsCommand("dispatch_direct");
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 
@@ -1052,6 +1057,7 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 }
 
 void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
+	GetScheduler().NoteWork();
 	LogGraphicsCommand("dispatch_indirect");
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
 	if ((mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
@@ -1064,6 +1070,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
+	GetScheduler().NoteWork();
 	LogGraphicsCommand("draw_auto");
 	if (args.instance_count == 0) {
 		args.instance_count = m_num_instances;
@@ -1285,6 +1292,7 @@ void CommandProcessor::WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_
 	WriteAtEndOfPipe(cache_policy, event_write_dest, eop_event_type, cache_action, event_index,
 	                 event_write_source, dst_gpu_addr, value, interrupt_selector,
 	                 interrupt_context_id);
+	MaybeEarlyFlush(true);
 }
 
 void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_write_dest,
@@ -1296,22 +1304,99 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	WriteAtEndOfPipe(cache_policy, event_write_dest, eop_event_type, cache_action, event_index,
 	                 event_write_source, dst_gpu_addr, value, interrupt_selector,
 	                 interrupt_context_id);
+	MaybeEarlyFlush(true);
 }
 
 void CommandProcessor::EmitGlobalBarrier() {
-	Common::LockGuard lock(m_renderer.GetMutex());
+	{
+		Common::LockGuard lock(m_renderer.GetMutex());
 
-	vk::MemoryBarrier2 barrier {};
-	barrier.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
-	barrier.srcAccessMask = vk::AccessFlagBits2::eMemoryWrite;
-	barrier.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
-	barrier.dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+		vk::MemoryBarrier2 barrier {};
+		barrier.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
+		barrier.srcAccessMask = vk::AccessFlagBits2::eMemoryWrite;
+		barrier.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
+		barrier.dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
 
-	vk::DependencyInfo dependency {};
-	dependency.memoryBarrierCount = 1;
-	dependency.pMemoryBarriers    = &barrier;
-	GetScheduler().EndRendering();
-	CurrentBuffer().Handle().pipelineBarrier2(dependency);
+		vk::DependencyInfo dependency {};
+		dependency.memoryBarrierCount = 1;
+		dependency.pMemoryBarriers    = &barrier;
+		GetScheduler().EndRendering();
+		CurrentBuffer().Handle().pipelineBarrier2(dependency);
+	}
+	MaybeEarlyFlush(false);
+}
+
+namespace {
+
+struct EarlyFlushConfig {
+	int      label_mode = 0;  // KYTY_FLUSH_ON_LABEL: 0 off, 1 only outside a pass, 2 may end the pass
+	uint32_t draws      = 0;  // KYTY_FLUSH_DRAWS: barrier flush after this many draws/dispatches
+	uint32_t min_draws  = 8;  // KYTY_FLUSH_MIN_DRAWS: never flush a smaller label batch
+};
+
+const EarlyFlushConfig& GetEarlyFlushConfig() {
+	static const EarlyFlushConfig config = [] {
+		EarlyFlushConfig c {};
+		if (const char* v = std::getenv("KYTY_FLUSH_ON_LABEL"); v != nullptr && *v != '\0') {
+			c.label_mode = std::atoi(v);
+		}
+		if (const char* v = std::getenv("KYTY_FLUSH_DRAWS"); v != nullptr && *v != '\0') {
+			c.draws = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+		}
+		if (const char* v = std::getenv("KYTY_FLUSH_MIN_DRAWS"); v != nullptr && *v != '\0') {
+			c.min_draws = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+		}
+		if (c.label_mode != 0 || c.draws != 0) {
+			LOGF("EarlyFlush: label_mode=%d draws=%u min_draws=%u\n", c.label_mode, c.draws,
+			       c.min_draws);
+		}
+		return c;
+	}();
+	return config;
+}
+
+} // namespace
+
+void CommandProcessor::MaybeEarlyFlush(bool label) {
+	const auto& config = GetEarlyFlushConfig();
+	if (label ? config.label_mode == 0 : config.draws == 0) {
+		return;
+	}
+	auto& scheduler = GetScheduler();
+	if (!scheduler.Active()) {
+		return;
+	}
+	auto& command = scheduler.Current();
+	if (command.IsInvalid()) {
+		return;
+	}
+	const uint32_t work = scheduler.WorkSinceSubmit();
+	if (work < (label ? config.min_draws : config.draws)) {
+		return;
+	}
+	static uint64_t label_flushes   = 0;
+	static uint64_t barrier_flushes = 0;
+	static uint64_t skipped_pass    = 0;
+	static uint64_t flushed_work    = 0;
+	static auto     last_report     = std::chrono::steady_clock::now();
+	if (command.IsRendering()) {
+		if (!(label && config.label_mode >= 2)) {
+			skipped_pass++;
+			return;
+		}
+		scheduler.EndRendering();
+	}
+	scheduler.Flush();
+	(label ? label_flushes : barrier_flushes)++;
+	flushed_work += work;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - last_report >= std::chrono::seconds(2)) {
+		LOGF("EarlyFlushStats: label=%" PRIu64 " barrier=%" PRIu64 " skipped_in_pass=%" PRIu64
+		       " work=%" PRIu64 "\n",
+		       label_flushes, barrier_flushes, skipped_pass, flushed_work);
+		label_flushes = barrier_flushes = skipped_pass = flushed_work = 0;
+		last_report = now;
+	}
 }
 
 void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id) {

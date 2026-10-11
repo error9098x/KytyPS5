@@ -44,6 +44,11 @@ public:
 	[[nodiscard]] bool        HasPendingPriorityOperations();
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
 
+	// Draws/dispatches recorded into the open command buffer since the last submit (early-flush
+	// heuristics, KYTY_FLUSH_ON_LABEL / KYTY_FLUSH_DRAWS).
+	void                   NoteWork() noexcept { ++m_work_since_submit; }
+	[[nodiscard]] uint32_t WorkSinceSubmit() const noexcept { return m_work_since_submit; }
+
 	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
 	void                           CheckActive() const;
 	CommandBuffer&                 Current();
@@ -100,6 +105,7 @@ private:
 	bool                         m_priority_active      = false;
 	uint64_t                     m_priority_active_tick = 0;
 	OperationState               m_operation_state      = OperationState::Open;
+	uint32_t                     m_work_since_submit    = 0;
 };
 
 } // namespace Libs::Graphics

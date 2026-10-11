@@ -155,6 +155,9 @@ private:
 	                      uint32_t interrupt_context_id);
 	void ProcessPm4(Pm4Execution& execution);
 	void SuspendPm4();
+	// KYTY_FLUSH_ON_LABEL / KYTY_FLUSH_DRAWS: submit the open command buffer early (outside a
+	// render pass) so the GPU executes while the GPU thread keeps recording.
+	void MaybeEarlyFlush(bool label);
 	CommandScheduler&   GetScheduler() const { return m_renderer.GetCommandScheduler(); }
 	CommandBuffer&      CurrentBuffer() { return GetScheduler().Current(); }
 
