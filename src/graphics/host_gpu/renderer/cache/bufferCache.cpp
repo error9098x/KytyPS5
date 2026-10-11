@@ -22,6 +22,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -47,6 +48,11 @@ bool FaultCoalesceEnabled() {
 }
 
 constexpr uint64_t FaultCoalesceMaxBytes = 1 * MiB;
+
+bool FaultWaitOnCallerEnabled() {
+	static const bool enabled = EnvFlag("KYTY_FAULT_WAIT_ON_CALLER");
+	return enabled;
+}
 
 struct ReadbackCounters {
 	std::atomic<uint64_t> count {0};
@@ -291,6 +297,12 @@ void BufferCache::DeleteBuffer(BufferId id) {
 
 template <bool async>
 bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	if (!m_caller_readbacks.empty() && m_caller_capture == nullptr) {
+		// Pages a caller-side readback took are still GPU-dirty in the tracker but no longer in
+		// m_gpu_modified_ranges; finish those first so this download sees a consistent state.
+		CompleteCallerReadbacks(vaddr, size);
+	}
+	CallerReadback* const capture = async ? m_caller_capture : nullptr;
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size     = 0;
 	const auto                  buffer_address = buffer.CpuAddress();
@@ -309,7 +321,11 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		return false;
 	}
 
-	auto [mapped, offset] = m_download_buffer.Map(total_size, 64);
+	uint8_t* mapped = nullptr;
+	uint64_t offset = 0;
+	if (capture == nullptr) {
+		std::tie(mapped, offset) = m_download_buffer.Map(total_size, 64);
+	}
 	std::unique_ptr<Buffer> temporary;
 	if (mapped == nullptr) {
 		temporary = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::Download, 0,
@@ -350,6 +366,11 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	                       vk::PipelineStageFlagBits::eAllCommands |
 	                           vk::PipelineStageFlagBits::eHost,
 	                       {}, 0, nullptr, 1, &after, 0, nullptr);
+	if (capture != nullptr) {
+		for (const auto& copy: copies) {
+			capture->ranges.emplace_back(buffer_address + copy.srcOffset, copy.size);
+		}
+	}
 	auto publish = [this, mapped, offset, total_size, buffer_address,
 	                copies = std::move(copies), owner = std::move(temporary)] {
 		(owner ? *owner : m_download_buffer).Invalidate(offset, total_size);
@@ -358,7 +379,9 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			                                      mapped + (copy.dstOffset - offset), copy.size);
 		}
 	};
-	if constexpr (async) {
+	if (capture != nullptr) {
+		capture->publish = std::move(publish);
+	} else if constexpr (async) {
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else {
 		const auto tick       = m_scheduler.CurrentTick();
@@ -448,7 +471,10 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		std::scoped_lock lock {g_fault_pages_mutex};
 		g_fault_pages[vaddr & ~(TRACKER_PAGE_SIZE - 1)]++;
 	}
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, origin] {
+	const bool caller_wait = FaultWaitOnCallerEnabled() && !GuestGpu::IsGpuThread();
+	std::shared_ptr<CallerReadback> pending;
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, origin,
+	                                                caller_wait, &pending] {
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
 		}
@@ -481,13 +507,44 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				start = std::max(lo, start - TRACKER_PAGE_SIZE);
 			}
 		}
-		if (DownloadBufferMemory<false>(buffer, start, end - start)) {
+		if (caller_wait) {
+			if (!m_caller_readbacks.empty()) {
+				CompleteCallerReadbacks(start, end - start);
+			}
+			auto entry       = std::make_shared<CallerReadback>();
+			m_caller_capture = entry.get();
+			const bool taken = DownloadBufferMemory<true>(buffer, start, end - start);
+			m_caller_capture = nullptr;
+			if (taken) {
+				entry->start      = start;
+				entry->size       = end - start;
+				entry->is_write   = is_write;
+				entry->write_addr = vaddr;
+				entry->write_size = size;
+				entry->tick       = m_scheduler.CurrentTick();
+				m_scheduler.Flush();
+				m_caller_readbacks.push_back(entry);
+				pending = std::move(entry);
+				return;
+			}
+		} else if (DownloadBufferMemory<false>(buffer, start, end - start)) {
 			m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
 		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 		}
 	});
+	if (pending) {
+		// The GPU thread is free to keep recording while this (guest) thread waits.
+		const auto wait_start = std::chrono::steady_clock::now();
+		m_scheduler.GetMasterSemaphore().Wait(pending->tick);
+		if (stats) {
+			g_readback[static_cast<size_t>(origin)].wait_us.fetch_add(MicrosSince(wait_start),
+			                                                          std::memory_order_relaxed);
+		}
+		m_scheduler.Context().GetGpu().SendCommandSync(
+		    [this, pending] { FinalizeCallerReadback(*pending); });
+	}
 	if (stats) {
 		auto& c = g_readback[static_cast<size_t>(origin)];
 		c.count.fetch_add(1, std::memory_order_relaxed);
@@ -815,6 +872,53 @@ bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 
 bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 	return m_memory_tracker.IsRegionCpuModified(vaddr, size);
+}
+
+void BufferCache::FinalizeCallerReadback(CallerReadback& readback) {
+	if (readback.done) {
+		return;
+	}
+	readback.done = true;
+	std::erase_if(m_caller_readbacks, [&](const auto& entry) { return entry.get() == &readback; });
+	m_scheduler.Wait(readback.tick);
+	m_scheduler.WaitPriorityOperations(readback.tick);
+	bool redirtied = false;
+	for (const auto& [address, bytes]: readback.ranges) {
+		if (m_gpu_modified_ranges.Intersects(address, bytes)) {
+			redirtied = true;
+			break;
+		}
+	}
+	if (!redirtied) {
+		readback.publish();
+		m_memory_tracker.UnmarkRegionAsGpuModified(readback.start, readback.size);
+		if (readback.is_write) {
+			m_memory_tracker.MarkRegionAsCpuModified(readback.write_addr, readback.write_size);
+		}
+	} else {
+		// The GPU wrote some of these bytes again after the copy was recorded: drop this copy and
+		// hand the bytes back to the GPU-dirty set, so the retried access downloads fresh data.
+		for (const auto& [address, bytes]: readback.ranges) {
+			const auto page_lo = address & ~(TRACKER_PAGE_SIZE - 1);
+			const auto page_hi = Common::AlignUp(address + bytes, TRACKER_PAGE_SIZE);
+			if (m_memory_tracker.IsRegionGpuModified(page_lo, page_hi - page_lo)) {
+				m_gpu_modified_ranges.Add(address, bytes);
+			}
+		}
+	}
+	readback.publish = {};
+}
+
+void BufferCache::CompleteCallerReadbacks(uint64_t vaddr, uint64_t size) {
+	const auto end = vaddr + size;
+	for (size_t i = 0; i < m_caller_readbacks.size();) {
+		auto entry = m_caller_readbacks[i];
+		if (entry->start < end && vaddr < entry->start + entry->size) {
+			FinalizeCallerReadback(*entry); // erases it from the list
+			continue;
+		}
+		i++;
+	}
 }
 
 void BufferCache::RunGarbageCollector() {

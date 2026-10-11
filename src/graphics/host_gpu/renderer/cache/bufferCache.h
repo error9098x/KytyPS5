@@ -5,6 +5,7 @@
 #include "common/common.h"
 #include "common/lruCache.h"
 #include "common/slotVector.h"
+#include "common/uniqueFunction.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
@@ -12,6 +13,7 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <map>
+#include <memory>
 #include <span>
 #include <utility>
 #include <vector>
@@ -142,6 +144,25 @@ private:
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+
+	// KYTY_FAULT_WAIT_ON_CALLER=1: a guest thread's fault readback is recorded and submitted by
+	// the GPU thread, but the faulting thread waits for the GPU itself; the GPU thread then only
+	// publishes the bytes and updates page state (FinalizeCallerReadback) at a command boundary.
+	struct CallerReadback {
+		uint64_t                                    tick       = 0;
+		uint64_t                                    start      = 0;
+		uint64_t                                    size       = 0;
+		uint64_t                                    write_addr = 0;
+		uint64_t                                    write_size = 0;
+		bool                                        is_write   = false;
+		bool                                        done       = false;
+		std::vector<std::pair<uint64_t, uint64_t>> ranges; // GPU-dirty bytes taken (addr, size)
+		Common::UniqueFunction<void>                publish;
+	};
+	void FinalizeCallerReadback(CallerReadback& readback);
+	void CompleteCallerReadbacks(uint64_t vaddr, uint64_t size);
+	std::vector<std::shared_ptr<CallerReadback>> m_caller_readbacks;
+	CallerReadback*                              m_caller_capture = nullptr;
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
