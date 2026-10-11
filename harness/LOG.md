@@ -798,3 +798,43 @@ Causal proof (opt-in debug poke, commit 2de0bc80):
 - Profiles (`sample`, 10 s): menu GPU thread 62 % blocked in synchronous downloads (MaterializeColorClear 26 %, fault reads from guest threads 24 %, DrawIndirect self-faults 12 %); in-game GPU thread ~100 % busy: 36 % CommandScheduler::Wait (MaterializeColorClear 17.5 %, guest fault reads 11 %, DrawIndirect 3 %, aggressive buffer GC drain 7 %), MoltenVK addCommand (PREFILL=2) 20 %, PrepareBda 9 %, pipeline lookup + SRT walk 13 %. RenderThread waits ~47 % on the GPU side and ~12-32 % in fault readbacks.
 - Animal Well 3/3 with default flags after 55ecc06f (aw-regress-{1,2,3}-b1: stage 2, 32/42, 33/43, 33/43 content).
 - Still stage 2.
+
+
+## 2026-10-11 ~22:20 IST — Perf batch 2 (readback/drain removal), all opt-in, native 4K
+
+Profiling (`sample`, 10 s at 360 s, 4K) showed the guest GPU thread is the critical path in game: ~36 % of it blocked in full GPU drains (CommandScheduler::Wait), the rest CPU recording. Per-origin counters (KYTY_READBACK_STATS, shtsm-rb-stats-1) in game, per 2 s: clear-metadata 10-12 drains costing 0.6-1.1 s, CPU read faults ~130 (sequential 4 KiB pages of one GPU-written buffer, walked backwards), CPU write faults on GPU-dirty pages 90-275.
+
+New commits (all behind env flags, defaults unchanged):
+- 6ef9e0eb KYTY_READBACK_STATS=1 (ReadbackStats line every 2 s: count/bytes/caller wall/GPU wait per origin, hot fault pages, cpufill) and KYTY_FAULT_COALESCE=1 (a read or write fault on a GPU-dirty page downloads the whole contiguous GPU-dirty run inside the buffer, capped at 1 MiB, in one drain; only the written range becomes CPU-modified).
+- 5634afc3 KYTY_CLEAR_META_NOSYNC=1: a recognised uniform-fill compute over plain memory that no cached image aliases and no recorded GPU write dirtied is applied on the CPU (same rule DMA_DATA fills follow), so MaterializeColorClear no longer reads metadata back.
+- 97ee4c5e KYTY_BDA_SYNC_SKIP=1: PrepareBda (per draw) skips its full scan of every cached buffer when no page became CPU-modified, no buffer was registered and no range was mapped since the last complete scan (global CPU-dirty generation bumped in RegionManager::ChangeState / region creation / buffer register / MapMemory).
+- bbb414e7 KYTY_GC_DRAIN_INTERVAL=<n>: above the critical memory threshold the buffer GC's GPU-dirty retirement (download + full wait) runs only every n-th collection with up to 8x the batch; clean buffers still retire every collection.
+
+Effect (stats on in both arms):
+- clear drains 10-12 -> 0 per 2 s (cpufill 20-30 fills / 2 s instead); read faults ~130 -> ~15 per 2 s; write-fault drains ~100-275 -> 0-8 per 2 s (shtsm-rb-fix-2 vs shtsm-rb-stats-1).
+- GPU thread profile in game: readback waits 25-30 % -> ~16 %, PrepareBda 10 % -> 3 % (when the generation is stable), buffer-GC drain 17 % -> 3 % (shtsm-rb-all-1 vs shtsm-rb-gc-1). After this the guest RenderThread is busy ~69 % (guest JIT code) and becomes the co-critical path.
+- Visual: title menu still lit, in-game frames sane (shtsm-rb-fix-2 frame_001059 menu, 001650/001800 game; shtsm-rb-gc-1 001560/001620).
+- No OOM, no device loss in any 480 s run; GPU usage 8.0-8.7 GiB vs 8192 MiB budget; host swap 3-8 GB (machine-wide, 16 GB Air).
+- Animal Well (PPSA22520), 45 s each, stage 2 with content in every run:
+  - aw-regress-{1,2,3}-allflags: KYTY_CLEAR_META_NOSYNC + KYTY_FAULT_COALESCE + KYTY_BDA_SYNC_SKIP + KYTY_FAST_VRANGES + KYTY_UNMAP_FASTPATH (no GC interval in this set) -> 32/42, 33/43, 33/43 content/sampled. 3/3.
+  - aw-regress-{1,2,3}-allflags2 and -allflags3: the same plus KYTY_GC_DRAIN_INTERVAL=16 -> 24/34, 27/37, 29/39 and 28/38, 30/40, 30/40. 3/3 + 3/3.
+  - aw-regress-{1,2,3}-fastvr: KYTY_FAST_VRANGES=1 alone -> 30/40, 28/38, 25/35. 3/3.
+  - The lower sample counts in the later batches track machine state (each batch ran straight after a 480 s Silent Hill run, swap 3-8 GB): the FAST_VRANGES-only batch dropped the same way, so it is not attributable to the GC interval.
+
+## 2026-10-11 ~22:40 IST — batch 2 A/B at 4K (shtsm-ab-all-2 vs shtsm-ab-base-1), CPU fill pre-invalidate
+
+Uncommitted fix built and measured: TryConsumeComputeImageClear now calls BufferCache::InvalidateMemory over the whole range before the CPU fill (KYTY_CLEAR_META_NOSYNC path only), so the fill no longer takes one write fault per 4 KiB page.
+
+Same route as shtsm-ab-base-1 (F10 probe, J bootstrap x12, reaches the in-game phone-message scene), FPS per 40 s window (python3 /tmp/fpsw.py <run> 40):
+
+| window | base-1 (flags off) | all-1 (batch 2 + GC16) | all-2 (+ fill pre-invalidate) |
+|---|---|---|---|
+| 0-40 s (intro) | 24.7 | 14.2 | 14.1 |
+| 40-80 s | 13.9 | 6.9 | 6.3 |
+| 80-120 s | 4.9 | 7.3 | 6.6 |
+| 120-160 s | 1.5 | 2.1 | 2.5 |
+| 320-480 s (in game) | 1.0-1.2 | 1.35-1.43 | 1.35-1.57 |
+
+- The pre-invalidate does not fix the intro regression. ReadbackStats in the intro explains it: with the flags off, 64-168 clear-metadata drains per 2 s each wait only for a little GPU work (~1.5 s total wait, fault waits ~60 ms); with the flags on, clear drains are 0 but the 15 fault + 10 inval drains per 2 s each wait 30-100 ms for the whole unsubmitted backlog (0.4-1.2 s total). The readback flags move the GPU wait to the surviving drains; the general fix is submitting earlier (batch 3: KYTY_FLUSH_ON_LABEL) and waiting on the caller (KYTY_FAULT_WAIT_ON_CALLER).
+- In game the batch-2 flags are +25-40 % (1.0-1.15 -> 1.35-1.57 fps). Frame 1560 of shtsm-ab-all-2 (phone message) is visually sane. No OOM, no device loss.
+- KYTY_FAST_VRANGES becomes the default (Animal Well 3/3 with it alone and 6/6 with all flags); KYTY_FAST_VRANGES=0 restores the old path.
