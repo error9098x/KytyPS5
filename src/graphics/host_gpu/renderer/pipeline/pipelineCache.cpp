@@ -197,16 +197,16 @@ bool SrtMemoReadsUnchanged(const std::vector<SrtMemoRead>& reads) {
 	return true;
 }
 
-void SrtMemoNote(bool hit) {
-	static uint64_t hits = 0;
-	static uint64_t misses = 0;
-	static auto     last = std::chrono::steady_clock::now();
-	(hit ? hits : misses)++;
+void SrtMemoNote(int outcome) { // 0 hit, 1 miss (no slot with these inputs), 2 miss (words changed)
+	static std::array<uint64_t, 3> counts {};
+	static auto                    last = std::chrono::steady_clock::now();
+	counts[static_cast<size_t>(outcome)]++;
 	const auto now = std::chrono::steady_clock::now();
 	if (now - last >= std::chrono::seconds(2)) {
-		LOGF("SrtMemoStats: hit=%" PRIu64 " miss=%" PRIu64 "\n", hits, misses);
-		hits = misses = 0;
-		last = now;
+		LOGF("SrtMemoStats: hit=%" PRIu64 " miss_inputs=%" PRIu64 " miss_words=%" PRIu64 "\n",
+		     counts[0], counts[1], counts[2]);
+		counts = {};
+		last   = now;
 	}
 }
 
@@ -332,16 +332,21 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::vector<Permutation>                    permutations;
-		// KYTY_SRT_MEMO state: inputs and guest words of the last successful refresh.
-		struct {
-			bool                     valid       = false;
-			uint64_t                 shader_base = 0;
-			uint32_t                 cursor      = 0;
-			size_t                   permutation = 0;
-			std::vector<uint32_t>    user_data;
-			std::vector<uint32_t>    workgroup_counts;
-			std::vector<SrtMemoRead> reads;
-		} memo;
+		// KYTY_SRT_MEMO state: inputs, guest words and result of the last successful refreshes
+		// (a few slots, round robin, so draws that alternate between inputs still hit).
+		struct MemoSlot {
+			bool                                   valid       = false;
+			uint64_t                               shader_base = 0;
+			uint32_t                               cursor      = 0;
+			size_t                                 permutation = 0;
+			std::vector<uint32_t>                  user_data;
+			std::vector<uint32_t>                  workgroup_counts;
+			std::vector<SrtMemoRead>               reads;
+			ShaderRecompiler::IR::ResourceSnapshot snapshot;
+		};
+		static constexpr size_t      MemoSlots = 4;
+		std::array<MemoSlot, MemoSlots> memo {};
+		size_t                       memo_next = 0;
 	};
 
 	struct ProgramKeyHash {
@@ -419,27 +424,32 @@ struct PipelineCache::ProgramCache {
 		}
 		const bool memo_enabled = SrtMemoEnabled();
 		if (memo_enabled && entry != programs.end()) {
-			auto& memo = entry->second.memo;
-			if (memo.valid && memo.shader_base == runtime.shader_base &&
-			    memo.cursor == push_data_cursor &&
-			    memo.permutation < entry->second.permutations.size() &&
-			    std::ranges::equal(memo.user_data, user_data) &&
-			    std::ranges::equal(memo.workgroup_counts, runtime.workgroup_counts) &&
-			    SrtMemoReadsUnchanged(memo.reads)) {
+			int reason = 0; // 0 no slot with these inputs, 1 inputs matched but words changed
+			for (auto& memo: entry->second.memo) {
+				if (!memo.valid || memo.shader_base != runtime.shader_base ||
+				    memo.cursor != push_data_cursor ||
+				    memo.permutation >= entry->second.permutations.size() ||
+				    !std::ranges::equal(memo.user_data, user_data) ||
+				    !std::ranges::equal(memo.workgroup_counts, runtime.workgroup_counts)) {
+					continue;
+				}
+				if (!SrtMemoReadsUnchanged(memo.reads)) {
+					reason = 1;
+					memo.valid = false;
+					continue;
+				}
 				auto& permutation = entry->second.permutations[memo.permutation];
-				input_info.stage  = {.program   = &permutation.program,
-				                     .resources = &entry->second.resources};
+				input_info.stage  = {.program = &permutation.program, .resources = &memo.snapshot};
 				permutation.program.bindings.AdvancePushData(push_data_cursor);
-				SrtMemoNote(true);
+				SrtMemoNote(0);
 				return permutation.handle;
 			}
-			SrtMemoNote(false);
+			SrtMemoNote(reason == 0 ? 1 : 2);
 		}
 		std::vector<SrtMemoRead> memo_reads;
 		SrtMemoLog               memo_log {.reads = &memo_reads};
 		const uint32_t           memo_cursor = push_data_cursor;
 		if (memo_enabled && entry != programs.end()) {
-			entry->second.memo.valid = false;
 			runtime.userdata         = &memo_log;
 			runtime.read_memory      = SrtMemoOrdinaryRead;
 			runtime.read_specialization_memory = SrtMemoStrictRead;
@@ -463,7 +473,10 @@ struct PipelineCache::ProgramCache {
 				input_info.stage = {.program   = &permutation->program,
 				                    .resources = &entry->second.resources};
 				if (memo_enabled && !memo_log.overflow) {
-					auto& memo       = entry->second.memo;
+					auto& source     = entry->second;
+					auto& memo       = source.memo[source.memo_next];
+					source.memo_next = (source.memo_next + 1) % SourceEntry::MemoSlots;
+					memo.snapshot    = source.resources;
 					memo.valid       = true;
 					memo.shader_base = runtime.shader_base;
 					memo.cursor      = memo_cursor;
