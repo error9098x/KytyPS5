@@ -1,20 +1,18 @@
 # Active blockers
 
-## Silent Hill (PPSA10112), 2026-10-11 18:50 IST: current state (supersedes older Silent Hill sections)
+## Silent Hill (PPSA10112), 2026-10-11 19:20 IST: current state (supersedes older Silent Hill sections)
 
 - **Fixed:** Unreal "Ran out of memory" after Continue (`78019f9f`). Null descriptor set (`8ea17d3d`).
   Zeroed tonemap 3D LUT (`86ec37b3`, MeshScratch descriptor shared binding 56 with pixel Buffers).
-- **First blocker: the title-menu background is still black. Cause located: Unreal FFT (convolution)
-  bloom pre-filter clamps a scene that is not pre-exposed** (2026-10-11 18:50 IST; the earlier
-  "DOF chain" label was wrong). cs `0x2bfb24830d8fcfaa` (row FFT, forward + inverse) and
-  `0x674e5a7163897bc9` (column FFT + kernel multiply) are FFT bloom, and their output is the tonemap's
-  scene input. Both FFTs check out numerically. The forward pre-filter (UB Min/Max/Mult = 0.6/50/150 on the
-  menu) caps every pixel brighter than ~lum 0.9 at lum 50. The scene is at lum ~500, so the result is
-  flat and ~10x dark, which exposure 0.0003 turns black. Proof: with
-  `KYTY_DEBUG_BUFFER_POKE=0x2bfb24830d8fcfaa:0:0:3f199998:7f7fffff` (pre-filter off) the menu
-  background renders (shtsm-prefilter-off-3 frame_000780). Suspected root: Unreal View.PreExposure
-  is 1 (should track exposure), likely because the CPU readback of eye adaptation never reaches
-  guest memory. The LDS wave-sync hypothesis was tested and rejected (FFT shaders do use s_barrier).
+- **Fixed 2026-10-11 19:20 IST: black title-menu background** (`aeddbf04`). Silent Hill reads its
+  GPU-written linear eye-adaptation result back on the CPU to set Unreal View.PreExposure. Kyty's
+  linear-image readback was off, so PreExposure stayed 1 and the FFT-bloom pre-filter (cs
+  `0x2bfb24830d8fcfaa`, Min/Max/Mult 0.6/50/150) clamped the scene to black. Linear-image readback is
+  now on by default for PPSA10112 only (`KYTY_READBACK_LINEAR_IMAGES=0|1` overrides). Proof frames:
+  shtsm-rbdef-1 / shtsm-rbli-1 frame_000780.png (lit) vs shtsm-ldssync-3 frame_000780.png (black).
+  Animal Well 3/3 unchanged.
+- **First blocker now:** nothing past the title menu has been verified yet (New Game / gameplay), and
+  the menu presents at ~1 fps.
 - **Crash (worked around):** intermittent compute use-after-free in MoltenVK/AGX
   (`MVKCmdDispatch::encode` during `vkQueueSubmit`, ~60% at 40-60 s without the workaround).
   `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2` is clean 5/5 and is part of the Silent Hill route.
