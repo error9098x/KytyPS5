@@ -81,7 +81,29 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr,
 		if (ReadbackStats::Enabled()) {
 			ReadbackStats::NoteWriteFault(fault_vaddr);
 		}
-		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
+		// KYTY_WRITE_FAULT_SPAN=<pages> (opt-in): guest CPU writers (ring/uniform/vertex
+		// streams) walk tracked pages sequentially and take one fault per 4 KiB page. On a
+		// write fault, also lift write tracking of the following pages, up to <pages> in total,
+		// stopping at the first page that is unmapped, GPU-modified (that would need a
+		// readback) or owned by a cached image (that would force a texture re-upload). The
+		// extra pages only become CPU-modified, i.e. they are re-uploaded at the next sync.
+		static const uint64_t write_span_pages = [] {
+			const char* v = std::getenv("KYTY_WRITE_FAULT_SPAN");
+			return v == nullptr ? uint64_t {0} : std::min<uint64_t>(std::strtoull(v, nullptr, 10), 256);
+		}();
+		if (write_span_pages > 1) {
+			const uint64_t page_size = m_page_manager.GetPageSize();
+			const uint64_t first     = fault_vaddr & ~(page_size - 1u);
+			uint64_t       end       = first + page_size;
+			while ((end - first) / page_size < write_span_pages && IsMapped(end, page_size) &&
+			       !m_buffer_cache.IsRegionGpuModified(end, page_size) &&
+			       !m_texture_cache.IsRegionRegistered(end, page_size)) {
+				end += page_size;
+			}
+			m_buffer_cache.InvalidateMemory(first, end - first);
+		} else {
+			m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
+		}
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
 		ReadbackStats::Scope scope(ReadbackStats::Origin::Fault);
