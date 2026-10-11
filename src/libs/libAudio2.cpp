@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -179,6 +180,10 @@ struct AudioOut2ContextState {
 	uint64_t               last_update         = 0;
 	int                    object_audio_handle = 0;
 	std::vector<float>     object_mix;
+	// KYTY_AUDIO2_POLL_PACE bookkeeping: what the last GetQueueLevel returned and when.
+	uint64_t pace_last_return = 0;
+	uint32_t pace_last_level  = UINT32_MAX;
+	uint32_t pace_last_avail  = UINT32_MAX;
 };
 
 struct AudioOut2PortStateEntry {
@@ -627,6 +632,24 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t bloc
 	}
 }
 
+// KYTY_AUDIO2_POLL_PACE=1 (opt-in): some audio engines (Wwise's AK::EventManager in
+// PPSA10112) hot-poll GetQueueLevel in a loop with no blocking call, which pins one host core
+// at 100 % for the whole run. The answer can only change when the wall-clock drain retires the
+// next grain (or another thread pushes), so a repeated identical poll (same answer, previous
+// call < 200 us ago) sleeps once, outside the lock, until the next drain is due or for 1 ms,
+// whichever is sooner, and then returns the fresh answer. The first poll after any change always
+// returns immediately; an empty queue (no drain pending) is never paced.
+static bool audioout2_poll_pace_enabled() {
+	static const bool enabled = [] {
+		const char* v = std::getenv("KYTY_AUDIO2_POLL_PACE");
+		return v != nullptr && (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0);
+	}();
+	return enabled;
+}
+
+constexpr uint64_t AUDIO2_PACE_HOT_POLL_MICROS = 200;
+constexpr uint64_t AUDIO2_PACE_SLICE_MICROS    = 1000;
+
 int KYTY_SYSV_ABI AudioOut2ContextGetQueueLevel(AudioOut2ContextHandle ctx, uint32_t* queue_level,
                                                 uint32_t* available_queues) {
 	if (queue_level != nullptr) {
@@ -636,20 +659,65 @@ int KYTY_SYSV_ABI AudioOut2ContextGetQueueLevel(AudioOut2ContextHandle ctx, uint
 		*available_queues = 4;
 	}
 
-	g_audioout2_state_mutex.Lock();
-	if (auto* state = audioout2_find_context_locked(ctx); state != nullptr) {
-		audioout2_update_context_locked(state);
-		if (queue_level != nullptr) {
-			*queue_level = state->queued;
+	if (!audioout2_poll_pace_enabled()) {
+		g_audioout2_state_mutex.Lock();
+		if (auto* state = audioout2_find_context_locked(ctx); state != nullptr) {
+			audioout2_update_context_locked(state);
+			if (queue_level != nullptr) {
+				*queue_level = state->queued;
+			}
+			if (available_queues != nullptr) {
+				*available_queues =
+				    (state->queued < state->queue_depth ? state->queue_depth - state->queued : 0);
+			}
 		}
-		if (available_queues != nullptr) {
-			*available_queues =
-			    (state->queued < state->queue_depth ? state->queue_depth - state->queued : 0);
-		}
-	}
-	g_audioout2_state_mutex.Unlock();
+		g_audioout2_state_mutex.Unlock();
 
-	return OK;
+		return OK;
+	}
+
+	uint64_t paced_micros = 0;
+	for (;;) {
+		uint64_t sleep_micros = 0;
+		g_audioout2_state_mutex.Lock();
+		if (auto* state = audioout2_find_context_locked(ctx); state != nullptr) {
+			audioout2_update_context_locked(state);
+			const uint32_t level = state->queued;
+			const uint32_t avail =
+			    (state->queued < state->queue_depth ? state->queue_depth - state->queued : 0);
+			const uint64_t now   = LibKernel::KernelGetProcessTime();
+			const uint64_t grain = audioout2_grain_micros(state->num_grains);
+			const bool unchanged = (level == state->pace_last_level && avail == state->pace_last_avail);
+			const bool hot       = state->pace_last_return != 0 && now >= state->pace_last_return &&
+			                 now - state->pace_last_return < AUDIO2_PACE_HOT_POLL_MICROS;
+			// At most one slice per call, so a guest lock held around the poll is never held
+			// for more than ~1 ms longer than one spin iteration would have held it.
+			if (paced_micros == 0 && unchanged && hot && level != 0) {
+				const uint64_t next_drain = state->last_update + grain;
+				if (next_drain > now) {
+					sleep_micros = std::min(next_drain - now, AUDIO2_PACE_SLICE_MICROS);
+				}
+			}
+			if (sleep_micros == 0) {
+				state->pace_last_level  = level;
+				state->pace_last_avail  = avail;
+				state->pace_last_return = now;
+				if (queue_level != nullptr) {
+					*queue_level = level;
+				}
+				if (available_queues != nullptr) {
+					*available_queues = avail;
+				}
+			}
+		}
+		g_audioout2_state_mutex.Unlock();
+
+		if (sleep_micros == 0) {
+			return OK;
+		}
+		Common::Thread::SleepMicro(static_cast<uint32_t>(sleep_micros));
+		paced_micros += sleep_micros;
+	}
 }
 
 int KYTY_SYSV_ABI AudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut2PortParam* params,
