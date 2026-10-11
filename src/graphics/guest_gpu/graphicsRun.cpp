@@ -470,6 +470,22 @@ void GuestGpu::WaitForIdle() {
 	}
 }
 
+// KYTY_GPU_BLOCKED_BACKOFF=1 (opt-in): when every queue front is blocked (WAIT_REG_MEM / CE-DE
+// / rewind / predicate waits that only a guest CPU write or a GPU-completion callback can satisfy,
+// neither of which signals m_work_available), re-poll after 12, 25, 50, then 100 us instead of a
+// fixed 100 us. The schedule restarts whenever a submission completes or a command runs. Only the
+// timeout of an already-timed wait changes; signals still end the wait immediately.
+static bool GpuBlockedBackoffEnabled() {
+	static const bool enabled = [] {
+		const char* v = std::getenv("KYTY_GPU_BLOCKED_BACKOFF");
+		return v != nullptr && (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0);
+	}();
+	return enabled;
+}
+
+constexpr uint32_t GPU_BLOCKED_POLL_MICROS     = 100;
+constexpr uint32_t GPU_BLOCKED_POLL_MIN_MICROS = 12;
+
 void GuestGpu::ThreadRun(void* data) {
 	auto* gpu = static_cast<GuestGpu*>(data);
 	EXIT_IF(gpu == nullptr);
@@ -477,6 +493,9 @@ void GuestGpu::ThreadRun(void* data) {
 	ApplyCriticalThreadQos("gpu");
 	g_gpu_thread = true;
 	g_gpu_state  = gpu;
+
+	const bool blocked_backoff = GpuBlockedBackoffEnabled();
+	uint32_t   blocked_poll_us = GPU_BLOCKED_POLL_MIN_MICROS;
 
 	for (;;) {
 		Submission                   submission;
@@ -513,7 +532,12 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					uint32_t poll_us = GPU_BLOCKED_POLL_MICROS;
+					if (blocked_backoff) {
+						poll_us         = blocked_poll_us;
+						blocked_poll_us = std::min(blocked_poll_us * 2, GPU_BLOCKED_POLL_MICROS);
+					}
+					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, poll_us);
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
 							queue.front().blocked = false;
@@ -540,6 +564,7 @@ void GuestGpu::ThreadRun(void* data) {
 		if (command) {
 			EXIT_IF(g_current_processor != nullptr);
 			command();
+			blocked_poll_us = GPU_BLOCKED_POLL_MIN_MICROS;
 
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			gpu->m_processing = false;
@@ -563,6 +588,9 @@ void GuestGpu::ThreadRun(void* data) {
 			     static_cast<int64_t>(elapsed_us));
 		}
 
+		if (complete) {
+			blocked_poll_us = GPU_BLOCKED_POLL_MIN_MICROS;
+		}
 		Common::LockGuard lock(gpu->m_queue_mutex);
 		if (!complete) {
 			submission.blocked = true;
