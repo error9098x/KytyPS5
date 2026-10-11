@@ -1,5 +1,22 @@
 # Active blockers
 
+## Silent Hill (PPSA10112), 2026-10-11 15:45 IST: current state (supersedes older Silent Hill sections)
+
+- **Fixed:** Unreal "Ran out of memory" after Continue (`78019f9f`). Null descriptor set (`8ea17d3d`).
+  Zeroed tonemap 3D LUT (`86ec37b3`, MeshScratch descriptor shared binding 56 with pixel Buffers).
+- **First blocker: the title-menu background is still black.** `86ec37b3` fixed the LUT but not the
+  picture (the warning-screen doorway is a 2D asset; the `281db93e` claim was corrected in LOG).
+  The tonemap pass (ps `0x8b3b4df51624ff13`) outputs ~0.02% non-black pixels although the scene
+  colour, LUT and exposure (~0.0003, self-consistent with scene luminance ~450) look valid.
+  Forcing compute-written exposure to 1 (`KYTY_DEBUG_FORCE_EXPOSURE=1`, `shtsm-forceexp-2`) did not
+  help, but the menu's exposure is also written by a pixel shader (1x1 RGBA32F `0x8047290000`),
+  which the hook does not cover yet. Next: force that one too, or VGPR-bisect the tonemap ps.
+- **Crash (worked around):** intermittent compute use-after-free in MoltenVK/AGX
+  (`MVKCmdDispatch::encode` during `vkQueueSubmit`, ~60% at 40-60 s without the workaround).
+  `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2` is clean 5/5 and is part of the Silent Hill route.
+  Root cause still open.
+- Menu presents at ~1 fps.
+
 ## Apple vertex subgroup fallback
 
 MoltenVK 1.4.2 rejects `SubgroupLocalInvocationId` in Animal Well's first

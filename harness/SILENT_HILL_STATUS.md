@@ -2,6 +2,17 @@
 
 ## Where it is now
 
+**Update 2026-10-11 15:45 IST (supersedes conflicting lines below):**
+- Boots, plays the intro video, shows the warning screen, accepts Cross, and reaches the title menu
+  (`/tmp/titlerun.sh`). The OOM after Continue is fixed (`78019f9f`).
+- The title-menu 3D background is still black (first blocker; see BLOCKERS.md). The tonemap LUT is
+  now correct (`86ec37b3`), and exposure looks plausible; the black comes from the tonemap pass.
+- Route: `KYTY_MESH_SCRATCH_HOST=1 KYTY_MESH_SCRATCH_MB=256 KYTY_MESH_SCRATCH_DESCRIPTOR=1
+  MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2`
+  (PREFILL works around an intermittent MoltenVK compute use-after-free; clean 5/5).
+- Animal Well regression 3/3 after 46914434 (aw-regress-*-forceexp: stage 2, 33/43 content frames; 34/44 before, same 10 black boot frames).
+- Still stage 2. No gameplay soak or visual reference check has passed.
+
 - The game **boots and shows real screens**. The harness now captures the full warning/Continue
   screen, including its background and prompt.
 - The default physical-BDA scratch path still reaches Metal `InvalidResource`. A new opt-in
