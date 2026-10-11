@@ -238,6 +238,27 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 	bindings.shared_memory = {storage.Handle(), 0, size};
 }
 
+// KYTY_DISPATCH_TRACE=1: log compute dispatches (shader hash, group counts; indirect args are
+// read back from the GPU) from guest frame KYTY_DISPATCH_TRACE_MIN_FRAME and
+// KYTY_DISPATCH_TRACE_MIN_SECONDS (since the first dispatch) on, at most 400 lines.
+static bool DispatchTraceEnabled(CommandBuffer& buffer) {
+	static const bool enabled = std::getenv("KYTY_DISPATCH_TRACE") != nullptr;
+	static const int  min_frame = [] {
+		const char* value = std::getenv("KYTY_DISPATCH_TRACE_MIN_FRAME");
+		return value != nullptr ? std::atoi(value) : 0;
+	}();
+	static const double min_seconds = [] {
+		const char* value = std::getenv("KYTY_DISPATCH_TRACE_MIN_SECONDS");
+		return value != nullptr ? std::atof(value) : 0.0;
+	}();
+	static const auto start = std::chrono::steady_clock::now();
+	static std::atomic_uint lines = 0;
+	return enabled && buffer.GetContext().GetGpu().GetFrameNum() >= min_frame &&
+	       std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >=
+	           min_seconds &&
+	       lines.fetch_add(1) < 400u;
+}
+
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode) {
@@ -444,6 +465,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+	if (DispatchTraceEnabled(buffer)) {
+		LOGF("DispatchTrace: frame=%d cs=0x%016" PRIx64 " direct groups=%ux%ux%u\n",
+		     buffer.GetContext().GetGpu().GetFrameNum(), program.shader_hash, thread_group_x,
+		     thread_group_y, thread_group_z);
+	}
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
@@ -549,6 +575,46 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 	ResetBindings();
+	// Runs last: FlushAndWait retires vk_buffer.
+	if (DispatchTraceEnabled(buffer)) {
+		auto& scheduler = m_context.GetCommandScheduler();
+		const auto vk_buffer = scheduler.Current().Handle();
+		auto& dl        = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Download);
+		auto [mapped, offset] = dl.Map(sizeof(vk::DispatchIndirectCommand), 4);
+		uint32_t groups[3] {};
+		if (mapped != nullptr) {
+			dl.Commit();
+			vk::BufferMemoryBarrier to_copy {};
+			to_copy.srcAccessMask       = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite;
+			to_copy.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
+			to_copy.srcQueueFamilyIndex = to_copy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			to_copy.buffer              = args_buffer->Handle();
+			to_copy.offset              = args_offset;
+			to_copy.size                = sizeof(vk::DispatchIndirectCommand);
+			vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+			                          vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1,
+			                          &to_copy, 0, nullptr);
+			vk::BufferCopy copy {args_offset, offset, sizeof(vk::DispatchIndirectCommand)};
+			vk_buffer.copyBuffer(args_buffer->Handle(), dl.Handle(), copy);
+			vk::BufferMemoryBarrier to_host {};
+			to_host.srcAccessMask       = vk::AccessFlagBits::eTransferWrite;
+			to_host.dstAccessMask       = vk::AccessFlagBits::eHostRead;
+			to_host.srcQueueFamilyIndex = to_host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			to_host.buffer              = dl.Handle();
+			to_host.offset              = offset;
+			to_host.size                = sizeof(vk::DispatchIndirectCommand);
+			vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+			                          vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &to_host,
+			                          0, nullptr);
+			scheduler.FlushAndWait();
+			dl.Invalidate(offset, sizeof(vk::DispatchIndirectCommand));
+			std::memcpy(groups, mapped, sizeof(groups));
+		}
+		LOGF("DispatchTrace: frame=%d cs=0x%016" PRIx64 " indirect args=0x%010" PRIx64
+		     " groups=%ux%ux%u\n",
+		     buffer.GetContext().GetGpu().GetFrameNum(), program.shader_hash, args_addr, groups[0],
+		     groups[1], groups[2]);
+	}
 }
 
 } // namespace Libs::Graphics
