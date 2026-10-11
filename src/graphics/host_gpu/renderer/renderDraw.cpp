@@ -33,6 +33,7 @@
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
+#include <chrono>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -50,6 +51,19 @@
 #include <vector>
 
 namespace Libs::Graphics {
+
+// KYTY_INTERNAL_FRAME_MIN_SECONDS=N: internal frame stats only sample draws/dispatches recorded
+// N seconds or more after process start (e.g. the title menu instead of boot).
+static bool InternalFrameStatsFrameReached(const CommandBuffer& /*buffer*/) {
+	static const auto start = std::chrono::steady_clock::now();
+	static const int  min_seconds = [] {
+		const char* value = std::getenv("KYTY_INTERNAL_FRAME_MIN_SECONDS");
+		return value != nullptr ? std::atoi(value) : 0;
+	}();
+	return min_seconds == 0 ||
+	       std::chrono::steady_clock::now() - start >= std::chrono::seconds(min_seconds);
+}
+
 
 std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t index_offset,
 	                                           const ShaderVertexInputInfo& vs_input_info) {
@@ -1321,7 +1335,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			}
 		}
 	}
-	for (uint32_t i = 0; i < state.color_count; ++i) {
+	for (uint32_t i = 0; i < state.color_count && InternalFrameStatsFrameReached(buffer); ++i) {
 		const auto& color = state.color_info[i];
 		m_context.GetTextureCache().LogInternalFrameStats(
 		    color.image_id, color.desc.view_info.base_level, color.desc.view_info.base_layer,
@@ -1330,7 +1344,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	// KYTY_INTERNAL_FRAME_SAMPLED=1: also read back every texture the pixel shader samples.
 	static const bool log_sampled = std::getenv("KYTY_INTERNAL_FRAME_SAMPLED") != nullptr;
-	if (log_sampled && state.ps_active && bindings.pixel) {
+	if (log_sampled && state.ps_active && bindings.pixel && InternalFrameStatsFrameReached(buffer)) {
 		for (const auto& texture: bindings.pixel->images) {
 			m_context.GetTextureCache().LogInternalFrameStats(
 			    texture.image_id, texture.desc.view_info.base_level,

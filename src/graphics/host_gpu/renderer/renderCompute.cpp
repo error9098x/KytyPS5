@@ -25,6 +25,7 @@
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
+#include <chrono>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -37,6 +38,19 @@
 #include <vector>
 
 namespace Libs::Graphics {
+
+// KYTY_INTERNAL_FRAME_MIN_SECONDS=N: internal frame stats only sample draws/dispatches recorded
+// N seconds or more after process start (e.g. the title menu instead of boot).
+static bool InternalFrameStatsFrameReached(const CommandBuffer& /*buffer*/) {
+	static const auto start = std::chrono::steady_clock::now();
+	static const int  min_seconds = [] {
+		const char* value = std::getenv("KYTY_INTERNAL_FRAME_MIN_SECONDS");
+		return value != nullptr ? std::atoi(value) : 0;
+	}();
+	return min_seconds == 0 ||
+	       std::chrono::steady_clock::now() - start >= std::chrono::seconds(min_seconds);
+}
+
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
@@ -434,7 +448,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	// KYTY_INTERNAL_FRAME_STATS: also read back storage images written by compute dispatches.
-	if (std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr) {
+	if (std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr && InternalFrameStatsFrameReached(buffer)) {
 		for (uint32_t i = 0; i < program.info.images.size() && i < bindings.images.size(); i++) {
 			if (program.info.images[i].written) {
 				const auto& texture = bindings.images[i];
@@ -504,7 +518,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	// KYTY_INTERNAL_FRAME_STATS: also read back storage images written by compute dispatches.
-	if (std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr) {
+	if (std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr && InternalFrameStatsFrameReached(buffer)) {
 		for (uint32_t i = 0; i < program.info.images.size() && i < bindings.images.size(); i++) {
 			if (program.info.images[i].written) {
 				const auto& texture = bindings.images[i];
