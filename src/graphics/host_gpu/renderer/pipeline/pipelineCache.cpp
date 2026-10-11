@@ -24,6 +24,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
+#include <cstdlib>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -117,6 +119,95 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
 	return !values.empty() &&
 	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
+}
+
+// KYTY_SRT_MEMO=1: the per-draw resource walk (MaterializeResources) is a pure function of the
+// user data, shader base, workgroup counts and the guest words it reads. Log those words; on the
+// next lookup with identical inputs, re-read only the logged words and reuse the previous
+// snapshot and permutation when all of them are unchanged.
+bool SrtMemoEnabled() {
+	static const bool enabled = [] {
+		const char* v = std::getenv("KYTY_SRT_MEMO");
+		return v != nullptr && *v != '\0' && *v != '0';
+	}();
+	return enabled;
+}
+
+struct SrtMemoRead {
+	uint64_t address = 0;
+	uint32_t value   = 0;
+	bool     strict  = false;
+};
+
+struct SrtMemoLog {
+	static constexpr size_t  MaxWords = 512;
+	std::vector<SrtMemoRead>* reads    = nullptr;
+	bool                      overflow = false;
+
+	void Add(uint64_t address, std::span<const uint32_t> values, bool strict) {
+		if (overflow || reads->size() + values.size() > MaxWords) {
+			overflow = true;
+			return;
+		}
+		for (size_t i = 0; i < values.size(); i++) {
+			reads->push_back({address + i * sizeof(uint32_t), values[i], strict});
+		}
+	}
+};
+
+bool SrtMemoOrdinaryRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	// Same as the walker's default ordinary read (a direct load through the guest mapping).
+	std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
+	static_cast<SrtMemoLog*>(userdata)->Add(address, values, false);
+	return true;
+}
+
+bool SrtMemoStrictRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	if (!ReadShaderGuestMemory(nullptr, address, values)) {
+		return false;
+	}
+	static_cast<SrtMemoLog*>(userdata)->Add(address, values, true);
+	return true;
+}
+
+bool SrtMemoReadsUnchanged(const std::vector<SrtMemoRead>& reads) {
+	std::array<uint32_t, 64> scratch {};
+	for (size_t i = 0; i < reads.size();) {
+		size_t n = 1;
+		while (i + n < reads.size() && n < scratch.size() && reads[i + n].strict == reads[i].strict &&
+		       reads[i + n].address == reads[i].address + n * sizeof(uint32_t)) {
+			n++;
+		}
+		const auto span = std::span(scratch).first(n);
+		if (reads[i].strict) {
+			if (!ReadShaderGuestMemory(nullptr, reads[i].address, span)) {
+				return false;
+			}
+		} else {
+			std::memcpy(span.data(), reinterpret_cast<const void*>(reads[i].address),
+			            span.size_bytes());
+		}
+		for (size_t k = 0; k < n; k++) {
+			if (span[k] != reads[i + k].value) {
+				return false;
+			}
+		}
+		i += n;
+	}
+	return true;
+}
+
+void SrtMemoNote(bool hit) {
+	static uint64_t hits = 0;
+	static uint64_t misses = 0;
+	static auto     last = std::chrono::steady_clock::now();
+	(hit ? hits : misses)++;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - last >= std::chrono::seconds(2)) {
+		LOGF("SrtMemoStats: hit=%" PRIu64 " miss=%" PRIu64 "\n", hits, misses);
+		hits = misses = 0;
+		last = now;
+	}
 }
 
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
@@ -241,6 +332,16 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::vector<Permutation>                    permutations;
+		// KYTY_SRT_MEMO state: inputs and guest words of the last successful refresh.
+		struct {
+			bool                     valid       = false;
+			uint64_t                 shader_base = 0;
+			uint32_t                 cursor      = 0;
+			size_t                   permutation = 0;
+			std::vector<uint32_t>    user_data;
+			std::vector<uint32_t>    workgroup_counts;
+			std::vector<SrtMemoRead> reads;
+		} memo;
 	};
 
 	struct ProgramKeyHash {
@@ -316,10 +417,40 @@ struct PipelineCache::ProgramCache {
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			runtime.workgroup_counts = input_info.workgroup_counts;
 		}
+		const bool memo_enabled = SrtMemoEnabled();
+		if (memo_enabled && entry != programs.end()) {
+			auto& memo = entry->second.memo;
+			if (memo.valid && memo.shader_base == runtime.shader_base &&
+			    memo.cursor == push_data_cursor &&
+			    memo.permutation < entry->second.permutations.size() &&
+			    std::ranges::equal(memo.user_data, user_data) &&
+			    std::ranges::equal(memo.workgroup_counts, runtime.workgroup_counts) &&
+			    SrtMemoReadsUnchanged(memo.reads)) {
+				auto& permutation = entry->second.permutations[memo.permutation];
+				input_info.stage  = {.program   = &permutation.program,
+				                     .resources = &entry->second.resources};
+				permutation.program.bindings.AdvancePushData(push_data_cursor);
+				SrtMemoNote(true);
+				return permutation.handle;
+			}
+			SrtMemoNote(false);
+		}
+		std::vector<SrtMemoRead> memo_reads;
+		SrtMemoLog               memo_log {.reads = &memo_reads};
+		const uint32_t           memo_cursor = push_data_cursor;
+		if (memo_enabled && entry != programs.end()) {
+			entry->second.memo.valid = false;
+			runtime.userdata         = &memo_log;
+			runtime.read_memory      = SrtMemoOrdinaryRead;
+			runtime.read_specialization_memory = SrtMemoStrictRead;
+		}
 		if (entry != programs.end()) {
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 			    entry->second.resource_plan, runtime, entry->second.resources,
 			    entry->second.specialization));
+			runtime.userdata                   = nullptr;
+			runtime.read_memory                = nullptr;
+			runtime.read_specialization_memory = ReadShaderGuestMemory;
 			if (const auto permutation = std::ranges::find_if(
 			        entry->second.permutations, [&](const Permutation& candidate) {
 				        const auto& layout = candidate.program.bindings;
@@ -331,6 +462,18 @@ struct PipelineCache::ProgramCache {
 			    permutation != entry->second.permutations.end()) {
 				input_info.stage = {.program   = &permutation->program,
 				                    .resources = &entry->second.resources};
+				if (memo_enabled && !memo_log.overflow) {
+					auto& memo       = entry->second.memo;
+					memo.valid       = true;
+					memo.shader_base = runtime.shader_base;
+					memo.cursor      = memo_cursor;
+					memo.permutation =
+					    static_cast<size_t>(permutation - entry->second.permutations.begin());
+					memo.user_data.assign(user_data.begin(), user_data.end());
+					memo.workgroup_counts.assign(runtime.workgroup_counts.begin(),
+					                             runtime.workgroup_counts.end());
+					memo.reads = std::move(memo_reads);
+				}
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
 				return permutation->handle;
 			}
