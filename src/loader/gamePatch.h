@@ -16,6 +16,8 @@ bool Apply(const std::filesystem::path& plan_path, Program* main_program,
            const std::vector<Program*>& programs);
 bool ApplyPending(Program* program);
 void Clear();
+// KYTY_VIDEOOUT_RES=720|1080: shrink hard-coded 4K back buffers of known titles. Opt-in.
+void ApplyVideoOutResolution(Program* main_program);
 
 } // namespace GamePatch
 

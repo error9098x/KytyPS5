@@ -9,6 +9,7 @@
 #include "loader/systemContent.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -294,6 +295,65 @@ bool ApplyPending(Program* program) {
 	g_applied_cave_pages = std::move(g_pending_plan->cave_pages);
 	g_pending_plan.reset();
 	return true;
+}
+
+void ApplyVideoOutResolution(Program* main_program) {
+	const char* env = std::getenv("KYTY_VIDEOOUT_RES");
+	if (env == nullptr) {
+		return;
+	}
+	const auto height = std::strtoul(env, nullptr, 10);
+	if (height != 720 && height != 1080) {
+		return;
+	}
+	const uint32_t width = (height == 720 ? 1280u : 1920u);
+	std::string    title_id;
+	if (main_program == nullptr || main_program->base_vaddr == 0 ||
+	    !SystemContentParamSfoGetString("TITLE_ID", &title_id)) {
+		return;
+	}
+
+	struct Site {
+		uint64_t             rva;
+		std::vector<uint8_t> expected; // "mov edx, imm32" plus the preceding lea of the cvar name
+		uint32_t             value;
+	};
+	std::vector<Site> sites;
+	if (title_id == "PPSA10112") {
+		// Silent Hill: The Short Message 01.000.001: TAutoConsoleVariable registrations of
+		// PS5.DefaultBackBufferWidth (3840) and PS5.DefaultBackBufferHeight (2160). The RHI sizes
+		// its display buffers (sceVideoOutSetBufferAttribute2) and the viewport from them and
+		// ignores sceVideoOutGetOutputStatus.
+		sites.push_back({0x174d7d7,
+		                 {0x48, 0x8d, 0x35, 0x1a, 0x07, 0x3d, 0x05, 0x48, 0x8d, 0x0d, 0x87, 0xe4,
+		                  0x26, 0x05, 0xba, 0x00, 0x0f, 0x00, 0x00},
+		                 width});
+		sites.push_back({0x174d84a,
+		                 {0x48, 0x8d, 0x35, 0xdd, 0x06, 0x3d, 0x05, 0x48, 0x8d, 0x0d, 0x06, 0x25,
+		                  0x20, 0x05, 0xba, 0x70, 0x08, 0x00, 0x00},
+		                 static_cast<uint32_t>(height)});
+	}
+	if (sites.empty()) {
+		::printf("VideoOut resolution patch: no back-buffer patch known for %s\n", title_id.c_str());
+		return;
+	}
+	for (const auto& site: sites) {
+		const auto address = main_program->base_vaddr + site.rva;
+		if (!IsInsideProgram(*main_program, address, site.expected.size()) ||
+		    std::memcmp(reinterpret_cast<const void*>(address), site.expected.data(),
+		                site.expected.size()) != 0) {
+			::printf("VideoOut resolution patch: %s code does not match, not patched\n",
+			         title_id.c_str());
+			return;
+		}
+	}
+	for (const auto& site: sites) {
+		const auto imm = main_program->base_vaddr + site.rva + site.expected.size() - 4;
+		std::memcpy(reinterpret_cast<void*>(imm), &site.value, sizeof(site.value));
+		Common::VirtualMemory::FlushInstructionCache(imm, sizeof(site.value));
+	}
+	::printf("VideoOut resolution patch: %s default back buffer set to %ux%u\n", title_id.c_str(),
+	         width, static_cast<uint32_t>(height));
 }
 
 void Clear() {

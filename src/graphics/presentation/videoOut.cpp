@@ -60,6 +60,35 @@ constexpr int      VIDEO_OUT_BUFFER_INDEX_BLANK                         = -1;
 constexpr int      VIDEO_OUT_BUFFER_NUM_MAX                             = 16;
 constexpr size_t   VIDEO_OUT_FLIP_QUEUE_CAPACITY_DEFAULT                = 16;
 
+static uint32_t VideoOutResOverrideCode(uint32_t /*height*/) {
+	// 1 = non-4K output, the value already reported for resolution-detection titles on a
+	// sub-4K screen.
+	return 1u;
+}
+
+// Opt-in output-resolution override: KYTY_VIDEOOUT_RES=720|1080 makes VideoOut report a
+// non-4K display. Titles that hard-code their back-buffer size also need a per-title patch
+// (see Loader::GamePatch::ApplyVideoOutResolution). Unset, 2160, or any other value keeps the
+// default behaviour.
+static uint32_t VideoOutResOverrideHeight() {
+	static const uint32_t height = [] {
+		const char* env = std::getenv("KYTY_VIDEOOUT_RES");
+		uint32_t    h   = 0;
+		if (env != nullptr) {
+			const auto v = std::strtoul(env, nullptr, 10);
+			if (v == 720 || v == 1080) {
+				h = static_cast<uint32_t>(v);
+			}
+		}
+		if (h != 0) {
+			LOGF("VideoOut: KYTY_VIDEOOUT_RES=%u, reporting a non-4K output (resolution code %u)\n", h,
+			     VideoOutResOverrideCode(h));
+		}
+		return h;
+	}();
+	return height;
+}
+
 // Opt-in latency experiment: KYTY_MAX_PENDING_FLIPS=N (1..16) limits how many
 // guest flips may be queued ahead of presentation ("max buffered frames").
 static size_t FlipQueueCapacity() {
@@ -1818,6 +1847,14 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 	// Primary output reports 4K unless param.json Video-out Info enables resolution detection.
 	status->resolution =
 	    ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160 ? 1u : 2u);
+	if (const auto res = VideoOutResOverrideHeight(); res != 0) {
+		status->resolution = VideoOutResOverrideCode(res);
+		static std::atomic_bool logged {false};
+		if (!logged.exchange(true, std::memory_order_relaxed)) {
+			LOGF("VideoOutGetOutputStatus: handle=%d attribute3=0x%x resolution=%u (KYTY_VIDEOOUT_RES)\n",
+			     handle, static_cast<uint32_t>(attribute3), static_cast<uint32_t>(status->resolution));
+		}
+	}
 	status->dynamicRange = 1;
 	status->refreshRate =
 	    (ctx->output_mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ || Config::GetVblankFrequency() >= 119
