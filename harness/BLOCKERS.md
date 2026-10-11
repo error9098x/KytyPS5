@@ -1,16 +1,17 @@
 # Active blockers
 
-## Silent Hill (PPSA10112), 2026-10-11 15:45 IST: current state (supersedes older Silent Hill sections)
+## Silent Hill (PPSA10112), 2026-10-11 16:30 IST: current state (supersedes older Silent Hill sections)
 
 - **Fixed:** Unreal "Ran out of memory" after Continue (`78019f9f`). Null descriptor set (`8ea17d3d`).
   Zeroed tonemap 3D LUT (`86ec37b3`, MeshScratch descriptor shared binding 56 with pixel Buffers).
-- **First blocker: the title-menu background is still black.** `86ec37b3` fixed the LUT but not the
-  picture (the warning-screen doorway is a 2D asset; the `281db93e` claim was corrected in LOG).
-  The tonemap pass (ps `0x8b3b4df51624ff13`) outputs ~0.02% non-black pixels although the scene
-  colour, LUT and exposure (~0.0003, self-consistent with scene luminance ~450) look valid.
-  Forcing compute-written exposure to 1 (`KYTY_DEBUG_FORCE_EXPOSURE=1`, `shtsm-forceexp-2`) did not
-  help, but the menu's exposure is also written by a pixel shader (1x1 RGBA32F `0x8047290000`),
-  which the hook does not cover yet. Next: force that one too, or VGPR-bisect the tonemap ps.
+- **First blocker: the title-menu background is still black, and the black starts in the DOF chain**
+  (not exposure, not the tonemap). On menu frames the tonemap's scene input is the DOF-recombine
+  output (cs `0x2bfb24830d8fcfaa`, 4K B10G11R11), which is ~4.4x darker than the pre-post scene and
+  nearly uniform. The DOF gather layers (cs `0x778f33d239f78462`, `0x254033019fc671c8`,
+  `0x2213d0ab109940c8`) are only ~0.8% non-zero, and indirect dispatches `0xc3c3f948c9c86e1a` /
+  `0x447abe57e0af3240` get 0 groups. Forced exposure 1 makes the menu white and 0.003 shows a
+  foggy scene, so the tonemap and LUT work. Suspect: tile classification / indirect-arg building
+  under the wave64-on-subgroup-32 emulation (ballot, mbcnt, atomics, DPP, permlanex16, readlane 63).
 - **Crash (worked around):** intermittent compute use-after-free in MoltenVK/AGX
   (`MVKCmdDispatch::encode` during `vkQueueSubmit`, ~60% at 40-60 s without the workaround).
   `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2` is clean 5/5 and is part of the Silent Hill route.
