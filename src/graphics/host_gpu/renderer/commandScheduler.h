@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 #include "graphics/host_gpu/renderer/render.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 
@@ -46,7 +47,14 @@ public:
 
 	// Draws/dispatches recorded into the open command buffer since the last submit (early-flush
 	// heuristics, KYTY_FLUSH_ON_LABEL / KYTY_FLUSH_DRAWS).
-	void                   NoteWork() noexcept { ++m_work_since_submit; }
+	void NoteWork() noexcept {
+		if (m_work_since_submit++ == 0) {
+			m_first_work_time = std::chrono::steady_clock::now();
+		}
+	}
+	[[nodiscard]] std::chrono::steady_clock::time_point FirstWorkTime() const noexcept {
+		return m_first_work_time;
+	}
 	[[nodiscard]] uint32_t WorkSinceSubmit() const noexcept { return m_work_since_submit; }
 
 	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
@@ -106,6 +114,7 @@ private:
 	uint64_t                     m_priority_active_tick = 0;
 	OperationState               m_operation_state      = OperationState::Open;
 	uint32_t                     m_work_since_submit    = 0;
+	std::chrono::steady_clock::time_point m_first_work_time {};
 };
 
 } // namespace Libs::Graphics

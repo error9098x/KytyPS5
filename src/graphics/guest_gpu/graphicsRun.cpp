@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -661,7 +662,7 @@ bool GuestGpu::Process(Submission& submission) {
 			cp.PrepareCpuFlip(submission.flip_request_id);
 			break;
 		case SubmissionType::SuspendPoint:
-			cp.EmitGlobalBarrier();
+			cp.EmitGlobalBarrier(/*allow_early_flush=*/false); // BufferFlush follows
 			m_renderer.GetCommandScheduler().DeferPriorityOperation(
 			    [ready = m_suspend_point_ready] { ready->release(); });
 			cp.BufferFlush();
@@ -1311,7 +1312,7 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	MaybeEarlyFlush(true);
 }
 
-void CommandProcessor::EmitGlobalBarrier() {
+void CommandProcessor::EmitGlobalBarrier(bool allow_early_flush) {
 	{
 		Common::LockGuard lock(m_renderer.GetMutex());
 
@@ -1327,16 +1328,28 @@ void CommandProcessor::EmitGlobalBarrier() {
 		GetScheduler().EndRendering();
 		CurrentBuffer().Handle().pipelineBarrier2(dependency);
 	}
-	MaybeEarlyFlush(false);
+	if (allow_early_flush) {
+		MaybeEarlyFlush(false);
+	}
 }
 
 namespace {
 
 struct EarlyFlushConfig {
-	int      label_mode = 0;  // KYTY_FLUSH_ON_LABEL: 0 off, 1 only outside a pass, 2 may end the pass
-	uint32_t draws      = 0;  // KYTY_FLUSH_DRAWS: barrier flush after this many draws/dispatches
-	uint32_t min_draws  = 8;  // KYTY_FLUSH_MIN_DRAWS: never flush a smaller label batch
+	int      label_mode = 0;    // KYTY_FLUSH_ON_LABEL: 0 off, 1 only outside a pass, 2 may end the pass
+	uint32_t min_draws  = 8;    // KYTY_FLUSH_MIN_DRAWS: never flush a smaller label batch
+	uint32_t draws      = 0;    // KYTY_FLUSH_DRAWS: barrier budget in draws/dispatches (0 = off)
+	uint32_t budget_us  = 4000; // KYTY_FLUSH_DRAWS_US: barrier budget in recorded time (0 = off)
+	uint32_t budget_min = 8;    // KYTY_FLUSH_DRAWS_MIN: draws needed before the time budget fires
 };
+
+uint32_t EarlyFlushEnvU32(const char* name, uint32_t fallback) {
+	const char* v = std::getenv(name);
+	if (v == nullptr || *v == '\0') {
+		return fallback;
+	}
+	return static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+}
 
 const EarlyFlushConfig& GetEarlyFlushConfig() {
 	static const EarlyFlushConfig config = [] {
@@ -1344,15 +1357,22 @@ const EarlyFlushConfig& GetEarlyFlushConfig() {
 		if (const char* v = std::getenv("KYTY_FLUSH_ON_LABEL"); v != nullptr && *v != '\0') {
 			c.label_mode = std::atoi(v);
 		}
+		c.min_draws = EarlyFlushEnvU32("KYTY_FLUSH_MIN_DRAWS", c.min_draws);
+		// KYTY_FLUSH_DRAWS=1|true: budget flush with KYTY_FLUSH_DRAWS_N draws (default 128);
+		// KYTY_FLUSH_DRAWS=<n> (n > 1): budget of n draws.
 		if (const char* v = std::getenv("KYTY_FLUSH_DRAWS"); v != nullptr && *v != '\0') {
-			c.draws = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+			const auto n = std::strtoul(v, nullptr, 10);
+			if (std::strcmp(v, "true") == 0 || n == 1) {
+				c.draws = std::max<uint32_t>(EarlyFlushEnvU32("KYTY_FLUSH_DRAWS_N", 128), 1u);
+			} else {
+				c.draws = static_cast<uint32_t>(n);
+			}
 		}
-		if (const char* v = std::getenv("KYTY_FLUSH_MIN_DRAWS"); v != nullptr && *v != '\0') {
-			c.min_draws = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
-		}
+		c.budget_us  = EarlyFlushEnvU32("KYTY_FLUSH_DRAWS_US", c.budget_us);
+		c.budget_min = std::max<uint32_t>(EarlyFlushEnvU32("KYTY_FLUSH_DRAWS_MIN", c.budget_min), 1u);
 		if (c.label_mode != 0 || c.draws != 0) {
-			LOGF("EarlyFlush: label_mode=%d draws=%u min_draws=%u\n", c.label_mode, c.draws,
-			       c.min_draws);
+			LOGF("EarlyFlush: label_mode=%d min_draws=%u draws=%u us=%u budget_min=%u\n",
+			     c.label_mode, c.min_draws, c.draws, c.budget_us, c.budget_min);
 		}
 		return c;
 	}();
@@ -1375,11 +1395,23 @@ void CommandProcessor::MaybeEarlyFlush(bool label) {
 		return;
 	}
 	const uint32_t work = scheduler.WorkSinceSubmit();
-	if (work < (label ? config.min_draws : config.draws)) {
-		return;
+	bool           by_time = false;
+	if (label) {
+		if (work < config.min_draws) {
+			return;
+		}
+	} else if (work < config.draws) {
+		// Draw budget not reached: the recorded-time budget (barrier boundaries only) may fire.
+		if (config.budget_us == 0 || work < config.budget_min ||
+		    std::chrono::steady_clock::now() - scheduler.FirstWorkTime() <
+		        std::chrono::microseconds(config.budget_us)) {
+			return;
+		}
+		by_time = true;
 	}
 	static uint64_t label_flushes   = 0;
 	static uint64_t barrier_flushes = 0;
+	static uint64_t time_flushes    = 0;
 	static uint64_t skipped_pass    = 0;
 	static uint64_t flushed_work    = 0;
 	static auto     last_report     = std::chrono::steady_clock::now();
@@ -1391,14 +1423,14 @@ void CommandProcessor::MaybeEarlyFlush(bool label) {
 		scheduler.EndRendering();
 	}
 	scheduler.Flush();
-	(label ? label_flushes : barrier_flushes)++;
+	(label ? label_flushes : by_time ? time_flushes : barrier_flushes)++;
 	flushed_work += work;
 	const auto now = std::chrono::steady_clock::now();
 	if (now - last_report >= std::chrono::seconds(2)) {
-		LOGF("EarlyFlushStats: label=%" PRIu64 " barrier=%" PRIu64 " skipped_in_pass=%" PRIu64
-		       " work=%" PRIu64 "\n",
-		       label_flushes, barrier_flushes, skipped_pass, flushed_work);
-		label_flushes = barrier_flushes = skipped_pass = flushed_work = 0;
+		LOGF("EarlyFlushStats: label=%" PRIu64 " by_draws=%" PRIu64 " by_time=%" PRIu64
+		     " skipped_in_pass=%" PRIu64 " work=%" PRIu64 "\n",
+		     label_flushes, barrier_flushes, time_flushes, skipped_pass, flushed_work);
+		label_flushes = barrier_flushes = time_flushes = skipped_pass = flushed_work = 0;
 		last_report = now;
 	}
 }
