@@ -50,6 +50,9 @@ public:
 	[[nodiscard]] vk::ImageView FindTexture(ImageId id, const ImageDesc& desc);
 	[[nodiscard]] vk::ImageView FindRenderTarget(ImageId id, const ImageDesc& desc);
 	[[nodiscard]] vk::ImageView FindDepthTarget(ImageId id, const ImageDesc& desc);
+	// KYTY_RETIRE_ON_LAST_USE=1: destroy retired images after their last recorded use instead
+	// of after the tick that was current when they were retired. Parsed once.
+	[[nodiscard]] static bool RetireOnLastUse() noexcept;
 	[[nodiscard]] Image&        GetImage(ImageId id) {
 		auto& image = m_slot_images[id];
 		TouchImage(image);
@@ -78,6 +81,7 @@ public:
 	void RunGarbageCollector();
 
 private:
+	void EraseRetiredImage(ImageId id);
 	enum class TransferDirection { Upload, Download };
 	struct TextureTransfer;
 	struct ImageDownload;

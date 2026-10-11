@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cinttypes>
 #include <cstdlib>
@@ -338,10 +339,65 @@ void TextureCache::DeleteImage(ImageId id) {
 	}
 	UnregisterImage(id);
 	if (m_scheduler.Active()) {
-		m_scheduler.DeferOperation([this, id] { m_slot_images.erase(id); });
+		if (RetireOnLastUse()) {
+			m_scheduler.DeferOperation([this, id] { EraseRetiredImage(id); });
+		} else {
+			m_scheduler.DeferOperation([this, id] { m_slot_images.erase(id); });
+		}
 	} else {
 		m_slot_images.erase(id);
 	}
+}
+
+bool TextureCache::RetireOnLastUse() noexcept {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_RETIRE_ON_LAST_USE");
+		const bool on = value != nullptr &&
+		                (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+		if (on) {
+			LOGF("[retire-last-use] enabled: retired images wait for their last recorded use\n");
+		}
+		return on;
+	}();
+	return enabled;
+}
+
+// Runs as a deferred operation, i.e. once the tick current at retirement is free. A view captured
+// by a draw/dispatch preparation before the image was retired can still be recorded into a later
+// command buffer, because preparation may submit synchronously (CommandScheduler::Wait on the
+// current tick, buffer downloads, stream-buffer wraps). With MoltenVK's deferred encoding
+// (PREFILL=0/1) that later command buffer reads the MVKImageView at encode time, so the view must
+// outlive it. Postpone the erase while a preparation pins the image or while the newest command
+// buffer that recorded it is still pending.
+void TextureCache::EraseRetiredImage(ImageId id) {
+	auto* image = m_slot_images.try_get(id);
+	if (image == nullptr) {
+		return;
+	}
+	const uint64_t last_use = image->last_use_tick;
+	const bool     pinned   = last_use == Image::PinnedTick;
+	if ((pinned || !m_scheduler.IsFree(last_use)) && m_scheduler.Active() &&
+	    m_scheduler.AcceptsDeferredOperations()) {
+		static std::atomic<uint64_t> postponed {0};
+		const auto count = postponed.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (count <= 32 || (count & (count - 1)) == 0) {
+			LOGF("[retire-last-use] postponed image erase #%" PRIu64 " guest=0x%016" PRIx64
+			     " pinned=%d last_use=%" PRIu64 " current=%" PRIu64 " gpu=%" PRIu64 "\n",
+			     count, image->info.data.address, pinned ? 1 : 0, pinned ? 0 : last_use,
+			     m_scheduler.CurrentTick(), m_scheduler.GetMasterSemaphore().KnownGpuTick());
+		}
+		// Re-queued at CurrentTick(), which is not submitted yet, so PopPendingOperations stops
+		// at it: no spin. The queue stays ordered by tick because CurrentTick() is the maximum.
+		m_scheduler.DeferOperation([this, id] { EraseRetiredImage(id); });
+		return;
+	}
+	if (!pinned && last_use != 0 && last_use < m_scheduler.CurrentTick() &&
+	    !m_scheduler.IsFree(last_use)) {
+		// Shutdown drain: DeferOperation would run inline. Ticks below CurrentTick() are
+		// submitted, so this wait is bounded.
+		m_scheduler.GetMasterSemaphore().Wait(last_use);
+	}
+	m_slot_images.erase(id);
 }
 
 void TextureCache::FreeImage(ImageId id) {

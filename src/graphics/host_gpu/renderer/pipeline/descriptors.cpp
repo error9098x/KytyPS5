@@ -753,19 +753,34 @@ void RenderExecutor::BindImage(ImageId id, bool storage) {
 	}
 	image.binding.is_bound = true;
 	image.binding.shader_write |= storage;
+	if (TextureCache::RetireOnLastUse()) {
+		// Pinned until ResetBindings: the view captured for this draw may be recorded after a
+		// synchronous submit, i.e. into a command buffer newer than the image's retire tick.
+		image.last_use_tick = Image::PinnedTick;
+	}
 	m_bound_images.push_back(id);
 }
 
 void RenderExecutor::BindRenderTarget(ImageId id) {
 	auto& image             = m_context.GetTextureCache().GetImage(id);
 	image.binding.is_target = true;
+	if (TextureCache::RetireOnLastUse()) {
+		image.last_use_tick = Image::PinnedTick;
+	}
 	m_bound_images.push_back(id);
 }
 
 void RenderExecutor::ResetBindings() {
+	const bool     retire_on_last_use = TextureCache::RetireOnLastUse();
+	const uint64_t current_tick =
+	    retire_on_last_use ? m_context.GetCommandScheduler().CurrentTick() : 0;
 	for (const auto id: m_bound_images) {
 		if (auto* image = m_context.GetTextureCache().m_slot_images.try_get(id); image != nullptr) {
 			image->binding = {};
+			if (retire_on_last_use) {
+				// Every use of this draw is recorded into a command buffer <= the current one.
+				image->last_use_tick = current_tick;
+			}
 		}
 	}
 	m_bound_images.clear();
@@ -1196,6 +1211,11 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		for (uint32_t i = 0; i < program.info.images.size(); i++) {
 			auto& image   = m_context.GetTextureCache().GetImage(descriptors.images[i].image_id);
 			auto& binding = descriptors.images[i];
+			if (TextureCache::RetireOnLastUse() && image.last_use_tick != Image::PinnedTick) {
+				// Not pinned (empty-data images skip BindImage): stamp the recording tick.
+				image.last_use_tick = std::max(image.last_use_tick,
+				                               m_context.GetCommandScheduler().CurrentTick());
+			}
 			const auto&                 view = binding.desc.view_info;
 			const ImageSubresourceRange range {view.base_level, view.level_count, view.base_layer,
 			                                   view.layer_count};

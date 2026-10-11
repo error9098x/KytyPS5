@@ -44,6 +44,9 @@ public:
 	void                      DeferPriorityOperation(Common::UniqueFunction<void>&& operation);
 	[[nodiscard]] bool        HasPendingPriorityOperations();
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
+	// True while DeferOperation queues (Open). Once shutdown starts, DeferOperation runs the
+	// callback inline, so a callback must not re-queue itself unconditionally.
+	[[nodiscard]] bool AcceptsDeferredOperations();
 
 	// Draws/dispatches recorded into the open command buffer since the last submit (early-flush
 	// heuristics, KYTY_FLUSH_ON_LABEL / KYTY_FLUSH_DRAWS).

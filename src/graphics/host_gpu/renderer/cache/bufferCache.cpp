@@ -447,7 +447,20 @@ void BufferCache::DeleteBuffer(BufferId id) {
 	}
 	Unregister(id);
 	if (m_scheduler.Active()) {
-		m_scheduler.DeferOperation([this, id] { m_slot_buffers.erase(id); });
+		if (TextureCache::RetireOnLastUse()) {
+			// Same hazard as images for DescriptorBufferInfos captured by a draw preparation, but
+			// buffers have no per-draw pin list: keep the buffer alive for one more submission
+			// past the first point at which its retire tick is free.
+			m_scheduler.DeferOperation([this, id] {
+				if (m_scheduler.Active() && m_scheduler.AcceptsDeferredOperations()) {
+					m_scheduler.DeferOperation([this, id] { m_slot_buffers.erase(id); });
+				} else {
+					m_slot_buffers.erase(id);
+				}
+			});
+		} else {
+			m_scheduler.DeferOperation([this, id] { m_slot_buffers.erase(id); });
+		}
 	} else {
 		m_slot_buffers.erase(id);
 	}

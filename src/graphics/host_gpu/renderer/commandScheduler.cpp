@@ -288,6 +288,11 @@ void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, 
 	operation();
 }
 
+bool CommandScheduler::AcceptsDeferredOperations() {
+	std::lock_guard lock(m_operation_mutex);
+	return m_operation_state == OperationState::Open;
+}
+
 bool CommandScheduler::HasPendingPriorityOperations() {
 	std::lock_guard lock(m_operation_mutex);
 	return !m_priority_operations.empty() || m_priority_active;

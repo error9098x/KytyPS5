@@ -153,6 +153,11 @@ public:
 	ImageSubresourceRange stencil_subresources;
 	uint64_t         tick_accessed_last = 0;
 	size_t           lru_id             = 0;
+	// KYTY_RETIRE_ON_LAST_USE=1 only. Newest scheduler tick whose command buffer recorded a use
+	// of this image's views, or PinnedTick while a draw/dispatch preparation holds a captured
+	// view that is not recorded yet. A retired image is destroyed only once this tick is free.
+	static constexpr uint64_t PinnedTick    = ~uint64_t {0};
+	uint64_t                  last_use_tick = 0;
 
 private:
 	friend struct ImageTestAccess;
