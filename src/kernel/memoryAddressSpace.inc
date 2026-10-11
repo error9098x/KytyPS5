@@ -104,7 +104,35 @@ public:
 			m_fd = -1;
 			return;
 		}
-		auto* backing = mmap(nullptr, m_size, PROT_READ | PROT_WRITE, MAP_SHARED, m_fd, 0);
+		void* backing = MAP_FAILED;
+		if (const char* import = std::getenv("KYTY_GUEST_IMPORT");
+		    import != nullptr && (std::strcmp(import, "1") == 0 || std::strcmp(import, "true") == 0)) {
+			// KYTY_GUEST_IMPORT: guest buffers are imported from this alias in 16 KiB units. An
+			// x86_64 process under Rosetta sees 4 KiB pages, so mmap may return an address that is
+			// only 4 KiB aligned; reserve 16 KiB of slack and place the alias on a 16 KiB boundary.
+			constexpr uint64_t kAlign  = 0x4000;
+			void*              reserve = mmap(nullptr, m_size + kAlign, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+			if (reserve != MAP_FAILED) {
+				const auto base    = reinterpret_cast<uintptr_t>(reserve);
+				const auto aligned = (base + kAlign - 1) & ~static_cast<uintptr_t>(kAlign - 1);
+				backing = mmap(reinterpret_cast<void*>(aligned), m_size, PROT_READ | PROT_WRITE,
+				               MAP_SHARED | MAP_FIXED, m_fd, 0);
+				if (backing == MAP_FAILED) {
+					munmap(reserve, m_size + kAlign);
+				} else {
+					if (aligned > base) {
+						munmap(reserve, aligned - base);
+					}
+					const auto tail = base + m_size + kAlign - (aligned + m_size);
+					if (tail != 0) {
+						munmap(reinterpret_cast<void*>(aligned + m_size), tail);
+					}
+				}
+			}
+		}
+		if (backing == MAP_FAILED) {
+			backing = mmap(nullptr, m_size, PROT_READ | PROT_WRITE, MAP_SHARED, m_fd, 0);
+		}
 		if (backing == MAP_FAILED) {
 			LOGF_COLOR(Log::Color::Red, "\t direct-memory backing: writable alias failed: %d\n",
 			           errno);
@@ -262,6 +290,43 @@ public:
 			std::memcpy(destination + (current - vaddr), m_backing_base + offset, bytes);
 			current += bytes;
 		}
+		return true;
+	}
+
+	// KYTY_GUEST_IMPORT: host address of the writable backing alias that holds [vaddr, vaddr+size),
+	// when the whole range is mapped direct memory with one contiguous backing range. The alias is
+	// never re-mapped or protected, so it stays valid while guest views of it are remapped.
+	bool TryGetContiguousBacking(uint64_t vaddr, uint64_t size, uint64_t* host) {
+		if (!IsAvailable() || host == nullptr || size == 0 || UINT64_MAX - vaddr < size) {
+			return false;
+		}
+		std::shared_lock lock(m_mutex);
+		const auto end   = vaddr + size;
+		auto       first = m_maps.upper_bound(vaddr);
+		if (first == m_maps.begin()) {
+			return false;
+		}
+		--first;
+		if (vaddr < first->second.vaddr || vaddr >= first->second.vaddr + first->second.size) {
+			return false;
+		}
+		const auto base_offset = first->second.backing_offset + (vaddr - first->second.vaddr);
+		auto       current     = vaddr;
+		for (auto mapping = first; current < end; ++mapping) {
+			if (mapping == m_maps.end() || current < mapping->second.vaddr ||
+			    current >= mapping->second.vaddr + mapping->second.size) {
+				return false;
+			}
+			const auto& entry = mapping->second;
+			if (entry.backing_offset + (current - entry.vaddr) != base_offset + (current - vaddr)) {
+				return false; // the next view maps a different part of the backing
+			}
+			current = std::min(end, entry.vaddr + entry.size);
+		}
+		if (!RangeOk(base_offset, size)) {
+			return false;
+		}
+		*host = reinterpret_cast<uint64_t>(m_backing_base + base_offset);
 		return true;
 	}
 
@@ -789,6 +854,26 @@ public:
 
 	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 		return m_backing->TryReadBacking(vaddr, data, size);
+	}
+
+	bool TryGetContiguousBacking(uint64_t vaddr, uint64_t size, uint64_t* host) {
+		if (!Owns(vaddr, size)) {
+			return false;
+		}
+		{
+			std::shared_lock lock(m_mutex);
+			auto            mapping = m_mapped.upper_bound(vaddr);
+			if (mapping != m_mapped.begin()) {
+				--mapping;
+			}
+			for (; mapping != m_mapped.end() && mapping->second.vaddr < vaddr + size; ++mapping) {
+				const auto& region = mapping->second;
+				if (region.type == MappingType::Private && region.vaddr + region.size > vaddr) {
+					return false; // flexible / private memory has no shared backing
+				}
+			}
+		}
+		return m_backing->TryGetContiguousBacking(vaddr, size, host);
 	}
 
 	bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {

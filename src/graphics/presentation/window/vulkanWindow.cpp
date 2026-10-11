@@ -11,6 +11,7 @@
 #include "common/threads.h"
 #include "common/timer.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/cache/guestImport.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -25,6 +26,7 @@
 #include "loader/systemContent.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
@@ -1046,6 +1048,12 @@ void WindowContext::CreateVulkan() {
 				device_extensions.push_back(extension);
 			}
 		}
+		// KYTY_GUEST_IMPORT=1: import guest buffer memory (MoltenVK: newBufferWithBytesNoCopy).
+		if (GuestImport::Enabled() &&
+		    HasExtension(available_extensions, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
+			device_extensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+			graphic_ctx.external_memory_host_enabled = true;
+		}
 		if (HasExtension(available_extensions, VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME) &&
 		    HasExtension(available_extensions, VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME)) {
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
@@ -1058,6 +1066,25 @@ void WindowContext::CreateVulkan() {
 		EXIT("Could not create device");
 	}
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(graphic_ctx.device);
+	if (graphic_ctx.external_memory_host_enabled) {
+		vk::PhysicalDeviceExternalMemoryHostPropertiesEXT host_properties {};
+		vk::PhysicalDeviceProperties2                     properties2 {};
+		properties2.pNext = &host_properties;
+		graphic_ctx.physical_device.getProperties2(&properties2);
+		graphic_ctx.min_imported_host_pointer_alignment =
+		    host_properties.minImportedHostPointerAlignment;
+		if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetMemoryHostPointerPropertiesEXT == nullptr ||
+		    host_properties.minImportedHostPointerAlignment == 0) {
+			graphic_ctx.external_memory_host_enabled = false;
+		}
+		LOGF("GuestImport: VK_EXT_external_memory_host %s, minImportedHostPointerAlignment=%" PRIu64
+		     "\n",
+		     graphic_ctx.external_memory_host_enabled ? "enabled" : "unusable",
+		     static_cast<uint64_t>(host_properties.minImportedHostPointerAlignment));
+	} else if (GuestImport::Enabled()) {
+		LOGF("GuestImport: KYTY_GUEST_IMPORT=1 but VK_EXT_external_memory_host is unavailable; "
+		     "using the copying buffer cache\n");
+	}
 	graphic_ctx.device.getQueue(graphic_ctx.queue_family, 0, &graphic_ctx.queue);
 	EXIT_IF(graphic_ctx.queue == nullptr);
 

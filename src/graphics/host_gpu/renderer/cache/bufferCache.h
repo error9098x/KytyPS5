@@ -9,12 +9,14 @@
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
+#include "graphics/host_gpu/renderer/cache/guestImport.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/cache/writeTickMap.h"
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <utility>
 #include <vector>
@@ -79,11 +81,13 @@ public:
 	void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
 	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false);
 	[[nodiscard]] Buffer&  GetBuffer(BufferId id) { return m_slot_buffers[id]; }
-	[[nodiscard]] BufferId FindBuffer(uint64_t vaddr, uint64_t size);
-	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBuffer(uint64_t vaddr, uint64_t size,
-	                                                        bool     is_written,
-	                                                        bool     is_texel_buffer = false,
-	                                                        BufferId id              = {});
+	// import_class only matters with KYTY_GUEST_IMPORT=1, when it decides whether a buffer that
+	// this call creates may be imported (KYTY_GUEST_IMPORT_CLASSES).
+	[[nodiscard]] BufferId FindBuffer(uint64_t vaddr, uint64_t size,
+	                                  GuestImport::Class import_class = GuestImport::Class::Other);
+	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBuffer(
+	    uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer = false,
+	    BufferId id = {}, GuestImport::Class import_class = GuestImport::Class::Other);
 	[[nodiscard]] StreamBuffer&                GetUtilityBuffer(MemoryUsage usage) noexcept {
 		switch (usage) {
 			case MemoryUsage::Upload: return m_staging_buffer;
@@ -109,6 +113,15 @@ public:
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();
+	// KYTY_GUEST_IMPORT: guest unmap of a range (GPU thread, after its users have finished).
+	void RetireImportsInRange(uint64_t vaddr, uint64_t size);
+	// KYTY_GUEST_IMPORT: a shader that can read any registered buffer through BDA is recorded.
+	void NoteBdaUse() noexcept;
+	// KYTY_GUEST_IMPORT: the current PM4 packet is fully recorded (see m_import_pending).
+	void CommitImportUses() noexcept {
+		m_import_pending.clear();
+		m_import_bda_pending = false;
+	}
 
 	// KYTY_READBACK_PRODUCER_TICK=1: a synchronous readback whose GPU-dirty bytes were all written
 	// by an already-submitted command buffer copies them in a side command buffer and waits only
@@ -149,7 +162,19 @@ private:
 	void GrowJoinedBuffer(OverlapResult& overlap, uint64_t request_begin, uint64_t request_end,
 	                      bool stats);
 	void JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumulate_stream_score);
-	[[nodiscard]] BufferId CreateBuffer(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] BufferId CreateBuffer(uint64_t vaddr, uint64_t size,
+	                                    GuestImport::Class import_class = GuestImport::Class::Other);
+	// KYTY_GUEST_IMPORT helpers.
+	[[nodiscard]] bool     TryPrepareImport(uint64_t vaddr, uint64_t size, GuestImport::Class import_class,
+	                                        Buffer::ImportedMemory& imported);
+	void                   NoteImportUse(Buffer& buffer, uint64_t vaddr, uint64_t size, bool write);
+	[[nodiscard]] uint64_t ImportPendingUse(uint64_t vaddr, uint64_t size) const;
+	[[nodiscard]] bool     ImportHasPendingUse(uint64_t vaddr, uint64_t size);
+	void                   ImportWaitTick(uint64_t tick);
+	void                   ImportBeforeCpuWrite(uint64_t vaddr, uint64_t size);
+	void                   ProcessImportUnmarks();
+	void                   ProcessImportDemotions();
+	void                   RetireImport(BufferId id);
 	void                   Register(BufferId id);
 	void Unregister(BufferId id);
 	template <bool insert>
@@ -209,6 +234,33 @@ private:
 	WriteTickMap                                      m_write_ticks;
 	std::vector<std::pair<uint64_t, uint64_t>>        m_pending_writes;
 	std::unique_ptr<CommandScheduler>                 m_readback_scheduler;
+	// KYTY_GUEST_IMPORT state. The registry is read by CPU fault handlers on guest threads; the
+	// rest is GPU-thread only, except the demotion requests (guest threads push, GPU thread pops).
+	struct ImportUnmark {
+		BufferId id;
+		uint64_t serial;
+		uint64_t tick;
+	};
+	GuestImport::Registry     m_import_registry;
+	RangeSet                  m_import_demoted;
+	std::vector<ImportUnmark> m_import_unmarks;
+	// Uses noted while the current PM4 packet is being prepared. Its commands may land in a later
+	// submission when something submits mid-packet (a drain, a ring wrap); every Submit moves these
+	// uses to the next tick until the packet boundary commits them.
+	struct PendingImportUse {
+		std::shared_ptr<GuestImport::HazardTicks> ticks;
+		uint64_t                                  vaddr;
+		uint64_t                                  size;
+		bool                                      write;
+		BufferId                                  id;
+	};
+	std::vector<PendingImportUse> m_import_pending;
+	bool                          m_import_bda_pending  = false; // g_bda_use_tick noted this packet
+	bool                          m_import_sync_from_bda = false;
+	void                          BumpPendingImportUses(uint64_t next_tick);
+	std::vector<std::shared_ptr<GuestImport::HazardTicks>> m_import_graveyard;
+	std::mutex                m_import_demote_mutex;
+	std::vector<uint64_t>     m_import_demote_requests;
 };
 
 } // namespace Libs::Graphics

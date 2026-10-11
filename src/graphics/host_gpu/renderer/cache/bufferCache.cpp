@@ -412,6 +412,10 @@ void BufferCache::ChangeRegister(BufferId id) {
 		}
 		m_total_used_memory += buffer.Size();
 		buffer.lru_id = m_lru_cache.Insert(id, m_gc_tick);
+		if (buffer.import_ticks) {
+			m_import_registry.Insert(buffer.import_ticks); // already listed by CreateBuffer
+			GuestImport::NoteLive(static_cast<int64_t>(buffer.Size()));
+		}
 		std::vector<vk::DeviceAddress> addresses;
 		addresses.reserve(size_pages);
 		for (uint64_t i = 0; i < size_pages; ++i) {
@@ -429,6 +433,12 @@ void BufferCache::ChangeRegister(BufferId id) {
 		EXIT_IF(buffer.Size() > m_total_used_memory);
 		m_total_used_memory -= buffer.Size();
 		m_lru_cache.Free(buffer.lru_id);
+		if (buffer.import_ticks) {
+			// Stay listed until the submissions that may still access it complete.
+			buffer.import_ticks->retired_tick.store(m_scheduler.CurrentTick());
+			m_import_graveyard.push_back(buffer.import_ticks);
+			GuestImport::NoteLive(-static_cast<int64_t>(buffer.Size()));
+		}
 		m_bda_pagetable_buffer.Fill(table_offset,
 		                            size_pages * sizeof(vk::DeviceAddress), 0);
 		buffer.is_deleted = true;
@@ -474,6 +484,32 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		CompleteCallerReadbacks(vaddr, size);
 	}
 	CallerReadback* const capture = async ? m_caller_capture : nullptr;
+	if (buffer.IsImported()) {
+		// The GPU wrote straight into guest memory: nothing to copy or publish. A synchronous
+		// caller only has to wait for the newest submission that wrote these bytes, which is
+		// often already complete (the copying path always submits and waits for everything).
+		uint64_t dirty_bytes = 0;
+		m_memory_tracker.ForEachDownloadRange<false>(
+		    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+			    m_gpu_modified_ranges.ForEachInRange(
+			        address, bytes, [&](uint64_t start, uint64_t end) { dirty_bytes += end - start; });
+			    m_gpu_modified_ranges.Subtract(address, bytes);
+		    });
+		if (dirty_bytes == 0) {
+			return false;
+		}
+		GuestImport::GetStats().download_bytes_skipped.fetch_add(dirty_bytes, std::memory_order_relaxed);
+		if constexpr (!async) {
+			const auto tick = buffer.import_ticks->LastWrite(vaddr, size);
+			if (tick == 0 || m_scheduler.IsFree(tick)) {
+				GuestImport::GetStats().read_free.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				GuestImport::GetStats().read_waits.fetch_add(1, std::memory_order_relaxed);
+				ImportWaitTick(tick);
+			}
+		}
+		return true;
+	}
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size     = 0;
 	const auto                  buffer_address = buffer.CpuAddress();
@@ -650,6 +686,12 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 	    m_slot_buffers.insert(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, 16);
 	EXIT_IF(null_id != NULL_BUFFER_ID);
 	SetVulkanObjectNameF(m_graphics.device, GetBuffer(null_id).Handle(), "Kyty.NullBuffer");
+	if (GuestImport::Enabled()) {
+		GuestImport::g_submit_hook_context = this;
+		GuestImport::g_submit_hook         = [](void* context, uint64_t next_tick) {
+			static_cast<BufferCache*>(context)->BumpPendingImportUses(next_tick);
+		};
+	}
 	if (!m_graphics.CanReportMemoryUsage()) {
 		return;
 	}
@@ -670,6 +712,10 @@ BufferCache::~BufferCache() {
 		m_memory_tracker.UnmarkRegionAsGpuModified(entry->start, entry->size);
 	}
 	m_caller_readbacks.clear();
+	if (GuestImport::g_submit_hook_context == this) {
+		GuestImport::g_submit_hook         = nullptr;
+		GuestImport::g_submit_hook_context = nullptr;
+	}
 	if (!m_gpu_modified_ranges.Empty()) {
 		EXIT("BufferCache: destroyed with pending GPU-modified ranges\n");
 	}
@@ -686,6 +732,9 @@ BufferCache::~BufferCache() {
 void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");
+	}
+	if (GuestImport::Enabled()) {
+		ImportBeforeCpuWrite(vaddr, size);
 	}
 	m_memory_tracker.InvalidateRegion(vaddr, size, [this, vaddr, size] {
 		ReadbackStats::Scope scope(ReadbackStats::Origin::Invalidate);
@@ -814,7 +863,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	}
 }
 
-BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {
+BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size, GuestImport::Class import_class) {
 	if (vaddr == 0) {
 		return NULL_BUFFER_ID;
 	}
@@ -828,7 +877,7 @@ BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {
 			return *owner;
 		}
 	}
-	return CreateBuffer(vaddr, size);
+	return CreateBuffer(vaddr, size, import_class);
 }
 
 BufferCache::OverlapResult BufferCache::ResolveOverlaps(uint64_t vaddr, uint64_t size) {
@@ -890,12 +939,34 @@ void BufferCache::JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumul
 	if (accumulate_stream_score) {
 		new_buffer.IncreaseStreamScore(overlap.StreamScore() + 1);
 	}
-	new_buffer.CopyFrom(m_scheduler.Current(), overlap, 0,
-	                    overlap.CpuAddress() - new_buffer.CpuAddress(), overlap.Size());
+	if (new_buffer.IsImported()) {
+		if (overlap.IsImported()) {
+			// Both alias the same guest backing (live imports always match the current mapping):
+			// no copy, only the pending-access ticks carry over.
+			new_buffer.import_ticks->MergeFrom(*overlap.import_ticks);
+		} else {
+			// Guest memory already holds every clean and CPU-dirty byte; only GPU-dirty bytes of
+			// the old copy are newer. They stay GPU-dirty, written by this submission.
+			m_gpu_modified_ranges.ForEachInRange(
+			    overlap.CpuAddress(), overlap.Size(), [&](uint64_t start, uint64_t end) {
+				    new_buffer.CopyFrom(m_scheduler.Current(), overlap, start - overlap.CpuAddress(),
+				                        start - new_buffer.CpuAddress(), end - start);
+				    NoteImportUse(new_buffer, start, end - start, true);
+				    GuestImport::g_host_barrier_pending.store(true, std::memory_order_relaxed);
+			    });
+		}
+	} else {
+		if (overlap.IsImported()) {
+			// The copy reads guest memory in this submission: CPU writes must wait for it.
+			NoteImportUse(overlap, overlap.CpuAddress(), overlap.Size(), false);
+		}
+		new_buffer.CopyFrom(m_scheduler.Current(), overlap, 0,
+		                    overlap.CpuAddress() - new_buffer.CpuAddress(), overlap.Size());
+	}
 	DeleteBuffer(overlap_id);
 }
 
-BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
+BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size, GuestImport::Class import_class) {
 	EXIT_IF(m_scheduler.Current().IsInvalid());
 	const auto end = Common::AlignUp(vaddr + size, CACHING_PAGESIZE);
 	vaddr = Common::AlignDown(vaddr, CACHING_PAGESIZE);
@@ -921,10 +992,26 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 		}
 	}
 
-	const auto id = m_slot_buffers.insert(
-	    m_graphics, m_scheduler, MemoryUsage::DeviceLocal, overlap.begin,
-	    AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress, overlap.end - overlap.begin);
-	const auto& buffer = m_slot_buffers[id];
+	Buffer::ImportedMemory imported {};
+	const bool import = GuestImport::Enabled() &&
+	                    TryPrepareImport(overlap.begin, overlap.end - overlap.begin, import_class,
+	                                     imported);
+	const auto id =
+	    import ? m_slot_buffers.insert(m_graphics, m_scheduler, overlap.begin,
+	                                   overlap.end - overlap.begin, imported)
+	           : m_slot_buffers.insert(m_graphics, m_scheduler, MemoryUsage::DeviceLocal,
+	                                   overlap.begin,
+	                                   AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress,
+	                                   overlap.end - overlap.begin);
+	auto& buffer = m_slot_buffers[id];
+	if (import) {
+		buffer.import_ticks =
+		    std::make_shared<GuestImport::HazardTicks>(overlap.begin, overlap.end - overlap.begin);
+		buffer.import_ticks->created_tick.store(m_scheduler.CurrentTick());
+		// Listed before the buffers it absorbs are retired, so a CPU fault never sees a gap.
+		m_import_registry.Insert(buffer.import_ticks);
+		GuestImport::GetStats().created.fetch_add(1, std::memory_order_relaxed);
+	}
 	SetVulkanObjectNameF(m_graphics.device, buffer.Handle(),
 	                     "Kyty.GameBuffer[guest=0x{:016x} size=0x{:x}]", overlap.begin,
 	                     overlap.end - overlap.begin);
@@ -996,6 +1083,30 @@ void BufferCache::GrowJoinedBuffer(OverlapResult& overlap, uint64_t request_begi
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_written,
                                     bool is_texel_buffer) {
+	if (buffer.IsImported()) {
+		// The GPU reads guest memory directly: no staging copy. The tick is published before the
+		// pages are (re-)protected, so a CPU write that faults afterwards sees this use. BDA
+		// synchronization is covered by g_bda_use_tick (PendingUse) instead of per-buffer ticks.
+		if (!m_import_sync_from_bda) {
+			NoteImportUse(buffer, vaddr, size, is_written);
+		}
+		uint64_t skipped = 0;
+		m_memory_tracker.ForEachUploadRange(
+		    vaddr, size, is_written,
+		    [&](uint64_t, uint64_t bytes) noexcept { skipped += bytes; }, []() noexcept {});
+		GuestImport::GetStats().upload_bytes_skipped.fetch_add(skipped, std::memory_order_relaxed);
+		if (is_texel_buffer && !is_written) {
+			// A GPU copy from a cached image would write guest memory behind the tracker's back.
+			// Keep today's result for this use, then move the range to the copying path.
+			if (m_texture_cache.FindImageFromRange(vaddr, size)) {
+				buffer.import_ticks->demote_requested.store(true);
+				std::scoped_lock lock {m_import_demote_mutex};
+				m_import_demote_requests.push_back(buffer.CpuAddress());
+			}
+			return SynchronizeBufferFromImage(buffer, vaddr, size);
+		}
+		return false;
+	}
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size = 0;
 	vk::Buffer                  source;
@@ -1075,7 +1186,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size,
                                                        bool is_written, bool is_texel_buffer,
-                                                       BufferId id) {
+                                                       BufferId id, GuestImport::Class import_class) {
 	auto& command = m_scheduler.Current();
 	if (command.IsInvalid() || !GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: buffer request requires a recording command buffer\n");
@@ -1095,7 +1206,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	}
 
 	if (IsBufferInvalid(id) || !m_slot_buffers[id].IsInBounds(vaddr, size)) {
-		id = FindBuffer(vaddr, size);
+		id = FindBuffer(vaddr, size, import_class);
 	}
 	auto& buffer = m_slot_buffers[id];
 	TouchBuffer(buffer);
@@ -1106,6 +1217,15 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			// The writing command is recorded after this returns; tick unknown until the packet ends.
 			m_write_ticks.Set(vaddr, size, WriteTickMap::kPending);
 			m_pending_writes.emplace_back(vaddr, size);
+		}
+		if (buffer.IsImported()) {
+			// Lift the read protection as soon as this submission has completed (GC point).
+			GuestImport::g_host_barrier_pending.store(true, std::memory_order_relaxed);
+			const auto tick = m_scheduler.CurrentTick();
+			if (buffer.import_ticks->unmark_queued_tick != tick) {
+				buffer.import_ticks->unmark_queued_tick = tick;
+				m_import_unmarks.push_back({id, buffer.import_ticks->Serial(), tick});
+			}
 		}
 	}
 	return {&buffer, buffer.Offset(vaddr)};
@@ -1151,7 +1271,9 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 		EXIT("BufferCache: invalid fill memory address\n");
 	}
 	(void)m_texture_cache.ClearMeta(vaddr);
-	if (!IsRegionGpuModified(vaddr, size)) {
+	// An imported range may still be read by recorded GPU work: fill it in GPU order instead.
+	if (!IsRegionGpuModified(vaddr, size) &&
+	    !(GuestImport::Enabled() && ImportHasPendingUse(vaddr, size))) {
 		// Access the guest mapping so write faults invalidate cached buffers and images.
 		auto* destination = reinterpret_cast<uint32_t*>(vaddr);
 		std::fill(destination, destination + size / sizeof(uint32_t), value);
@@ -1177,7 +1299,8 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 		     src_vaddr, dst_vaddr, size, static_cast<int>(src_gds), static_cast<int>(dst_gds));
 	}
 	if (src_memory && dst_memory && !IsRegionGpuModified(dst_vaddr, size) &&
-	    !IsRegionGpuModified(src_vaddr, size) && !m_texture_cache.FindImageFromRange(src_vaddr, size)) {
+	    !IsRegionGpuModified(src_vaddr, size) && !m_texture_cache.FindImageFromRange(src_vaddr, size) &&
+	    !(GuestImport::Enabled() && ImportHasPendingUse(dst_vaddr, size))) {
 		std::memcpy(reinterpret_cast<void*>(dst_vaddr), reinterpret_cast<const void*>(src_vaddr),
 		            size);
 		return;
@@ -1285,6 +1408,11 @@ void BufferCache::RunGarbageCollector() {
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
 	}
+	if (GuestImport::Enabled()) {
+		ProcessImportUnmarks();
+		ProcessImportDemotions();
+		GuestImport::MaybeLogStats(m_total_used_memory);
+	}
 	if (m_total_used_memory < m_trigger_gc_memory) {
 		return;
 	}
@@ -1310,6 +1438,7 @@ void BufferCache::RunGarbageCollector() {
 	                                         : 64;
 
 	std::vector<BufferId> dirty_buffers;
+	std::vector<BufferId> import_retire;
 	size_t                retire_count = 0;
 	m_lru_cache.ForEachItemBelow(tick - age, [&](BufferId id) {
 		auto& buffer = m_slot_buffers[id];
@@ -1322,6 +1451,17 @@ void BufferCache::RunGarbageCollector() {
 		m_memory_tracker.ValidateGpuDirtyOwnership(m_gpu_modified_ranges, buffer.CpuAddress(),
 		                                           buffer.Size(), "garbage collection");
 		const bool dirty = m_memory_tracker.IsRegionGpuModified(buffer.CpuAddress(), buffer.Size());
+		if (buffer.IsImported()) {
+			// No download and no drain: retire only once no recorded GPU work can still touch it
+			// (including any BDA shader), otherwise CPU writes could race in-flight readers.
+			const auto last_use =
+			    GuestImport::PendingUse(*buffer.import_ticks, buffer.CpuAddress(), buffer.Size());
+			if (last_use != 0 && !m_scheduler.IsFree(last_use)) {
+				return false;
+			}
+			import_retire.push_back(id);
+			return ++retire_count == limit;
+		}
 		if (dirty && !drain_dirty) {
 			return false;
 		}
@@ -1334,6 +1474,10 @@ void BufferCache::RunGarbageCollector() {
 		}
 		return ++retire_count == limit;
 	});
+	for (const auto id: import_retire) {
+		RetireImport(id);
+		GuestImport::GetStats().gc_import_retires.fetch_add(1, std::memory_order_relaxed);
+	}
 	if (dirty_buffers.empty()) {
 		return;
 	}
@@ -1363,6 +1507,11 @@ void BufferCache::ProcessFaultBuffer() {
 }
 
 void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {
+	struct BdaScope {
+		explicit BdaScope(bool& flag): flag(flag) { flag = true; }
+		~BdaScope() { flag = false; }
+		bool& flag;
+	} bda_scope(m_import_sync_from_bda);
 	const auto end = vaddr + size;
 	auto       it  = m_buffers.upper_bound(vaddr);
 	if (it != m_buffers.begin()) {
@@ -1375,6 +1524,250 @@ void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {
 		if (start < finish) {
 			(void)SynchronizeBuffer(buffer, start, finish - start, false, false);
 		}
+	}
+}
+
+// ---- KYTY_GUEST_IMPORT ----------------------------------------------------------------------
+
+void BufferCache::NoteBdaUse() noexcept {
+	if (GuestImport::Enabled()) {
+		GuestImport::g_bda_use_tick.store(m_scheduler.CurrentTick());
+		m_import_bda_pending = true;
+	}
+}
+
+bool BufferCache::TryPrepareImport(uint64_t vaddr, uint64_t size, GuestImport::Class import_class,
+                                   Buffer::ImportedMemory& imported) {
+	auto& stats = GuestImport::GetStats();
+	if (!m_graphics.external_memory_host_enabled || !GuestImport::ClassAllowed(import_class)) {
+		stats.fallback_class.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+	if (m_import_demoted.Intersects(vaddr, size)) {
+		stats.fallback_demoted.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+	// One import needs one contiguous run of shared backing: no holes, no flexible memory, no
+	// discontiguous physical blocks (merged and stream-leap ranges often fail this check).
+	uint64_t host = 0;
+	if (!Libs::LibKernel::Memory::TryGetContiguousBacking(vaddr, size, &host)) {
+		stats.fallback_backing.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+	const auto alignment =
+	    std::max<uint64_t>(GuestImport::kPageSize, m_graphics.min_imported_host_pointer_alignment);
+	if (!GuestImport::IsAlignedRange(host, size, alignment)) {
+		stats.fallback_align.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+	if (!Buffer::TryImportHostMemory(m_graphics, reinterpret_cast<void*>(host), size,
+	                                 AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress,
+	                                 imported)) {
+		stats.fallback_vulkan.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+	return true;
+}
+
+void BufferCache::NoteImportUse(Buffer& buffer, uint64_t vaddr, uint64_t size, bool write) {
+	buffer.import_ticks->NoteUse(vaddr, size, m_scheduler.CurrentTick(), write);
+	m_import_pending.push_back({buffer.import_ticks, vaddr, size, write, NULL_BUFFER_ID});
+}
+
+void BufferCache::BumpPendingImportUses(uint64_t next_tick) {
+	if (m_import_bda_pending) {
+		GuestImport::g_bda_use_tick.store(next_tick);
+	}
+	for (const auto& use: m_import_pending) {
+		use.ticks->NoteUse(use.vaddr, use.size, next_tick, use.write);
+		if (use.write && use.ticks->retired_tick.load() == 0) {
+			const auto found = m_buffers.find(use.ticks->Base());
+			if (found != m_buffers.end()) {
+				m_import_unmarks.push_back({found->second, use.ticks->Serial(), next_tick});
+			}
+		}
+	}
+}
+
+uint64_t BufferCache::ImportPendingUse(uint64_t vaddr, uint64_t size) const {
+	uint64_t need = 0;
+	m_import_registry.ForEachOverlap(vaddr, size, [&](const GuestImport::HazardTicks& ticks) {
+		need = std::max(need, GuestImport::PendingUse(ticks, vaddr, size));
+	});
+	return need;
+}
+
+bool BufferCache::ImportHasPendingUse(uint64_t vaddr, uint64_t size) {
+	const auto need = ImportPendingUse(vaddr, size);
+	if (need == 0 || m_scheduler.IsFree(need)) {
+		return false;
+	}
+	GuestImport::GetStats().gpu_path_redirects.fetch_add(1, std::memory_order_relaxed);
+	return true;
+}
+
+void BufferCache::ImportWaitTick(uint64_t tick) {
+	if (tick == 0 || m_scheduler.IsFree(tick)) {
+		return;
+	}
+	if (GuestGpu::IsGpuThread()) {
+		m_scheduler.Wait(tick);
+		m_scheduler.WaitPriorityOperations(tick);
+		return;
+	}
+	if (CommandScheduler::InDeferredOperation()) {
+		EXIT("unsupported guest-import wait from an asynchronous GPU completion\n");
+	}
+	// The open submission can only be flushed by the GPU thread.
+	m_scheduler.Context().GetGpu().SendCommandSync([this, tick] {
+		if (!m_scheduler.IsFree(tick)) {
+			m_scheduler.Wait(tick);
+			m_scheduler.WaitPriorityOperations(tick);
+		}
+	});
+}
+
+void BufferCache::ImportBeforeCpuWrite(uint64_t vaddr, uint64_t size) {
+	// Write-after-read: a CPU store must not become visible to GPU work recorded before it.
+	if (m_import_registry.Empty()) {
+		return;
+	}
+	const auto need = ImportPendingUse(vaddr, size);
+	auto&      stats = GuestImport::GetStats();
+	if (need == 0 || m_scheduler.IsFree(need)) {
+		if (need != 0) {
+			stats.war_free.fetch_add(1, std::memory_order_relaxed);
+		}
+		return;
+	}
+	stats.war_waits.fetch_add(1, std::memory_order_relaxed);
+	if (GuestGpu::IsGpuThread()) {
+		// The packet being prepared may already have bound this range; its command is not
+		// recorded yet, so this wait cannot order the write after it (known gap, counted).
+		for (const auto& use: m_import_pending) {
+			if (use.vaddr < vaddr + size && vaddr < use.vaddr + use.size) {
+				stats.war_self_pending.fetch_add(1, std::memory_order_relaxed);
+				break;
+			}
+		}
+	}
+	m_import_registry.ForEachOverlap(vaddr, size, [&](GuestImport::HazardTicks& ticks) {
+		if (ticks.retired_tick.load() == 0 &&
+		    ticks.war_waits.fetch_add(1) + 1 >= GuestImport::kWarDemoteThreshold &&
+		    !ticks.demote_requested.exchange(true)) {
+			std::scoped_lock lock {m_import_demote_mutex};
+			m_import_demote_requests.push_back(ticks.Base());
+		}
+	});
+	ImportWaitTick(need);
+}
+
+void BufferCache::ProcessImportUnmarks() {
+	// Retired imports leave the registry once nothing recorded can still access them.
+	std::erase_if(m_import_graveyard, [this](const std::shared_ptr<GuestImport::HazardTicks>& ticks) {
+		const auto pending = GuestImport::PendingUse(*ticks, ticks->Base(), ticks->Size());
+		if (pending != 0 && !m_scheduler.IsFree(pending)) {
+			return false;
+		}
+		m_import_registry.Erase(ticks.get());
+		return true;
+	});
+	// GPU-dirty pages of an import hold their final bytes once the writing submission completes:
+	// lift the protection without a fault, unless a newer submission writes the same page.
+	if (m_import_unmarks.empty()) {
+		return;
+	}
+	size_t kept = 0;
+	for (const auto& entry: m_import_unmarks) {
+		if (!m_scheduler.IsFree(entry.tick)) {
+			m_import_unmarks[kept++] = entry;
+			continue;
+		}
+		if (IsBufferInvalid(entry.id)) {
+			continue;
+		}
+		auto& buffer = m_slot_buffers[entry.id];
+		if (!buffer.import_ticks || buffer.import_ticks->Serial() != entry.serial) {
+			continue;
+		}
+		const auto&                                 ticks = *buffer.import_ticks;
+		std::vector<std::pair<uint64_t, uint64_t>> done;
+		m_gpu_modified_ranges.ForEachInRange(
+		    buffer.CpuAddress(), buffer.Size(), [&](uint64_t start, uint64_t end) {
+			    for (auto page = Common::AlignDown(start, GuestImport::kPageSize); page < end;
+			         page += GuestImport::kPageSize) {
+				    const auto first = std::max(start, page);
+				    const auto last  = std::min(end, page + GuestImport::kPageSize);
+				    if (ticks.LastWrite(first, last - first) <= entry.tick) {
+					    done.emplace_back(first, last - first);
+				    }
+			    }
+		    });
+		for (const auto& [address, bytes]: done) {
+			m_gpu_modified_ranges.Subtract(address, bytes);
+			m_memory_tracker.UnmarkRegionAsGpuModified(address, bytes);
+		}
+		GuestImport::GetStats().proactive_unmarks.fetch_add(done.size(), std::memory_order_relaxed);
+	}
+	m_import_unmarks.resize(kept);
+}
+
+void BufferCache::RetireImport(BufferId id) {
+	// Caller guarantees that no recorded GPU work still accesses the buffer.
+	auto& buffer = m_slot_buffers[id];
+	EXIT_IF(!buffer.IsImported());
+	m_gpu_modified_ranges.Subtract(buffer.CpuAddress(), buffer.Size());
+	m_memory_tracker.UnmarkRegionAsGpuModified(buffer.CpuAddress(), buffer.Size());
+	m_memory_tracker.UntrackMemory(buffer.CpuAddress(), buffer.Size());
+	DeleteBuffer(id);
+}
+
+void BufferCache::ProcessImportDemotions() {
+	std::vector<uint64_t> requests;
+	{
+		std::scoped_lock lock {m_import_demote_mutex};
+		requests.swap(m_import_demote_requests);
+	}
+	for (const auto base: requests) {
+		const auto found = m_buffers.find(base);
+		if (found == m_buffers.end() || IsBufferInvalid(found->second)) {
+			continue;
+		}
+		auto& buffer = m_slot_buffers[found->second];
+		if (!buffer.IsImported()) {
+			continue;
+		}
+		// One last wait: after it, the range is untracked (CPU-dirty) and re-created as a copy
+		// buffer on its next use, so later CPU writes no longer wait for the GPU.
+		ImportWaitTick(ImportPendingUse(buffer.CpuAddress(), buffer.Size()));
+		m_import_demoted.Add(buffer.CpuAddress(), buffer.Size());
+		RetireImport(found->second);
+		GuestImport::GetStats().demotions.fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
+void BufferCache::RetireImportsInRange(uint64_t vaddr, uint64_t size) {
+	// The guest view is going away; the next mapping of these addresses may name other backing.
+	if (!GuestImport::Enabled() || m_import_registry.Empty() || !m_scheduler.Active()) {
+		return;
+	}
+	std::vector<BufferId> ids;
+	const auto            end = vaddr + size;
+	auto                  it  = m_buffers.upper_bound(vaddr);
+	if (it != m_buffers.begin()) {
+		--it;
+	}
+	for (; it != m_buffers.end() && it->first < end; ++it) {
+		const auto& buffer = m_slot_buffers[it->second];
+		if (buffer.IsImported() && buffer.CpuAddress() + buffer.Size() > vaddr) {
+			ids.push_back(it->second);
+		}
+	}
+	for (const auto id: ids) {
+		auto& buffer = m_slot_buffers[id];
+		ImportWaitTick(ImportPendingUse(buffer.CpuAddress(), buffer.Size()));
+		RetireImport(id);
+		GuestImport::GetStats().unmap_retires.fetch_add(1, std::memory_order_relaxed);
 	}
 }
 

@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/syncAudit.h"
 #include "graphics/host_gpu/renderer/threadQos.h"
+#include "graphics/host_gpu/renderer/cache/guestImport.h"
 
 #include <algorithm>
 #include <chrono>
@@ -418,6 +419,21 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		DrainSubmitQueue();
 	}
 
+	// KYTY_GUEST_IMPORT: GPU writes to imported guest memory become host-visible at this
+	// submission's signal (Vulkan needs an explicit availability operation to the host domain).
+	if (GuestImport::g_submit_hook != nullptr) {
+		// Uses noted for a packet that is not fully recorded yet move to the next submission.
+		GuestImport::g_submit_hook(GuestImport::g_submit_hook_context, CurrentTick() + 1);
+	}
+	if (GuestImport::g_host_barrier_pending.exchange(false, std::memory_order_relaxed)) {
+		m_command.EndRendering();
+		vk::MemoryBarrier host_barrier {};
+		host_barrier.srcAccessMask = vk::AccessFlagBits::eMemoryWrite;
+		host_barrier.dstAccessMask = vk::AccessFlagBits::eHostRead | vk::AccessFlagBits::eHostWrite;
+		m_command.Handle().pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+		                                   vk::PipelineStageFlagBits::eHost, {}, 1, &host_barrier,
+		                                   0, nullptr, 0, nullptr);
+	}
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;

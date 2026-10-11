@@ -44,6 +44,9 @@ struct GraphicContext {
 	uint32_t                           min_subgroup_size                     = 0;
 	uint32_t                           max_subgroup_size                     = 0;
 	uint32_t                           max_push_descriptors                  = 0;
+	// KYTY_GUEST_IMPORT: VK_EXT_external_memory_host enabled on the device, and its alignment.
+	bool                               external_memory_host_enabled          = false;
+	uint64_t                           min_imported_host_pointer_alignment   = 0;
 	vk::ShaderStageFlags               required_subgroup_size_stages         = {};
 	Common::Mutex                      queue_mutex;
 	uint32_t                           queue_family = static_cast<uint32_t>(-1);

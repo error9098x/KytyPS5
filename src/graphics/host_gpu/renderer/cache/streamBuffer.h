@@ -3,9 +3,11 @@
 
 #include "common/abi.h"
 #include "common/common.h"
+#include "graphics/host_gpu/renderer/cache/guestImport.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <utility>
@@ -37,8 +39,24 @@ inline constexpr vk::BufferUsageFlags AllFlags =
 
 class Buffer {
 public:
+	// KYTY_GUEST_IMPORT: a VkBuffer bound to imported host memory (VK_EXT_external_memory_host).
+	struct ImportedMemory {
+		vk::Buffer        buffer  = nullptr;
+		vk::DeviceMemory  memory  = nullptr;
+		vk::DeviceAddress address = 0;
+		uint8_t*          host    = nullptr;
+	};
+	// Imports [host, host+size). `host` and `size` must satisfy the import alignment. Returns
+	// false (and creates nothing) on any failure, so the caller can fall back to a copy buffer.
+	[[nodiscard]] static bool TryImportHostMemory(GraphicContext& graphics, void* host,
+	                                              uint64_t size, vk::BufferUsageFlags flags,
+	                                              ImportedMemory& out);
+
 	Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsage usage,
 	       uint64_t cpu_address, vk::BufferUsageFlags flags, uint64_t size);
+	// Adopts an imported buffer: device address, coherent host mapping = the guest backing.
+	Buffer(GraphicContext& graphics, CommandScheduler& scheduler, uint64_t cpu_address,
+	       uint64_t size, const ImportedMemory& imported);
 	~Buffer();
 	KYTY_CLASS_NO_COPY(Buffer);
 
@@ -48,6 +66,7 @@ public:
 	[[nodiscard]] bool               IsCoherent() const noexcept { return m_coherent; }
 	[[nodiscard]] MemoryUsage        Usage() const noexcept { return m_usage; }
 	[[nodiscard]] uint64_t           CpuAddress() const noexcept { return m_cpu_address; }
+	[[nodiscard]] bool               IsImported() const noexcept { return m_import_memory != nullptr; }
 	[[nodiscard]] vk::DeviceAddress BufferDeviceAddress() const noexcept;
 	[[nodiscard]] uint64_t           Offset(uint64_t address) const noexcept {
 		return address - m_cpu_address;
@@ -72,6 +91,8 @@ public:
 	bool   is_deleted   = false;
 	int    stream_score = 0;
 	size_t lru_id       = 0;
+	// KYTY_GUEST_IMPORT: hazard ticks of an imported buffer (null for copy buffers).
+	std::shared_ptr<GuestImport::HazardTicks> import_ticks;
 
 protected:
 	[[nodiscard]] GraphicContext&   Graphics() const noexcept { return *m_graphics; }
@@ -89,6 +110,7 @@ private:
 	vk::DeviceAddress             m_device_address = 0;
 	vk::Buffer                    m_buffer     = nullptr;
 	VmaAllocation                 m_allocation = nullptr;
+	vk::DeviceMemory              m_import_memory = nullptr;
 	uint64_t                      m_size;
 	bool                          m_coherent = false;
 	std::span<uint8_t>            m_mapped;

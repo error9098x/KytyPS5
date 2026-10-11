@@ -116,6 +116,8 @@ bool                   TryWriteBacking(uint64_t vaddr, const void* data, uint64_
 bool                   TryReadBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size);
+// KYTY_GUEST_IMPORT: host pointer of the contiguous shared backing of a mapped direct range.
+[[nodiscard]] bool     TryGetContiguousBacking(uint64_t vaddr, uint64_t size, uint64_t* host);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);
 void                   WriteBacking(uint64_t vaddr, const void* data, uint64_t size) noexcept;
 void                   InvalidateMemory(uint64_t vaddr, uint64_t size);

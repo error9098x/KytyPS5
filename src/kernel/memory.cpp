@@ -1210,6 +1210,11 @@ bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return g_guest_address_space->TryReadSparseBacking(vaddr, data, size);
 }
 
+bool TryGetContiguousBacking(uint64_t vaddr, uint64_t size, uint64_t* host) {
+	return g_guest_address_space != nullptr &&
+	       g_guest_address_space->TryGetContiguousBacking(vaddr, size, host);
+}
+
 static bool SelfTestSub64SharedPlaceholderAlias() {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	constexpr uint64_t PageSize    = 0x4000;

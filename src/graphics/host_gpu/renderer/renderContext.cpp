@@ -253,6 +253,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 			m_command_scheduler.Finish();
 			m_command_scheduler.WaitPriorityOperations(tick);
 		}
+		m_buffer_cache.RetireImportsInRange(vaddr, size); // KYTY_GUEST_IMPORT only
 		m_buffer_cache.InvalidateMemory(vaddr, size);
 		m_texture_cache.UnmapMemory(vaddr, size);
 		std::lock_guard lock(m_mapped_ranges_mutex);
@@ -273,6 +274,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 }
 
 void RenderContext::PrepareBda() {
+	m_buffer_cache.NoteBdaUse(); // KYTY_GUEST_IMPORT only; also when the scan below is skipped
 	if (!m_bda_logged) {
 		Log::WriteToConsoleAndLog("GPU: using buffer device address (BDA) shader memory access.\n");
 		m_bda_logged = true;

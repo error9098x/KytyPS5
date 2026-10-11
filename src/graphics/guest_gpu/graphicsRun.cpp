@@ -582,6 +582,9 @@ void GuestGpu::ThreadRun(void* data) {
 		const auto process_start = process_timing ? std::chrono::steady_clock::now()
 		                                         : std::chrono::steady_clock::time_point {};
 		const bool complete = gpu->Process(submission);
+		if (GuestImport::Enabled()) {
+			gpu->m_renderer.GetBufferCache().CommitImportUses();
+		}
 		if (process_timing) {
 			const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
 			                            std::chrono::steady_clock::now() - process_start)
@@ -749,7 +752,13 @@ void CommandProcessor::SuspendPm4() {
 }
 
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
+	const bool import_enabled = GuestImport::Enabled();
 	while (!execution.m_buffer_stack.empty()) {
+		if (import_enabled) {
+			// The previous packet is fully recorded: its imported-buffer uses are final, before
+			// any guest-thread fault (ProcessCommands) checks them.
+			m_renderer.GetBufferCache().CommitImportUses();
+		}
 		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
 		}
