@@ -172,6 +172,14 @@ private:
 	uint32_t         m_states_num    = 0;
 	uint32_t         m_first_state   = 0;
 	uint8_t          m_next_touch_id = 1;
+	// scePadReadState edge latch (KYTY_PAD_READSTATE_LATCH=0 disables). ReadState returns live
+	// state; at low guest frame rates a press and release between two polls was lost entirely.
+	uint32_t m_rs_prev     = 0; // m_state.buttons as last seen by AddState
+	uint32_t m_rs_reported = 0; // buttons as last returned by ReadState
+	uint32_t m_rs_down     = 0; // pressed since the last ReadState while reported released
+	uint32_t m_rs_up       = 0; // released since the last ReadState while reported held
+	uint32_t m_rs_pending  = 0; // re-pressed while reported held: report released, then pressed
+	void     ResetReadStateLatch() { m_rs_prev = m_rs_reported = m_rs_down = m_rs_up = m_rs_pending = 0; }
 	// The game's last requests, re-sent when their intensity setting changes.
 	std::array<uint8_t, 2> m_vibration {};
 	uint64_t               m_vibration_until = 0;
@@ -513,13 +521,37 @@ void GameController::CheckActive() {
 	m_states_num    = 0;
 	m_first_state   = 0;
 	m_next_touch_id = 1;
+	ResetReadStateLatch();
 	m_vibration          = {};
 	m_vibration_until    = 0;
 	m_trigger_effect     = {};
 	m_trigger_state      = {};
 }
 
+static bool ReadStateLatchEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_PAD_READSTATE_LATCH");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	return enabled;
+}
+
 void GameController::AddState() {
+	// Every m_state mutation ends here: record button edges for scePadReadState.
+	{
+		const uint32_t before = m_rs_prev;
+		const uint32_t after  = m_state.buttons;
+		const uint32_t rise   = after & ~before;
+		const uint32_t fall   = before & ~after;
+		m_rs_down |= rise & ~m_rs_reported;
+		m_rs_up |= fall & m_rs_reported;
+		// A press of a button the guest last saw as held means it was released in between
+		// (possibly before that poll, when the press was latched): report the release first,
+		// then the new press on the following poll.
+		m_rs_up |= rise & m_rs_reported;
+		m_rs_pending |= rise & m_rs_reported;
+		m_rs_prev = after;
+	}
 	// Coalesce continuous updates (motion sensors, stick/trigger noise) into the
 	// newest unread sample. A real DualShock/DualSense streams motion data far
 	// faster than games poll; queueing every packet made scePadRead(num=1) return
@@ -761,6 +793,7 @@ void GameController::ResetInputState() {
 	m_states_num    = 0;
 	m_first_state   = 0;
 	m_next_touch_id = 1;
+	ResetReadStateLatch();
 	AddState();
 }
 
@@ -931,6 +964,27 @@ void GameController::ReadState(ControllerState* state, bool* flag, int* count) {
 	*flag  = m_connected;
 	*count = m_connected_count;
 	*state = m_state;
+	if (!ReadStateLatchEnabled()) {
+		return;
+	}
+	// A transition that began and reversed since the last poll is reported for one poll: a tap
+	// reads as pressed, a release-and-re-press of a held button reads as released. Any transition
+	// that lasts across a poll reads exactly as before.
+	const uint32_t out = (m_state.buttons | m_rs_down) & ~m_rs_up;
+	if (out != m_state.buttons) {
+		const uint32_t changed = out ^ m_state.buttons;
+		if ((changed & PAD_BUTTON_L2) != 0) {
+			state->axes[static_cast<int>(Axis::TriggerLeft)] = (out & PAD_BUTTON_L2) != 0 ? 255 : 0;
+		}
+		if ((changed & PAD_BUTTON_R2) != 0) {
+			state->axes[static_cast<int>(Axis::TriggerRight)] = (out & PAD_BUTTON_R2) != 0 ? 255 : 0;
+		}
+	}
+	state->buttons = out;
+	m_rs_reported  = out;
+	m_rs_down      = m_rs_pending & ~out;
+	m_rs_up        = 0;
+	m_rs_pending   = 0;
 }
 
 int GameController::ReadStates(ControllerState* states, int states_num, bool* flag, int* count) {
