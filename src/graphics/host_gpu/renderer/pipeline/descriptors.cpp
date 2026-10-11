@@ -839,18 +839,30 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				const char* value = std::getenv("KYTY_RESOURCE_DUMP_HASH");
 				return value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull;
 			}();
+			// KYTY_RESOURCE_DUMP_OFFSET=<bytes>: start the dump at this byte offset into each buffer.
+			// KYTY_RESOURCE_DUMP_SKIP=<n>: skip the first n matching binds (dump later frames).
+			static const uint64_t dump_offset = [] {
+				const char* value = std::getenv("KYTY_RESOURCE_DUMP_OFFSET");
+				return value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull;
+			}();
+			static const uint32_t dump_skip = [] {
+				const char* value = std::getenv("KYTY_RESOURCE_DUMP_SKIP");
+				return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 0)) : 0u;
+			}();
 			static std::atomic_uint dump_count = 0;
-			if (dump_hash != 0 && program.shader_hash == dump_hash && dump_count.load() < 4u * 8u) {
-				dump_count.fetch_add(1);
+			if (dump_hash != 0 && program.shader_hash == dump_hash &&
+			    dump_count.fetch_add(1) - dump_skip < 4u * 8u && dump_count.load() > dump_skip) {
 				uint32_t   words[160] = {};
-				const auto bytes      = static_cast<size_t>(std::min<uint64_t>(size, sizeof(words)));
+				const auto bytes      = size > dump_offset ? static_cast<size_t>(std::min<uint64_t>(
+				                                                 size - dump_offset, sizeof(words)))
+				                                           : size_t {0};
 				const bool readable   = address != 0 && bytes != 0 &&
-				                      Libs::LibKernel::Memory::TryReadBacking(address, words, bytes);
+				                      Libs::LibKernel::Memory::TryReadBacking(address + dump_offset, words, bytes);
 				std::string text;
 				for (size_t w = 0; w < bytes / 4; w++) text += fmt::format("{}{:08x}", w % 8 == 0 ? " |" : " ", words[w]);
 				LOGF("ResourceDump: hash=0x%016" PRIx64 " resource=%u base=0x%012" PRIx64 " size=0x%" PRIx64
-				     " type=%u stride=%u readable=%s desc=%08x,%08x,%08x,%08x words:%s\n",
-				     program.shader_hash, resource, address, size, descriptor.Type(), descriptor.Stride(),
+				     " offset=0x%" PRIx64 " type=%u stride=%u readable=%s desc=%08x,%08x,%08x,%08x words:%s\n",
+				     program.shader_hash, resource, address, size, dump_offset, descriptor.Type(), descriptor.Stride(),
 				     readable ? "yes" : "no", snapshot.buffers[resource].dwords[0],
 				     snapshot.buffers[resource].dwords[1], snapshot.buffers[resource].dwords[2],
 				     snapshot.buffers[resource].dwords[3], text.c_str());
