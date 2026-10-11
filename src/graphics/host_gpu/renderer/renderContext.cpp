@@ -8,6 +8,8 @@
 
 #include <cstdio>
 
+#include "graphics/host_gpu/writeFaultStats.h" // KYTY_WRITE_FAULT_STATS
+
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -79,6 +81,11 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr,
 		return false;
 	}
 	if (access == PageFaultAccess::Write) {
+		if (WriteFaultStats::Enabled()) {
+			const auto frame = static_cast<uint32_t>(m_gpu != nullptr ? m_gpu->GetFrameNum() : 0);
+			WriteFaultStats::NoteWriteFault(fault_vaddr, frame);
+			WriteFaultStats::MaybePrint(frame);
+		}
 		if (ReadbackStats::Enabled()) {
 			ReadbackStats::NoteWriteFault(fault_vaddr);
 		}

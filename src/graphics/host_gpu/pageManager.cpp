@@ -5,6 +5,7 @@
 #include "common/alignment.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/regionDefinitions.h"
+#include "graphics/host_gpu/writeFaultStats.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
@@ -231,6 +232,7 @@ struct PageManager::Impl {
 		uint64_t  range_begin           = 0;
 		uint64_t  range_bytes           = 0;
 		uint64_t  potential_range_bytes = 0;
+		uint64_t  protection_edges      = 0; // KYTY_WRITE_FAULT_STATS: pages whose write access changed
 
 		const auto release_pending = [&] {
 			if (range_bytes != 0) {
@@ -263,6 +265,7 @@ struct PageManager::Impl {
 
 			const bool watcher_edge = (track && new_count == 1) || (!track && new_count == 0);
 			if (watcher_edge && old_perms != new_perms) {
+				protection_edges++;
 				if (range_bytes == 0) {
 					range_begin           = page_index;
 					potential_range_bytes = PAGE_SIZE;
@@ -272,6 +275,12 @@ struct PageManager::Impl {
 		}
 
 		release_pending();
+		if constexpr (!is_read) {
+			if (WriteFaultStats::Enabled()) {
+				WriteFaultStats::NoteProtectionEdges(track ? protection_edges : 0,
+				                                     track ? 0 : protection_edges);
+			}
+		}
 	}
 
 	template <bool track, bool is_read>

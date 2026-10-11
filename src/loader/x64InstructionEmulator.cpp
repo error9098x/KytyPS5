@@ -1414,4 +1414,8 @@ bool TryEmulate(void* native_context) {
 	       TryEmulateCpuExtensions(context);
 }
 
+uint64_t WideStoreTrapHits() noexcept {
+	return g_wide_store_trap_hits.load(std::memory_order_relaxed);
+}
+
 } // namespace Loader::X64InstructionEmulator

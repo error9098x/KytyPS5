@@ -6,6 +6,8 @@
 namespace Loader::X64InstructionEmulator {
 
 [[nodiscard]] bool TryEmulate(void* native_context);
+// Total SIGILL redirects through ud2-patched wide-store sites since start (statistics only).
+[[nodiscard]] uint64_t WideStoreTrapHits() noexcept;
 struct WideStoreSplitResult {
 	uint64_t candidates = 0;  // plain 256-bit vector stores found
 	uint64_t patched    = 0;  // rewritten into two 128-bit stores
