@@ -838,3 +838,25 @@ Same route as shtsm-ab-base-1 (F10 probe, J bootstrap x12, reaches the in-game p
 - The pre-invalidate does not fix the intro regression. ReadbackStats in the intro explains it: with the flags off, 64-168 clear-metadata drains per 2 s each wait only for a little GPU work (~1.5 s total wait, fault waits ~60 ms); with the flags on, clear drains are 0 but the 15 fault + 10 inval drains per 2 s each wait 30-100 ms for the whole unsubmitted backlog (0.4-1.2 s total). The readback flags move the GPU wait to the surviving drains; the general fix is submitting earlier (batch 3: KYTY_FLUSH_ON_LABEL) and waiting on the caller (KYTY_FAULT_WAIT_ON_CALLER).
 - In game the batch-2 flags are +25-40 % (1.0-1.15 -> 1.35-1.57 fps). Frame 1560 of shtsm-ab-all-2 (phone message) is visually sane. No OOM, no device loss.
 - KYTY_FAST_VRANGES becomes the default (Animal Well 3/3 with it alone and 6/6 with all flags); KYTY_FAST_VRANGES=0 restores the old path.
+
+## 2026-10-11 ~23:45 IST — Perf batch 3 A/B at native 4K (label flush vs draw-budget flush vs full stack)
+
+All arms: same route as shtsm-ab-base-1 (F10 probe, J bootstrap x12, 480 s, PREFILL=2) with the batch-2 flags (CLEAR_META_NOSYNC, FAULT_COALESCE, BDA_SYNC_SKIP, GC_DRAIN_INTERVAL=16, UNMAP_FASTPATH) plus FAULT_WAIT_ON_CALLER, BDA_DIRTY_REGIONS, THREAD_QOS. FPS per 40 s window (python3 /tmp/fpsw.py <run> 40):
+
+| window | base-1 (off) | b3-label-1 (+FLUSH_ON_LABEL) | b3-budget-1 (+FLUSH_DRAWS) | b3-full-1 (+label+draws+BDA_SYNC_EPOCH+WRITE_FAULT_SPAN=16+SRT_MEMO) |
+|---|---|---|---|---|
+| 0-40 s (intro) | 24.7 | 14.7 | 13.9 | 14.6 |
+| 40-80 s | 13.9 | 7.0 | 7.0 | 7.0 |
+| 80-120 s | 4.9 | 6.1 | 7.5 | 6.5 |
+| 120-160 s | 1.5 | 3.1 | 2.1 | 2.1 |
+| 160-240 s (phone-message scene) | 0.6-1.3 | 2.4-2.6 | 0.9-1.4 | 1.0-1.05 |
+| 240-440 s | 0.7-1.2 (phone scene) | 3.9-5.8 (walking, see below) | 1.2-1.6 (phone scene) | 1.4-1.85 (phone scene) |
+
+- Not like for like after ~240 s: only the label arm's input route closed the phone message and reached free walking (frame 2220: room with the painted curtain; frames of budget-1/full-1/base-1 at the same time still show the phone). Its 3.9-5.8 fps is a different scene. The like-for-like evidence is 160-240 s (same phone scene in every arm): label 2.4-2.6 vs budget 0.9-1.4 vs full 1.0. FLUSH_DRAWS (alone or stacked with the label flush) gives back the label-flush gain there.
+- b3-label-1 ended at 462 s with exit 0 (not a timeout) and no exception/OOM line; the last 40 s window is partial. To recheck.
+- No OOM / "Ran out of memory" / host exception in any batch-3 run (label, budget, full, all).
+- Intro: the regression is still KYTY_CLEAR_META_NOSYNC: shtsm-intro-b3-2 (batch-3 flags only, no batch-2) 26.2 fps 0-20 s; shtsm-intro-flush-1 (FLUSH_DRAWS only) 25.5.
+- KYTY_SRT_MEMO=1 (4 slots) in b3-full-1: hit=5376 miss_inputs=49677 miss_words=1 per 2 s (~10 % hits; misses are input-key misses, not changed words).
+- Animal Well x3 with the full batch-3 stack (aw-regress-*-b3full): stage 2, 33/43 content in 3/3.
+- Default-candidate set going into batch 4: batch-2 flags + FAULT_WAIT_ON_CALLER + BDA_DIRTY_REGIONS + THREAD_QOS + FLUSH_ON_LABEL=1 (no FLUSH_DRAWS). All flags stay opt-in. Claims stay at stage 2.
+- 181eb078 (KYTY_RT_FEEDBACK_UNION, committed by the chain3 job) reviewed: is_bound/shader_write are set by the binding pre-pass before AcquireRenderTargets (the layout choice already depends on is_bound), and the requested access is a superset, so it is correct; arm shtsm-b3-rtfu-1 measures it.
