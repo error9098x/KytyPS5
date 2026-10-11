@@ -1,6 +1,7 @@
 #include "graphics/shader/meshEmulationShader.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "graphics/shader/meshEmulation.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
 
@@ -20,7 +21,7 @@ public:
 	MeshEmulationVertexEmitter(std::span<const ShaderRecompiler::IR::StageOutput> outputs_,
 	                           const MeshEmulation::Layout&                       layout_)
 	    : outputs(outputs_), layout(layout_),
-	      descriptor_scratch(std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr) {}
+	      descriptor_scratch(Config::MeshScratchDescriptorEnabled()) {}
 
 	std::vector<uint32_t> Emit() {
 		builder.AddMemoryModel(descriptor_scratch ? spv::AddressingModelLogical

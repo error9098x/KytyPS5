@@ -4,6 +4,8 @@
 #include "common/common.h"
 
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
 #include <array>
 #include <filesystem>
 #include <optional>
@@ -127,6 +129,15 @@ bool GpuAssistedValidationEnabled();
 
 bool RenderDocEnabled();
 bool ReadbackLinearImagesEnabled();
+// KYTY_MESH_SCRATCH_DESCRIPTOR=1|true: bind mesh-emulation scratch through a descriptor instead of
+// BDA. Read once; the shader compile, buffer flags, push data and descriptor writes must agree.
+inline bool MeshScratchDescriptorEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR");
+		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+	}();
+	return enabled;
+}
 bool SyncRawImageBuffersEnabled();
 bool TessellationEnabled();
 bool TrophyEnabled();

@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
@@ -221,7 +222,7 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	EmitterState state(program, input_info, vertex_subgroup_fallback);
 	state.mesh_compute = mesh_compute_emulation && program.stage == ShaderType::Mesh;
 	state.mesh_scratch_descriptor =
-	    state.mesh_compute && std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr;
+	    state.mesh_compute && Config::MeshScratchDescriptorEnabled();
 	state.single_lane_subgroup =
 	    vertex_subgroup_fallback && program.stage == ShaderType::Vertex &&
 	    (program.info.subgroup_ballot || program.info.subgroup_shuffle ||

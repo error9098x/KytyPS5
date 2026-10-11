@@ -1615,7 +1615,7 @@ Buffer& RenderExecutor::MeshEmulationScratch() {
 		                       ? MemoryUsage::Upload
 		                       : MemoryUsage::DeviceLocal;
 		const auto flags = vk::BufferUsageFlagBits::eStorageBuffer |
-		                   (std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") == nullptr
+		                   (!Config::MeshScratchDescriptorEnabled()
 		                        ? vk::BufferUsageFlagBits::eShaderDeviceAddress
 		                        : vk::BufferUsageFlags {});
 		m_mesh_scratch = std::make_unique<Buffer>(
@@ -1655,7 +1655,7 @@ void RenderExecutor::ExecuteEmulatedMeshDraw(CommandBuffer& buffer, const DrawCa
 
 	std::array<uint32_t, ShaderRecompiler::IR::PushData::MeshDrawDwordCount> draw_data {};
 	std::copy(draw_data_in.begin(), draw_data_in.end(), draw_data.begin());
-	const bool descriptor_scratch = std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr;
+	const bool descriptor_scratch = Config::MeshScratchDescriptorEnabled();
 	if (descriptor_scratch) {
 		// The descriptor-backed emulated shaders do not read the legacy address.
 		draw_data[MeshEmulation::ScratchAddressLoDword] = 0;

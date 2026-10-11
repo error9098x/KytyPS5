@@ -1164,7 +1164,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		}
 	}
 	if (pipeline.mesh_compute != nullptr &&
-	    std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr &&
+	    Config::MeshScratchDescriptorEnabled() &&
 	    pipeline_bind_point == vk::PipelineBindPoint::eGraphics) {
 		// The generated vertex shader is not represented by a PreparedBindings
 		// stage, but it shares the mesh compute pipeline layout and needs the same
@@ -1330,7 +1330,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		}
 	}
 	if (pipeline.mesh_compute != nullptr &&
-	    std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr &&
+	    Config::MeshScratchDescriptorEnabled() &&
 	    pipeline_bind_point == vk::PipelineBindPoint::eGraphics) {
 		vk::WriteDescriptorSet write {};
 		write.dstBinding = ShaderRecompiler::IR::NativeBinding(
