@@ -1629,7 +1629,8 @@ void RenderExecutor::ExecuteEmulatedMeshDraw(CommandBuffer& buffer, const DrawCa
 
 	std::array<uint32_t, ShaderRecompiler::IR::PushData::MeshDrawDwordCount> draw_data {};
 	std::copy(draw_data_in.begin(), draw_data_in.end(), draw_data.begin());
-	if (std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr) {
+	const bool descriptor_scratch = std::getenv("KYTY_MESH_SCRATCH_DESCRIPTOR") != nullptr;
+	if (descriptor_scratch) {
 		// The descriptor-backed emulated shaders do not read the legacy address.
 		draw_data[MeshEmulation::ScratchAddressLoDword] = 0;
 		draw_data[MeshEmulation::ScratchAddressHiDword] = 0;
@@ -1687,7 +1688,10 @@ void RenderExecutor::ExecuteEmulatedMeshDraw(CommandBuffer& buffer, const DrawCa
 		                          vk::PipelineStageFlagBits::eVertexShader, {}, 1, &produced, 0,
 		                          nullptr, 0, nullptr);
 
-		if (!graphics_stages.empty()) {
+		// The descriptor-backed generated vertex shader always reads the scratch binding, so the
+		// graphics set must be bound even for depth-only draws that have no pixel-shader stage.
+		// Skipping it left MoltenVK with a null descriptor set at encode time.
+		if (!graphics_stages.empty() || descriptor_scratch) {
 			CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, graphics_stages);
 		}
 		vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0,
