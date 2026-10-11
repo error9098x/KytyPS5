@@ -1020,8 +1020,10 @@ public:
 			// player clock. Delivering them unpaced lets a looping, audio-less movie run far ahead
 			// of real time (Silent Hill's title movie reached ~1,000 frames/s and Unreal's render
 			// thread never left its sample loop). KYTY_AVPLAYER_UNPACED_SYNC_NONE=1 restores the
-			// old behavior.
-			if (deliver_seek_frame || (sync_mode != 0 && UnpacedSyncNone())) {
+			// old behavior. Only streams without audio are paced: with audio, Audio() re-anchors
+			// the clock to the game's audio pulls, which would turn sync None into A/V sync.
+			// Without audio the clock is the wall clock anchored at start/seek.
+			if (deliver_seek_frame || (sync_mode != 0 && (UnpacedSyncNone() || audio_id))) {
 				return true;
 			}
 			auto now = CurrentTimeNoLock();
