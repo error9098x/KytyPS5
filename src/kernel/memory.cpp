@@ -15,7 +15,9 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <cinttypes>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <magic_enum.hpp>
@@ -23,6 +25,8 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <type_traits>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -45,6 +49,7 @@
 #elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #include <cerrno>
 #include <fcntl.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -4003,6 +4008,81 @@ int KYTY_SYSV_ABI KernelMtypeprotect(const void* addr, size_t len, int type, int
 	return ProtectMemory(addr, len, prot);
 }
 
+// Opt-in batch-map accounting (KYTY_MEM_TRACE=1). Prints a summary line to stdout every
+// two seconds: mapped/unmapped bytes and the top host threads and guest callers by mapped bytes.
+namespace MemTrace {
+static bool Enabled() {
+	static const bool enabled = [] {
+		const char* v = std::getenv("KYTY_MEM_TRACE");
+		return v != nullptr && v[0] == '1';
+	}();
+	return enabled;
+}
+struct State {
+	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+	std::chrono::steady_clock::time_point last  = start;
+	uint64_t                              mapped = 0, unmapped = 0, map_ops = 0, unmap_ops = 0;
+	std::map<std::string, uint64_t>       by_thread;
+	std::map<uint64_t, uint64_t>          by_caller;
+	std::map<uint64_t, uint64_t>          by_size;
+};
+static State& Get() {
+	static State s;
+	return s;
+}
+template <typename M>
+static std::string Top(const M& m, int n, bool hex) {
+	std::vector<std::pair<uint64_t, std::string>> v;
+	for (const auto& [k, b]: m) {
+		if constexpr (std::is_same_v<typename M::key_type, std::string>) {
+			v.emplace_back(b, k);
+		} else {
+			char buf[32];
+			snprintf(buf, sizeof(buf), hex ? "%" PRIx64 : "%" PRIu64, k);
+			v.emplace_back(b, buf);
+		}
+	}
+	std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first > b.first; });
+	std::string out;
+	for (int i = 0; i < n && i < static_cast<int>(v.size()); i++) {
+		char buf[128];
+		snprintf(buf, sizeof(buf), " %s=%.1fMB", v[i].second.c_str(),
+		         static_cast<double>(v[i].first) / 1048576.0);
+		out += buf;
+	}
+	return out;
+}
+static void Record(int op, uint64_t len, uint64_t caller) {
+	auto& s = Get();
+	if (op == 0) {
+		char name[64] = {};
+#if !defined(_WIN32)
+		pthread_getname_np(pthread_self(), name, sizeof(name));
+#endif
+		s.mapped += len;
+		s.map_ops++;
+		s.by_thread[name] += len;
+		s.by_caller[caller] += len;
+		s.by_size[len]++;
+	} else if (op == 1) {
+		s.unmapped += len;
+		s.unmap_ops++;
+	}
+	auto now = std::chrono::steady_clock::now();
+	if (now - s.last >= std::chrono::seconds(2)) {
+		s.last = now;
+		printf("[memtrace] t=%.1fs mapped=%.1fMB (%" PRIu64 " ops) unmapped=%.1fMB (%" PRIu64
+		       " ops) live=%.1fMB threads:%s callers:%s\n",
+		       std::chrono::duration<double>(now - s.start).count(),
+		       static_cast<double>(s.mapped) / 1048576.0, s.map_ops,
+		       static_cast<double>(s.unmapped) / 1048576.0, s.unmap_ops,
+		       (static_cast<double>(s.mapped) - static_cast<double>(s.unmapped)) / 1048576.0,
+		       Top(s.by_thread, 6, false).c_str(), Top(s.by_caller, 8, true).c_str());
+		fflush(stdout);
+	}
+}
+} // namespace MemTrace
+
 int KYTY_SYSV_ABI KernelBatchMap2(KernelBatchMapEntry* entries, int num_entries,
                                   int* num_entries_out, int flags) {
 	PRINT_NAME();
@@ -4029,6 +4109,9 @@ int KYTY_SYSV_ABI KernelBatchMap2(KernelBatchMapEntry* entries, int num_entries,
 	}
 
 	int processed = 0;
+
+	const auto mem_trace_caller =
+	    reinterpret_cast<uint64_t>(__builtin_extract_return_addr(__builtin_return_address(0)));
 
 	for (int i = 0; i < num_entries; i++, processed++) {
 		auto* entry = &entries[i];
@@ -4069,6 +4152,10 @@ int KYTY_SYSV_ABI KernelBatchMap2(KernelBatchMapEntry* entries, int num_entries,
 				*num_entries_out = processed;
 			}
 			return result;
+		}
+
+		if (MemTrace::Enabled()) {
+			MemTrace::Record(entry->operation, entry->length, mem_trace_caller);
 		}
 	}
 
