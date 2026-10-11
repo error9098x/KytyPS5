@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+#include "graphics/host_gpu/renderer/cache/writeTickMap.h"
 
 #include <map>
 #include <memory>
@@ -108,6 +109,20 @@ public:
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();
 
+	// KYTY_READBACK_PRODUCER_TICK=1: a synchronous readback whose GPU-dirty bytes were all written
+	// by an already-submitted command buffer copies them in a side command buffer and waits only
+	// for that, instead of splitting the open render pass and draining the open command buffer.
+	// KYTY_READBACK_PRODUCER_TICK_STATS=1 keeps the bookkeeping and the counters but always takes
+	// the legacy drain (measurement only). Both are off by default.
+	[[nodiscard]] static bool ProducerTickTracking();
+	[[nodiscard]] static bool ProducerTickEnabled();
+	// Called at a PM4 packet boundary: every GPU command for writes obtained so far is recorded.
+	void CommitPendingWrites() {
+		if (!m_pending_writes.empty()) {
+			CommitPendingWritesSlow();
+		}
+	}
+
 private:
 	friend struct BufferCacheTestAccess;
 
@@ -147,6 +162,9 @@ private:
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	void CommitPendingWritesSlow();
+	// A GPU command writing cache-buffer bytes [vaddr, vaddr+size) has just been recorded.
+	void NoteGpuWriteRecorded(uint64_t vaddr, uint64_t size);
 
 	// KYTY_FAULT_WAIT_ON_CALLER=1: a guest thread's fault readback is recorded and submitted by
 	// the GPU thread, but the faulting thread waits for the GPU itself; the GPU thread then only
@@ -187,6 +205,9 @@ private:
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
+	WriteTickMap                                      m_write_ticks;
+	std::vector<std::pair<uint64_t, uint64_t>>        m_pending_writes;
+	std::unique_ptr<CommandScheduler>                 m_readback_scheduler;
 };
 
 } // namespace Libs::Graphics

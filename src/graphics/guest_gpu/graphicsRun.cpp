@@ -826,6 +826,10 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 
 		const auto packet_dw =
 		    handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
+		if (BufferCache::ProducerTickTracking()) {
+			// Packet boundary: the commands for every buffer write obtained so far are recorded.
+			m_renderer.GetBufferCache().CommitPendingWrites();
+		}
 		EXIT_IF(packet_dw > remaining_dw);
 		if (execution.m_suspended) {
 			return;

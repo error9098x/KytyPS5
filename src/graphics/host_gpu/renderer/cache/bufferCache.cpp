@@ -116,6 +116,17 @@ void MaybePrintBufferCacheStats() {
 	c         = {};
 	c.last_us = now_us;
 }
+// KYTY_READBACK_PRODUCER_TICK counters (printed with ReadbackStats when tracking is on).
+struct ProducerTickCounters {
+	std::atomic<uint64_t> side {0};      // producer submitted: side command buffer used
+	std::atomic<uint64_t> older {0};     // producer submitted (side or, in stats mode, drained)
+	std::atomic<uint64_t> same {0};      // producer recorded in the open command buffer
+	std::atomic<uint64_t> pending {0};   // producer command not yet recorded (mid-draw readback)
+	std::atomic<uint64_t> uncovered {0}; // GPU-dirty byte without a stamp (defensive fallback)
+	std::atomic<uint64_t> age_sum {0};   // sum of CurrentTick - producer over "older"
+	std::atomic<uint64_t> side_wait_us {0};
+};
+ProducerTickCounters g_ptick;
 
 struct ReadbackCounters {
 	std::atomic<uint64_t> count {0};
@@ -171,6 +182,16 @@ void MaybePrintReadbackStats() {
 	n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n),
 	                   " cpufill=%" PRIu64 "/%" PRIu64 "B", g_cpu_fills.exchange(0),
 	                   g_cpu_fill_bytes.exchange(0));
+	if (BufferCache::ProducerTickTracking()) {
+		n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n),
+		                   " ptick=side:%" PRIu64 ",older:%" PRIu64 ",same:%" PRIu64
+		                   ",pending:%" PRIu64 ",uncov:%" PRIu64 ",age:%" PRIu64
+		                   ",side_us:%" PRIu64,
+		                   g_ptick.side.exchange(0), g_ptick.older.exchange(0),
+		                   g_ptick.same.exchange(0), g_ptick.pending.exchange(0),
+		                   g_ptick.uncovered.exchange(0), g_ptick.age_sum.exchange(0),
+		                   g_ptick.side_wait_us.exchange(0));
+	}
 	std::vector<std::pair<uint32_t, uint64_t>> top;
 	{
 		std::scoped_lock lock {g_fault_pages_mutex};
@@ -271,6 +292,45 @@ Scope::~Scope() {
 	g_readback_origin = prev;
 }
 } // namespace ReadbackStats
+
+bool BufferCache::ProducerTickEnabled() {
+	static const bool enabled = EnvFlag("KYTY_READBACK_PRODUCER_TICK");
+	return enabled;
+}
+
+bool BufferCache::ProducerTickTracking() {
+	static const bool enabled = ProducerTickEnabled() || EnvFlag("KYTY_READBACK_PRODUCER_TICK_STATS");
+	return enabled;
+}
+
+void BufferCache::NoteGpuWriteRecorded(uint64_t vaddr, uint64_t size) {
+	// Only GPU-dirty bytes are ever downloaded, and a byte that becomes GPU-dirty later is stamped
+	// again then (with a later tick), so stamping the dirty part is sufficient.
+	if (!ProducerTickTracking() || size == 0 || !m_gpu_modified_ranges.Intersects(vaddr, size)) {
+		return;
+	}
+	const auto tick = m_scheduler.CurrentTick();
+	m_gpu_modified_ranges.ForEachInRange(vaddr, size, [&](uint64_t start, uint64_t end) {
+		m_write_ticks.Set(start, end - start, tick);
+	});
+}
+
+void BufferCache::CommitPendingWritesSlow() {
+	// Runs only after a PM4 packet handler returned, so the GPU commands of every write obtained
+	// so far are recorded, in the open command buffer or in one already submitted.
+	const auto tick = m_scheduler.CurrentTick();
+	for (const auto& [vaddr, size]: m_pending_writes) {
+		if (m_gpu_modified_ranges.Contains(vaddr, size)) {
+			m_write_ticks.Set(vaddr, size, tick); // common case: nothing downloaded mid-packet
+			continue;
+		}
+		m_write_ticks.Erase(vaddr, size);
+		m_gpu_modified_ranges.ForEachInRange(vaddr, size, [&](uint64_t start, uint64_t end) {
+			m_write_ticks.Set(start, end - start, tick);
+		});
+	}
+	m_pending_writes.clear();
+}
 
 void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* source,
                                   uint64_t size) {
@@ -404,6 +464,8 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size     = 0;
 	const auto                  buffer_address = buffer.CpuAddress();
+	const bool                  tracking       = ProducerTickTracking();
+	WriteTickMap::Query         producer;
 	m_memory_tracker.ForEachDownloadRange<false>(
 	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
 		    m_memory_tracker.ValidateGpuDirtyPages(m_gpu_modified_ranges, address, bytes,
@@ -412,11 +474,40 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			    copies.emplace_back(start - buffer_address, total_size, end - start);
 			    // Keep packed ranges on separate cache lines, as in shadPS4.
 			    total_size += Common::AlignUp(end - start, 64);
+			    if (tracking) {
+				    const auto q      = m_write_ticks.Max(start, end - start);
+				    producer.max_tick = std::max(producer.max_tick, q.max_tick);
+				    producer.covered  = producer.covered && q.covered;
+			    }
 		    });
 		    m_gpu_modified_ranges.Subtract(address, bytes);
+		    if (tracking) {
+			    m_write_ticks.Erase(address, bytes);
+		    }
 	    });
 	if (copies.empty()) {
 		return false;
+	}
+
+	// The producer of every byte copied below was submitted iff its tick is below the open tick.
+	// The side command buffer is then ordered after it by queue submission order, and nothing in
+	// the open command buffer writes these bytes, so the open buffer need not be submitted.
+	bool use_side = false;
+	if constexpr (!async) {
+		if (tracking) {
+			const auto open_tick = m_scheduler.CurrentTick();
+			if (!producer.covered) {
+				g_ptick.uncovered.fetch_add(1, std::memory_order_relaxed);
+			} else if (producer.max_tick == WriteTickMap::kPending) {
+				g_ptick.pending.fetch_add(1, std::memory_order_relaxed);
+			} else if (producer.max_tick >= open_tick) {
+				g_ptick.same.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_ptick.older.fetch_add(1, std::memory_order_relaxed);
+				g_ptick.age_sum.fetch_add(open_tick - producer.max_tick, std::memory_order_relaxed);
+				use_side = ProducerTickEnabled();
+			}
+		}
 	}
 
 	uint8_t* mapped = nullptr;
@@ -437,9 +528,18 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		copy.dstOffset += offset;
 	}
 
-	auto& command = m_scheduler.Current();
-	command.EndRendering();
-	const auto              native = command.Handle();
+	vk::CommandBuffer native;
+	if (use_side) {
+		if (!m_readback_scheduler) {
+			// Same VkQueue, own timeline semaphore and command pool, like the presenter's scheduler.
+			m_readback_scheduler = std::make_unique<CommandScheduler>(m_scheduler.Context(), m_graphics);
+		}
+		native = m_readback_scheduler->BeginCommand().Handle();
+	} else {
+		auto& command = m_scheduler.Current();
+		command.EndRendering();
+		native = command.Handle();
+	}
 	vk::BufferMemoryBarrier before {};
 	before.srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
 	before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
@@ -481,6 +581,24 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		capture->publish = std::move(publish);
 	} else if constexpr (async) {
 		m_scheduler.DeferPriorityOperation(std::move(publish));
+	} else if (use_side) {
+		const auto open_tick  = m_scheduler.CurrentTick();
+		const bool stats      = ReadbackStats::Enabled();
+		const auto wait_start = std::chrono::steady_clock::now();
+		const auto side_tick  = m_readback_scheduler->Submit();
+		m_readback_scheduler->GetMasterSemaphore().Wait(side_tick);
+		// Publishes queued for submitted ticks (including the producer's) land first. Publishes
+		// queued for the open tick cannot touch these bytes and would wait for a submit we skip.
+		m_scheduler.WaitPriorityOperations(open_tick - 1);
+		const auto waited = MicrosSince(wait_start);
+		g_ptick.side.fetch_add(1, std::memory_order_relaxed);
+		g_ptick.side_wait_us.fetch_add(waited, std::memory_order_relaxed);
+		if (stats) {
+			auto& c = g_readback[static_cast<size_t>(g_readback_origin)];
+			c.wait_us.fetch_add(waited, std::memory_order_relaxed);
+			c.bytes.fetch_add(total_size, std::memory_order_relaxed);
+		}
+		publish();
 	} else {
 		const auto tick       = m_scheduler.CurrentTick();
 		const bool stats      = ReadbackStats::Enabled();
@@ -800,6 +918,10 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 		JoinOverlap(id, old_id, !overlap.has_stream_leap);
 	}
 	Register(id);
+	if (overlap.first != overlap.last) {
+		// The new buffer received GPU-dirty bytes through copies recorded just now.
+		NoteGpuWriteRecorded(overlap.begin, overlap.end - overlap.begin);
+	}
 	if (stats) {
 		MaybePrintBufferCacheStats();
 	}
@@ -894,6 +1016,11 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 		                       vk::PipelineStageFlagBits::eAllCommands,
 		                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &after, 0, nullptr);
+		if (ProducerTickTracking()) {
+			for (const auto& copy: copies) {
+				NoteGpuWriteRecorded(buffer.CpuAddress() + copy.dstOffset, copy.size);
+			}
+		}
 	}
 	if (is_texel_buffer && !is_written) {
 		return SynchronizeBufferFromImage(buffer, vaddr, size);
@@ -960,6 +1087,11 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
 		m_gpu_modified_ranges.Add(vaddr, size);
+		if (ProducerTickTracking()) {
+			// The writing command is recorded after this returns; tick unknown until the packet ends.
+			m_write_ticks.Set(vaddr, size, WriteTickMap::kPending);
+			m_pending_writes.emplace_back(vaddr, size);
+		}
 	}
 	return {&buffer, buffer.Offset(vaddr)};
 }
