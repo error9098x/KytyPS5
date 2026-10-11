@@ -6,6 +6,8 @@
 #include "graphics/host_gpu/regionDefinitions.h"
 
 #include <atomic>
+#include <cstdlib>
+#include <vector>
 #include <mutex>
 #include <utility>
 
@@ -82,6 +84,50 @@ static_assert(std::atomic_uint32_t::is_always_lock_free);
 // has become CPU-modified since that scan began.
 inline std::atomic<uint64_t> g_cpu_dirty_generation {0};
 
+// KYTY_BDA_DIRTY_REGIONS=1: tracker regions (4 MiB) that may hold CPU-dirty pages a BDA sync
+// has not uploaded yet. Producers append region bases (a page became CPU-modified, a region was
+// created, a buffer was registered or a range mapped over it); PrepareBda drains the list and
+// synchronizes only those regions instead of every cached buffer. Overflow forces a full scan.
+struct BdaDirtyRegions {
+	std::mutex            mutex;
+	std::vector<uint64_t> bases;
+	bool                  overflow = false;
+};
+inline BdaDirtyRegions g_bda_dirty_regions;
+inline bool            BdaDirtyRegionsEnabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("KYTY_BDA_DIRTY_REGIONS");
+        return v != nullptr && *v != '\0' && *v != '0';
+    }();
+    return enabled;
+}
+inline void QueueBdaDirtyRange(uint64_t vaddr, uint64_t size) {
+	if (!BdaDirtyRegionsEnabled() || size == 0) {
+		return;
+	}
+	constexpr size_t MaxQueued = 8192;
+	const uint64_t   first     = vaddr & ~(TRACKER_REGION_SIZE - 1);
+	const uint64_t   last      = (vaddr + size - 1) & ~(TRACKER_REGION_SIZE - 1);
+	std::lock_guard  lock(g_bda_dirty_regions.mutex);
+	if (g_bda_dirty_regions.overflow) {
+		return;
+	}
+	for (uint64_t base = first;; base += TRACKER_REGION_SIZE) {
+		if (!g_bda_dirty_regions.bases.empty() && g_bda_dirty_regions.bases.back() == base) {
+			// already queued last (common: repeated faults in one region)
+		} else if (g_bda_dirty_regions.bases.size() >= MaxQueued) {
+			g_bda_dirty_regions.overflow = true;
+			g_bda_dirty_regions.bases.clear();
+			return;
+		} else {
+			g_bda_dirty_regions.bases.push_back(base);
+		}
+		if (base == last) {
+			break;
+		}
+	}
+}
+
 class RegionManager final {
 public:
 	RegionManager(PageManager& page_manager, uint64_t cpu_addr)
@@ -93,6 +139,7 @@ public:
 		m_writable.Fill();
 		m_readable.Fill();
 		g_cpu_dirty_generation.fetch_add(1, std::memory_order_acq_rel);
+		QueueBdaDirtyRange(m_cpu_addr, TRACKER_REGION_SIZE);
 	}
 
 	KYTY_CLASS_NO_COPY(RegionManager);
@@ -122,6 +169,7 @@ public:
 			bits.SetRange(start, end);
 			if constexpr (source == DirtySource::Cpu) {
 				g_cpu_dirty_generation.fetch_add(1, std::memory_order_acq_rel);
+				QueueBdaDirtyRange(m_cpu_addr, TRACKER_REGION_SIZE);
 			}
 		} else {
 			bits.UnsetRange(start, end);

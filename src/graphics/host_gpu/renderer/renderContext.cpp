@@ -158,6 +158,7 @@ void RenderContext::MapMemory(uint64_t vaddr, uint64_t size) {
 	std::lock_guard lock(m_mapped_ranges_mutex);
 	m_mapped_ranges.Add(vaddr, size);
 	g_cpu_dirty_generation.fetch_add(1, std::memory_order_acq_rel);
+	QueueBdaDirtyRange(vaddr, size);
 }
 
 UnmapCounters& GetUnmapCounters() {
@@ -257,9 +258,39 @@ void RenderContext::PrepareBda() {
 		return;
 	}
 	std::shared_lock lock(m_mapped_ranges_mutex);
-	m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
-		m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
-	});
+	bool full_scan = true;
+	if (BdaDirtyRegionsEnabled() && m_bda_synced_valid) {
+		std::vector<uint64_t> bases;
+		bool                  overflow = false;
+		{
+			std::lock_guard dirty_lock(g_bda_dirty_regions.mutex);
+			bases.swap(g_bda_dirty_regions.bases);
+			overflow                     = g_bda_dirty_regions.overflow;
+			g_bda_dirty_regions.overflow = false;
+		}
+		if (!overflow) {
+			full_scan = false;
+			std::sort(bases.begin(), bases.end());
+			bases.erase(std::unique(bases.begin(), bases.end()), bases.end());
+			for (const auto base: bases) {
+				m_mapped_ranges.ForEachInRange(base, TRACKER_REGION_SIZE,
+				                               [this](uint64_t start, uint64_t end) {
+					                               m_buffer_cache.SynchronizeBuffersInRange(
+					                                   start, end - start);
+				                               });
+			}
+		}
+	} else if (BdaDirtyRegionsEnabled()) {
+		// First (complete) scan: everything queued so far is covered by it.
+		std::lock_guard dirty_lock(g_bda_dirty_regions.mutex);
+		g_bda_dirty_regions.bases.clear();
+		g_bda_dirty_regions.overflow = false;
+	}
+	if (full_scan) {
+		m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
+			m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
+		});
+	}
 	m_bda_synced_generation = generation;
 	m_bda_synced_valid      = true;
 	m_fault_process_pending = true;
