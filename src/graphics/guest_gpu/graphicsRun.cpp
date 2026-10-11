@@ -1,4 +1,5 @@
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/renderer/syncAudit.h"
 
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
@@ -1621,6 +1622,7 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 }
 
 void CommandProcessor::SynchronizeGpu() {
+	SyncAudit::Scope audit_scope(SyncAudit::Site::GdsEop);
 	GetScheduler().Finish();
 }
 

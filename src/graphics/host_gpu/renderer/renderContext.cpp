@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/syncAudit.h"
 
 #include <cinttypes>
 
@@ -240,7 +241,8 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		    (m_buffer_cache.IsRegionRegistered(vaddr, size) ||
 		     m_texture_cache.IsRegionRegistered(vaddr, size) ||
 		     m_command_scheduler.HasPendingPriorityOperations())) {
-			const auto tick = m_command_scheduler.CurrentTick();
+			const auto       tick = m_command_scheduler.CurrentTick();
+			SyncAudit::Scope audit_scope(SyncAudit::Site::Unmap);
 			m_command_scheduler.Finish();
 			m_command_scheduler.WaitPriorityOperations(tick);
 		}

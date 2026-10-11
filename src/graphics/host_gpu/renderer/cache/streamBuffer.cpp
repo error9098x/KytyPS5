@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+#include "graphics/host_gpu/renderer/syncAudit.h"
 
 #include <cstdlib>
 
@@ -337,6 +338,7 @@ bool StreamBuffer::WaitPendingOperations(const std::vector<Watch>& watches,
 		if (!Scheduler().IsFree(watch.tick) && !allow_wait) {
 			return false;
 		}
+		SyncAudit::Scope audit_scope(SyncAudit::Site::StreamWrap);
 		Scheduler().Wait(watch.tick);
 		if (Usage() == MemoryUsage::Download) {
 			Scheduler().WaitPriorityOperations(watch.tick);

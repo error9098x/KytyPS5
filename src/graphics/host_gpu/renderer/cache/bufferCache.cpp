@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/syncAudit.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "kernel/memory.h"
 
@@ -505,14 +506,29 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		std::scoped_lock lock {g_fault_pages_mutex};
 		g_fault_pages[vaddr & ~(TRACKER_PAGE_SIZE - 1)]++;
 	}
-	const bool caller_wait = FaultWaitOnCallerEnabled() && !GuestGpu::IsGpuThread();
+	const bool caller_is_gpu_thread = GuestGpu::IsGpuThread();
+	const bool caller_wait = FaultWaitOnCallerEnabled() && !caller_is_gpu_thread;
 	std::shared_ptr<CallerReadback> pending;
 	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, origin,
-	                                                caller_wait, &pending] {
+	                                                caller_wait, caller_is_gpu_thread, &pending] {
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
 		}
 		ReadbackStats::Scope scope(origin);
+		SyncAudit::Site audit_site = SyncAudit::Site::Other;
+		switch (origin) {
+			case ReadbackStats::Origin::Fault:
+				audit_site = caller_is_gpu_thread ? SyncAudit::Site::ReadbackSelf
+				                                  : SyncAudit::Site::ReadbackFault;
+				break;
+			case ReadbackStats::Origin::ClearMeta: audit_site = SyncAudit::Site::ReadbackClear; break;
+			case ReadbackStats::Origin::IndirectArgs:
+				audit_site = SyncAudit::Site::ReadbackIndirect;
+				break;
+			case ReadbackStats::Origin::Invalidate: audit_site = SyncAudit::Site::ReadbackInval; break;
+			default: break;
+		}
+		SyncAudit::Scope audit_scope(audit_site);
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
 		uint64_t start = vaddr;
@@ -1025,8 +1041,11 @@ void BufferCache::RunGarbageCollector() {
 
 	// Publish all queued downloads before releasing their tracked pages and owners.
 	const auto completion_tick = m_scheduler.CurrentTick();
-	m_scheduler.Wait(completion_tick);
-	m_scheduler.WaitPriorityOperations(completion_tick);
+	{
+		SyncAudit::Scope audit_scope(SyncAudit::Site::Gc);
+		m_scheduler.Wait(completion_tick);
+		m_scheduler.WaitPriorityOperations(completion_tick);
+	}
 	for (const auto id: dirty_buffers) {
 		auto& buffer = m_slot_buffers[id];
 		m_memory_tracker.UnmarkRegionAsGpuModified(buffer.CpuAddress(), buffer.Size());

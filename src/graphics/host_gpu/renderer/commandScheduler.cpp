@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/syncAudit.h"
 #include "graphics/host_gpu/renderer/threadQos.h"
 
 #include <algorithm>
@@ -179,23 +180,48 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 }
 
 void CommandScheduler::FlushAndWait() {
+	const bool audit = SyncAudit::Enabled();
+	const auto start = audit ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	const auto tick = Submit();
+	const bool blocked = audit && !m_master.IsFree(tick);
 	m_master.Wait(tick);
+	if (audit) {
+		SyncAudit::Record(true, blocked, start);
+	}
 	BeginNext();
 }
 
 void CommandScheduler::Finish() {
 	CheckActive();
-	if (!m_command.IsInvalid()) {
+	const bool audit = SyncAudit::Enabled();
+	const auto start = audit ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+	const bool drain = !m_command.IsInvalid();
+	if (drain) {
 		Submit();
 	}
+	const bool blocked = audit && !m_master.IsFree(CurrentTick() - 1);
 	m_master.Wait(CurrentTick() - 1);
+	if (audit) {
+		SyncAudit::Record(drain, blocked, start);
+	}
 	BeginNext();
 	PopPendingOperations();
 }
 
 void CommandScheduler::Wait(uint64_t tick) {
 	EXIT_IF(tick > CurrentTick());
+	if (SyncAudit::Enabled()) {
+		const auto start   = std::chrono::steady_clock::now();
+		const bool drain   = tick == CurrentTick();
+		const bool blocked = drain || !m_master.IsFree(tick);
+		WaitImpl(tick);
+		SyncAudit::Record(drain, blocked, start);
+		return;
+	}
+	WaitImpl(tick);
+}
+
+void CommandScheduler::WaitImpl(uint64_t tick) {
 	if (tick == CurrentTick()) {
 		CheckActive();
 		// A stream-buffer wrap can wait while a draw is being prepared through a reference to
@@ -223,7 +249,12 @@ void CommandScheduler::PopPendingOperations() {
 			operation = std::move(m_pending_operations.front());
 			m_pending_operations.pop();
 		}
-		WaitPriorityOperations(operation.tick);
+		if (SyncAudit::Enabled() && SyncAudit::g_site == SyncAudit::Site::Other) {
+			SyncAudit::Scope audit_scope(SyncAudit::Site::Pending);
+			WaitPriorityOperations(operation.tick);
+		} else {
+			WaitPriorityOperations(operation.tick);
+		}
 		RunOperation(std::move(operation.callback));
 	}
 }
@@ -302,12 +333,21 @@ void CommandScheduler::DrainPriorityOperations() {
 void CommandScheduler::WaitPriorityOperations(uint64_t tick) {
 	EXIT_IF(g_deferred_callback_scheduler == this);
 	std::unique_lock lock(m_operation_mutex);
-	m_operation_available.wait(lock, [this, tick] {
+	const auto ready = [this, tick] {
 		const bool active_before_or_at = m_priority_active && m_priority_active_tick <= tick;
 		const bool queued_before_or_at =
 		    !m_priority_operations.empty() && m_priority_operations.front().tick <= tick;
 		return !active_before_or_at && !queued_before_or_at;
-	});
+	};
+	if (SyncAudit::Enabled() && !ready()) {
+		// Only waits that actually sleep are recorded (blocked, never a drain).
+		const auto start = std::chrono::steady_clock::now();
+		m_operation_available.wait(lock, ready);
+		lock.unlock();
+		SyncAudit::Record(false, true, start);
+		return;
+	}
+	m_operation_available.wait(lock, ready);
 }
 
 void CommandScheduler::RunOperation(Common::UniqueFunction<void>&& operation) {

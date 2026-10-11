@@ -67,6 +67,8 @@ public:
 	[[nodiscard]] GraphicContext&  Graphics() const noexcept { return m_graphics; }
 
 private:
+	void WaitImpl(uint64_t tick);
+
 	class CommandPool {
 	public:
 		CommandPool(GraphicContext& graphics, MasterSemaphore& master);
