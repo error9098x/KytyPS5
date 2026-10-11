@@ -833,6 +833,28 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 			const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[resource]);
 			const auto address = descriptor.Base48();
 			auto size = descriptor.GetSize();
+			// KYTY_RESOURCE_DUMP_HASH=<shader hash>: dump the first 160 dwords of every buffer the
+			// shader binds (first 4 binds), to check uniform/embedded-table contents at draw time.
+			static const uint64_t dump_hash = [] {
+				const char* value = std::getenv("KYTY_RESOURCE_DUMP_HASH");
+				return value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull;
+			}();
+			static std::atomic_uint dump_count = 0;
+			if (dump_hash != 0 && program.shader_hash == dump_hash && dump_count.load() < 4u * 8u) {
+				dump_count.fetch_add(1);
+				uint32_t   words[160] = {};
+				const auto bytes      = static_cast<size_t>(std::min<uint64_t>(size, sizeof(words)));
+				const bool readable   = address != 0 && bytes != 0 &&
+				                      Libs::LibKernel::Memory::TryReadBacking(address, words, bytes);
+				std::string text;
+				for (size_t w = 0; w < bytes / 4; w++) text += fmt::format("{}{:08x}", w % 8 == 0 ? " |" : " ", words[w]);
+				LOGF("ResourceDump: hash=0x%016" PRIx64 " resource=%u base=0x%012" PRIx64 " size=0x%" PRIx64
+				     " type=%u stride=%u readable=%s desc=%08x,%08x,%08x,%08x words:%s\n",
+				     program.shader_hash, resource, address, size, descriptor.Type(), descriptor.Stride(),
+				     readable ? "yes" : "no", snapshot.buffers[resource].dwords[0],
+				     snapshot.buffers[resource].dwords[1], snapshot.buffers[resource].dwords[2],
+				     snapshot.buffers[resource].dwords[3], text.c_str());
+			}
 			if (log_resources) {
 				uint32_t words[4] = {};
 				const bool readable = address != 0 && size >= sizeof(words) &&
