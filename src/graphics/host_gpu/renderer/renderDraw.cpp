@@ -1335,6 +1335,18 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			}
 		}
 	}
+	// KYTY_DEBUG_FORCE_EXPOSURE=1: also force a pixel-shader-written 1x1 RGBA32F render target
+	// (Unreal eye adaptation, e.g. 0x8047290000) to (1,1,1,1) after the draw.
+	static const bool force_exposure_rt = std::getenv("KYTY_DEBUG_FORCE_EXPOSURE") != nullptr;
+	if (force_exposure_rt) {
+		for (uint32_t i = 0; i < state.color_count; ++i) {
+			const auto id = state.color_info[i].image_id;
+			if (id) {
+				m_context.GetCommandScheduler().EndRendering();
+				m_context.GetTextureCache().DebugForceExposure(id);
+			}
+		}
+	}
 	for (uint32_t i = 0; i < state.color_count && InternalFrameStatsFrameReached(buffer); ++i) {
 		const auto& color = state.color_info[i];
 		m_context.GetTextureCache().LogInternalFrameStats(
