@@ -1764,6 +1764,23 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		EXIT_IF(INSTRUCTION_TRAMPOLINE_SIZE > UINT64_MAX - program->mapped_size);
 		program->mapped_size += INSTRUCTION_TRAMPOLINE_SIZE;
 	}
+#if defined(__APPLE__)
+	// KYTY_WIDE_STORE_NOTRAP: a second trampoline zone in the same mapping, past everything else,
+	// at displacement [sentinel << 24, (sentinel + 1) << 24) from every byte of the image (see
+	// WideStoreNoTrapZone). Only its touched pages become resident.
+	uint64_t      notrap_zone_offset = 0;
+	uint64_t      notrap_zone_size   = 0;
+	const uint8_t notrap_sentinel =
+	    split_wide_stores && X64InstructionEmulator::WideStoreNoTrapEnabled()
+	        ? X64InstructionEmulator::WideStoreNoTrapSentinel(program->mapped_size)
+	        : 0;
+	if (notrap_sentinel != 0) {
+		notrap_zone_offset = uint64_t {notrap_sentinel} << 24u;
+		notrap_zone_size   = AlignUp(program->base_size_aligned + (uint64_t {1} << 24u) + 16,
+		                             GUEST_PAGE_SIZE);
+		program->mapped_size = notrap_zone_offset + notrap_zone_size;
+	}
+#endif
 
 	program->base_vaddr = Libs::LibKernel::Memory::AllocateProgramMemory(
 	    g_desired_base_addr, program->mapped_size, Common::VirtualMemory::Mode::ExecuteReadWrite,
@@ -1934,10 +1951,28 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		                  GetGuestInstructionTrampolineBytesUsed(
 		                      reinterpret_cast<void*>(program->base_vaddr));
 		const uint64_t cursor_begin = cursor;
+		X64InstructionEmulator::WideStoreNoTrapZone  notrap_zone;
+		X64InstructionEmulator::WideStoreNoTrapZone* notrap = nullptr;
+		if (notrap_sentinel != 0) {
+			notrap_zone.begin    = program->base_vaddr + notrap_zone_offset;
+			notrap_zone.end      = notrap_zone.begin + notrap_zone_size;
+			notrap_zone.sentinel = notrap_sentinel;
+			notrap_zone.chunk_used.assign((notrap_zone_size + (uint64_t {1} << 20u) - 1) >> 20u, 0);
+			// If Rosetta did not deliver this sentinel as SIGILL at its own address the call would
+			// not return 0x5a17; a different signal ends the process here, before any patching.
+			LOGF("Guest 256-bit store splitting: KYTY_WIDE_STORE_NOTRAP self-test, sentinel=0x%02x "
+			     "zone=0x%016" PRIx64 "\n",
+			     notrap_sentinel, notrap_zone.begin);
+			if (X64InstructionEmulator::WideStoreNoTrapSelfTest(&notrap_zone)) {
+				notrap = &notrap_zone;
+			} else {
+				LOGF("Guest 256-bit store splitting: KYTY_WIDE_STORE_NOTRAP self-test failed, using ud2\n");
+			}
+		}
 		for (const auto& [segment_addr, segment_size]: executable_segments) {
 			const auto result = X64InstructionEmulator::SplitWideStores(
 			    segment_addr, segment_size, &cursor,
-			    program->instruction_trampoline_vaddr + program->instruction_trampoline_size);
+			    program->instruction_trampoline_vaddr + program->instruction_trampoline_size, notrap);
 			Common::VirtualMemory::FlushInstructionCache(segment_addr, segment_size);
 			LOGF("Guest 256-bit store splitting: %s, candidates=%" PRIu64 ", patched=%" PRIu64
 			     " (via padding=%" PRIu64 ", ud2=%" PRIu64 ", moved=%" PRIu64 "), short=%" PRIu64
@@ -1945,6 +1980,25 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			     Common::PathToString(program->file_name.filename()).c_str(), result.candidates,
 			     result.patched, result.via_cave, result.trapped, result.relocated,
 			     result.too_short, result.unsupported, result.trampoline_bytes);
+			if (notrap != nullptr) {
+				LOGF("Guest 256-bit store splitting: %s, notrap=%" PRIu64 ", notrap_kept=%" PRIu64
+				     "\n",
+				     Common::PathToString(program->file_name.filename()).c_str(), result.notrap,
+				     result.notrap_kept);
+			}
+		}
+		if (notrap != nullptr) {
+			uint64_t zone_bytes = 0;
+			for (size_t chunk = 0; chunk < notrap_zone.chunk_used.size(); chunk++) {
+				const uint64_t used = notrap_zone.chunk_used[chunk];
+				if (used != 0) {
+					Common::VirtualMemory::FlushInstructionCache(
+					    notrap_zone.begin + chunk * (uint64_t {1} << 20u), used);
+					zone_bytes += used;
+				}
+			}
+			LOGF("Guest 256-bit store splitting: KYTY_WIDE_STORE_NOTRAP zone bytes=%" PRIu64 "\n",
+			     zone_bytes);
 		}
 		// One flush for the trampolines written by all segments.
 		if (cursor > cursor_begin) {

@@ -2,6 +2,7 @@
 
 #include "common/common.h"
 #include "common/logging/log.h"
+#include "common/virtualMemory.h"
 
 #include <Zydis/Zydis.h>
 #include <algorithm>
@@ -963,8 +964,226 @@ static WideStoreTrap* FindWideStoreTrapEntry(uint64_t site) {
 	return nullptr;
 }
 
+// KYTY_WIDE_STORE_NOTRAP (see WideStoreNoTrapZone in the header).
+// One-byte opcodes that raise #UD in 64-bit mode whatever follows them (push/pop es, cs, ss, ds;
+// daa, das, aaa, aas; pusha, popa), ascending.
+constexpr std::array<uint8_t, 13> NoTrapSentinels     = {0x06, 0x07, 0x0e, 0x16, 0x17, 0x1e, 0x1f,
+                                                         0x27, 0x2f, 0x37, 0x3f, 0x60, 0x61};
+constexpr uint64_t                NoTrapChunk         = uint64_t {1} << 20u;
+constexpr uint64_t                NoTrapSelfTestBytes = 64;
+
+bool WideStoreNoTrapEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_WIDE_STORE_NOTRAP");
+		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+	}();
+	return enabled;
+}
+
+uint8_t WideStoreNoTrapSentinel(uint64_t min_distance) {
+	for (const auto sentinel: NoTrapSentinels) {
+		if ((uint64_t {sentinel} << 24u) >= min_distance) {
+			return sentinel;
+		}
+	}
+	return 0;
+}
+
+bool WideStoreNoTrapSelfTest(WideStoreNoTrapZone* zone) {
+	if (zone == nullptr || zone->chunk_used.empty() || zone->end - zone->begin < NoTrapSelfTestBytes) {
+		return false;
+	}
+	// begin: sentinel (SIGILL, redirected) -> begin + 16: mov eax, 0x5a17; ret
+	auto*                   code = reinterpret_cast<uint8_t*>(zone->begin);
+	constexpr uint8_t       Stub[] = {0xb8, 0x17, 0x5a, 0x00, 0x00, 0xc3};
+	std::memset(code, 0xcc, NoTrapSelfTestBytes);
+	code[0] = zone->sentinel;
+	std::memcpy(code + 16, Stub, sizeof(Stub));
+	zone->chunk_used[0] = std::max(zone->chunk_used[0], NoTrapSelfTestBytes);
+	Common::VirtualMemory::FlushInstructionCache(zone->begin, NoTrapSelfTestBytes);
+	if (!RegisterWideStoreTrap(zone->begin, zone->begin + 16)) {
+		return false;
+	}
+	using TestFunc = int (*)();
+	return reinterpret_cast<TestFunc>(zone->begin)() == 0x5a17;
+}
+
+// vmovups xmmword [mem], xmmN; vextractf128 xmmword [mem + 16], ymmN, 1 -- the same pair HEAD
+// emits. next_ip is the address after the original store (base of a RIP-relative operand).
+static bool EncodeSplitStore(const ZydisDecodedOperand& mem, ZydisRegister ymm, uint64_t next_ip,
+                             uint64_t at, uint8_t* out, uint64_t capacity, uint64_t* length) {
+	const auto xmm = static_cast<ZydisRegister>(ZYDIS_REGISTER_XMM0 + (ymm - ZYDIS_REGISTER_YMM0));
+	ZydisEncoderRequest low {};
+	low.machine_mode          = ZYDIS_MACHINE_MODE_LONG_64;
+	low.mnemonic              = ZYDIS_MNEMONIC_VMOVUPS;
+	low.operand_count         = 2;
+	SetMemoryOperand(low.operands[0], mem, next_ip, 0);
+	low.operands[1].type      = ZYDIS_OPERAND_TYPE_REGISTER;
+	low.operands[1].reg.value = xmm;
+	ZydisEncoderRequest high {};
+	high.machine_mode          = ZYDIS_MACHINE_MODE_LONG_64;
+	high.mnemonic              = ZYDIS_MNEMONIC_VEXTRACTF128;
+	high.operand_count         = 3;
+	SetMemoryOperand(high.operands[0], mem, next_ip, 16);
+	high.operands[1].type      = ZYDIS_OPERAND_TYPE_REGISTER;
+	high.operands[1].reg.value = ymm;
+	high.operands[2].type      = ZYDIS_OPERAND_TYPE_IMMEDIATE;
+	high.operands[2].imm.u     = 1;
+	uint64_t low_length        = 0;
+	uint64_t high_length       = 0;
+	if (!EncodeAt(low, at, out, capacity, &low_length) ||
+	    !EncodeAt(high, at + low_length, out + low_length, capacity - low_length, &high_length)) {
+		return false;
+	}
+	*length = low_length + high_length;
+	return true;
+}
+
+// Copies the instruction at ip to at. Position-independent instructions are copied byte for byte
+// (segment prefixes and all); RIP-relative operands and relative jmp/jcc are re-encoded with
+// their absolute address. Calls, syscalls and interrupts are refused by the caller.
+static bool RelocateInstruction(const ZydisDecodedInstruction& insn, const ZydisDecodedOperand* ops,
+                                uint64_t ip, uint64_t at, uint8_t* out, uint64_t capacity,
+                                uint64_t* length) {
+	const bool relative_branch = insn.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE &&
+	                             (insn.attributes & ZYDIS_ATTRIB_IS_RELATIVE) != 0;
+	bool       rip_relative    = false;
+	for (uint32_t i = 0; i < insn.operand_count; i++) {
+		rip_relative |= ops[i].type == ZYDIS_OPERAND_TYPE_MEMORY && ops[i].mem.base == ZYDIS_REGISTER_RIP;
+	}
+	if (!relative_branch && !rip_relative) {
+		if (insn.length > capacity) {
+			return false;
+		}
+		std::memcpy(out, reinterpret_cast<const void*>(ip), insn.length);
+		*length = insn.length;
+		return true;
+	}
+	if ((relative_branch && insn.meta.category != ZYDIS_CATEGORY_UNCOND_BR &&
+	     insn.meta.category != ZYDIS_CATEGORY_COND_BR) ||
+	    UsesSegmentBase(insn, ops)) {
+		return false;
+	}
+	ZydisEncoderRequest request {};
+	if (!ZYAN_SUCCESS(ZydisEncoderDecodedInstructionToEncoderRequest(
+	        &insn, ops, insn.operand_count_visible, &request))) {
+		return false;
+	}
+	for (uint32_t k = 0; k < request.operand_count; k++) {
+		auto& op = request.operands[k];
+		if (op.type == ZYDIS_OPERAND_TYPE_MEMORY && op.mem.base == ZYDIS_REGISTER_RIP) {
+			op.mem.displacement += static_cast<int64_t>(ip + insn.length);
+		}
+	}
+	if (relative_branch) {
+		ZyanU64 target = 0;
+		if (!ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &ops[0], ip, &target))) {
+			return false;
+		}
+		request.operands[0].imm.u = target;
+		request.branch_type       = ZYDIS_BRANCH_TYPE_NONE;
+		request.branch_width      = ZYDIS_BRANCH_WIDTH_NONE;
+	}
+	return EncodeAt(request, at, out, capacity, length); // fails for rel8-only jrcxz/loop
+}
+
+// Patches the 4-byte store at site as "jmp rel32" whose last byte (on the next instruction's first
+// byte) is the zone's sentinel. Trampoline: split store; relocated next instruction (split too if
+// it is a 256-bit store itself); jmp to the instruction after it. The next instruction's address
+// is registered as a trap site that resumes at its relocated copy. Returns false, changing
+// nothing, when the site does not qualify; the caller then falls back to ud2.
+template <typename InCave>
+static bool TryPatchNoTrap(ZydisDecoder* decoder, uint64_t address, uint64_t size, uint64_t site,
+                           uint64_t length, const ZydisDecodedOperand& mem, ZydisRegister ymm,
+                           const std::vector<uint64_t>& branch_targets, const InCave& in_cave,
+                           WideStoreNoTrapZone* zone, uint64_t* consumed_until,
+                           uint64_t* trampoline_bytes) {
+	constexpr uint64_t JumpSize = 5;
+	const uint64_t     next     = site + length;
+	// A direct branch to the next instruction would hit the sentinel on every execution: keep ud2.
+	if (length != JumpSize - 1 || next >= address + size || zone->chunk_used.empty() ||
+	    std::binary_search(branch_targets.begin(), branch_targets.end(), next) || in_cave(next)) {
+		return false;
+	}
+	ZydisDecodedInstruction insn {};
+	ZydisDecodedOperand     ops[ZYDIS_MAX_OPERAND_COUNT] {};
+	if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(decoder, reinterpret_cast<const void*>(next),
+	                                         address + size - next, &insn, ops)) ||
+	    insn.meta.category == ZYDIS_CATEGORY_CALL || insn.meta.category == ZYDIS_CATEGORY_SYSTEM ||
+	    insn.meta.category == ZYDIS_CATEGORY_INTERRUPT || insn.mnemonic == ZYDIS_MNEMONIC_UD2) {
+		return false;
+	}
+	const bool next_is_store = IsPlainWideStore(insn, ops);
+	if (next_is_store && ops[0].mem.segment != ZYDIS_REGISTER_DS &&
+	    ops[0].mem.segment != ZYDIS_REGISTER_SS && ops[0].mem.segment != ZYDIS_REGISTER_NONE) {
+		return false;
+	}
+	const uint64_t back      = next + insn.length;
+	const uint64_t window_lo = site + JumpSize + (uint64_t {zone->sentinel} << 24u);
+	const uint64_t window_hi = window_lo + (uint64_t {1} << 24u);
+	if (window_lo < zone->begin) {
+		return false;
+	}
+	uint8_t buffer[128];
+	for (uint64_t chunk = (window_lo - zone->begin + NoTrapChunk - 1) / NoTrapChunk;
+	     chunk < zone->chunk_used.size(); chunk++) {
+		const uint64_t chunk_begin = zone->begin + chunk * NoTrapChunk;
+		const uint64_t chunk_end   = std::min(chunk_begin + NoTrapChunk, zone->end);
+		const uint64_t at          = chunk_begin + zone->chunk_used[chunk];
+		if (at >= window_hi) {
+			break;
+		}
+		uint64_t split_length = 0;
+		uint64_t moved_length = 0;
+		if (!EncodeSplitStore(mem, ymm, next, at, buffer, sizeof(buffer), &split_length)) {
+			return false;
+		}
+		const bool moved_ok =
+		    next_is_store
+		        ? EncodeSplitStore(ops[0], ops[1].reg.value, back, at + split_length,
+		                           buffer + split_length, sizeof(buffer) - split_length, &moved_length)
+		        : RelocateInstruction(insn, ops, next, at + split_length, buffer + split_length,
+		                              sizeof(buffer) - split_length, &moved_length);
+		if (!moved_ok) {
+			return false;
+		}
+		const uint64_t prologue = split_length + moved_length;
+		const uint64_t body     = prologue + JumpSize;
+		if (at + body > chunk_end) {
+			continue;
+		}
+		const int64_t to_tramp = static_cast<int64_t>(at) - static_cast<int64_t>(site + JumpSize);
+		const int64_t to_back =
+		    static_cast<int64_t>(back) - static_cast<int64_t>(at + prologue + JumpSize);
+		if (to_tramp < 0 || to_tramp > INT32_MAX || to_back < INT32_MIN || to_back > INT32_MAX ||
+		    static_cast<uint8_t>(static_cast<uint64_t>(to_tramp) >> 24u) != zone->sentinel) {
+			return false;
+		}
+		if (!RegisterWideStoreTrap(next, at + split_length)) {
+			return false;
+		}
+		auto* out = reinterpret_cast<uint8_t*>(at);
+		std::memcpy(out, buffer, prologue);
+		out[prologue]     = 0xE9;
+		const auto back32 = static_cast<int32_t>(to_back);
+		std::memcpy(out + prologue + 1, &back32, sizeof(back32));
+		zone->chunk_used[chunk] += (body + 15u) & ~uint64_t {15u};
+		*trampoline_bytes += body;
+		// site[0..3] were the store; site[4] = next[0] becomes the sentinel. next[1..] stay as is.
+		auto*      code    = reinterpret_cast<uint8_t*>(site);
+		const auto tramp32 = static_cast<int32_t>(to_tramp);
+		code[0]            = 0xE9;
+		std::memcpy(code + 1, &tramp32, sizeof(tramp32));
+		if (next_is_store) {
+			*consumed_until = back;
+		}
+		return true;
+	}
+	return false;
+}
+
 WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* cursor,
-                                     uint64_t trampoline_end) {
+                                     uint64_t trampoline_end, WideStoreNoTrapZone* notrap) {
 	WideStoreSplitResult result;
 	ZydisDecoder         decoder {};
 	if (!ZYAN_SUCCESS(
@@ -1225,6 +1444,26 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			const auto ymm = operands[1].reg.value;
 			const auto xmm =
 			    static_cast<ZydisRegister>(ZYDIS_REGISTER_XMM0 + (ymm - ZYDIS_REGISTER_YMM0));
+			if (trap && notrap != nullptr && moved_count == 0) {
+				const auto in_cave = [&](uint64_t ip) {
+					auto it = std::upper_bound(
+					    caves.begin(), caves.end(), ip,
+					    [](uint64_t v, const Cave& cave) { return v < cave.start; });
+					return it != caves.begin() && ip < std::prev(it)->start + std::prev(it)->size;
+				};
+				uint64_t consumed = 0;
+				if (TryPatchNoTrap(&decoder, address, size, reinterpret_cast<uint64_t>(code), length,
+				                   mem, ymm, branch_targets, in_cave, notrap, &consumed,
+				                   &result.trampoline_bytes)) {
+					if (consumed != 0) {
+						skip_until = consumed - address;
+					}
+					result.notrap++;
+					result.patched++;
+					continue;
+				}
+				result.notrap_kept++;
+			}
 
 			// Low half: vmovups xmmword [mem], xmmN
 			ZydisEncoderRequest low {};
