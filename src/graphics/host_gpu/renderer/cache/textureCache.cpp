@@ -2384,6 +2384,17 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 	}
 }
 
+// KYTY_GC_TUNING=1 (opt-in): evict sooner and more under memory pressure. The default ages grow
+// with pressure (aggressive considers only images idle >=160 GC ticks), which frees fewer images
+// exactly when memory is short; the deletion cap is 40 per frame, and usage is never re-read.
+static bool GcTuningEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_GC_TUNING");
+		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+	}();
+	return enabled;
+}
+
 void TextureCache::RunGarbageCollector() {
 	std::scoped_lock lock {m_lock};
 	const uint64_t   tick = m_gc_tick++;
@@ -2396,8 +2407,12 @@ void TextureCache::RunGarbageCollector() {
 	const auto collect = [&](bool allow_aggressive) {
 		bool           pressured  = m_total_used_memory >= m_pressure_gc_memory;
 		bool           aggressive = allow_aggressive && m_total_used_memory >= m_critical_gc_memory;
-		const uint64_t age       = std::min<uint64_t>(aggressive ? 160 : pressured ? 80 : 16, tick);
-		size_t         deletions = aggressive ? 40 : pressured ? 20 : 10;
+		const bool     tuning = GcTuningEnabled();
+		const uint64_t age    = std::min<uint64_t>(
+            tuning ? (aggressive ? 8 : 16) : (aggressive ? 160 : pressured ? 80 : 16), tick);
+		size_t deletions = tuning ? (aggressive ? 128 : pressured ? 40 : 10)
+		                          : (aggressive ? 40 : pressured ? 20 : 10);
+		size_t freed     = 0;
 		std::vector<ImageId> candidates;
 		candidates.reserve(deletions);
 		// Deleting depth recursively deletes its stencil association, so finish LRU traversal
@@ -2428,6 +2443,9 @@ void TextureCache::RunGarbageCollector() {
 				}
 			}
 			FreeImage(id);
+			if (tuning && m_graphics.CanReportMemoryUsage() && (++freed % 8) == 0) {
+				m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
+			}
 			if (m_total_used_memory < m_critical_gc_memory && aggressive) {
 				deletions >>= 2;
 				aggressive = false;
