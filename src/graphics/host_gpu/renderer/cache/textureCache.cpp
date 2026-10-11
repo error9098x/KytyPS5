@@ -2001,11 +2001,19 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 		return;
 	}
 	const uint32_t width = std::max(backing.extent.width >> mip, 1u);
-	const uint32_t height = std::max(backing.extent.height >> mip, 1u);
+	uint32_t       height = std::max(backing.extent.height >> mip, 1u);
 	// 3D (generic formats): read back the whole volume and report per-slice coverage.
 	const uint32_t depth3d = is_3d ? std::max(backing.extent.depth >> mip, 1u) : 1u;
+	const uint64_t max_pixels = (64u * 1024u * 1024u) / bpp;
+	if (!is_3d && static_cast<uint64_t>(width) * height > max_pixels && width <= max_pixels) {
+		// Too large for the 64 MiB download stream (e.g. 4098x1296 RGBA32F FFT spectra):
+		// meter only the top rows that fit instead of skipping the image.
+		const auto full_height = height;
+		height = static_cast<uint32_t>(max_pixels / width);
+		LOGF("InternalFrameStats: sample=%u rows_clamped extent=%ux%u rows=%u\n", sample, width, full_height, height);
+	}
 	const uint64_t pixels = static_cast<uint64_t>(width) * height * depth3d;
-	if (pixels == 0 || pixels > (64u * 1024u * 1024u) / bpp) {
+	if (pixels == 0 || pixels > max_pixels) {
 		LOGF("InternalFrameStats: sample=%u skip oversized extent=%ux%u\n", sample, width, height);
 		return;
 	}
@@ -2033,6 +2041,17 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 	    vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &barrier, 0, nullptr);
 	m_scheduler.FlushAndWait();
 	download.Invalidate(offset, size);
+	// KYTY_INTERNAL_FRAME_RAW_DIR=<dir>: also write the raw readback bytes of each sampled image
+	// (sample_<n>_<address>_<w>x<h>[x<d>]_<vkformat>.raw) for offline analysis.
+	if (const char* raw_dir = std::getenv("KYTY_INTERNAL_FRAME_RAW_DIR"); raw_dir != nullptr && raw_dir[0] != '\0') {
+		char name[256];
+		std::snprintf(name, sizeof(name), "/sample_%03u_%010" PRIx64 "_%ux%ux%u_%d.raw", sample, image.info.data.address, width,
+		              height, depth3d, static_cast<int>(backing.format));
+		if (FILE* f = std::fopen((std::string(raw_dir) + name).c_str(), "wb"); f != nullptr) {
+			std::fwrite(mapped, 1, size, f);
+			std::fclose(f);
+		}
+	}
 	if (generic) {
 		auto half_to_float = [](uint32_t h, uint32_t man_bits) {
 			const uint32_t exp = (h >> man_bits) & 0x1Fu, man = h & ((1u << man_bits) - 1u);
