@@ -545,8 +545,18 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			const bool taken = DownloadBufferMemory<true>(buffer, start, end - start);
 			m_caller_capture = nullptr;
 			if (taken) {
-				entry->start      = start;
-				entry->size       = end - start;
+				// The copy takes whole GPU-dirty tracker pages (their bytes left
+				// m_gpu_modified_ranges), so the entry must own the page-aligned extent of
+				// everything it took, not just the faulting byte: a later access anywhere in
+				// those pages has to finish this readback first.
+				uint64_t lo = start & ~(TRACKER_PAGE_SIZE - 1);
+				uint64_t hi = Common::AlignUp(end, TRACKER_PAGE_SIZE);
+				for (const auto& [address, bytes]: entry->ranges) {
+					lo = std::min(lo, address & ~(TRACKER_PAGE_SIZE - 1));
+					hi = std::max(hi, Common::AlignUp(address + bytes, TRACKER_PAGE_SIZE));
+				}
+				entry->start      = lo;
+				entry->size       = hi - lo;
 				entry->is_write   = is_write;
 				entry->write_addr = vaddr;
 				entry->write_size = size;
