@@ -157,7 +157,14 @@ constexpr uint64_t NumFramesBeforeRemoval = 32;
 // always enables it).
 static bool TitleDefaultReadbackLinearImages() {
 	if (const char* value = std::getenv("KYTY_READBACK_LINEAR_IMAGES"); value != nullptr) {
-		return value[0] != '0';
+		if (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0) {
+			return true;
+		}
+		if (std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0) {
+			return false;
+		}
+		LOGF("TextureCache: KYTY_READBACK_LINEAR_IMAGES=%s ignored (expected 0, 1, true or false)\n",
+		     value);
 	}
 	std::string title_id;
 	const bool  enabled = Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id) && title_id == "PPSA10112";
