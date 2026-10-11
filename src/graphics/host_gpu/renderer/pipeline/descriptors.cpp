@@ -88,6 +88,7 @@ vk::DescriptorImageInfo MakeImageInfo(const TextureBinding& texture, uint32_t el
 		view = texture.mip_views[element];
 	}
 	EXIT_IF(!texture.image_id || view == nullptr || texture.layout == vk::ImageLayout::eUndefined);
+	ViewCheck::Use(view, 0, "MakeImageInfo");
 	return {nullptr, view, texture.layout};
 }
 

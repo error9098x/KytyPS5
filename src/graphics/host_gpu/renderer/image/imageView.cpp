@@ -393,6 +393,7 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 		     view_info.level_count, view_info.base_layer, view_info.layer_count,
 		     static_cast<vk::ImageUsageFlags::MaskType>(view_info.usage));
 	}
+	ViewCheck::Add(view, info.data.address);
 	SetVulkanObjectNameF(
 	    m_graphics.device, view,
 	    "Kyty.ImageView[guest=0x{:016x} format={} aspect=0x{:x} mip={}+{} layer={}+{}]",
@@ -404,3 +405,53 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 }
 
 } // namespace Libs::Graphics
+
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <unordered_map>
+
+namespace Libs::Graphics::ViewCheck {
+namespace {
+std::mutex                                          g_mutex;
+std::unordered_map<VkImageView, uint64_t>           g_live;
+std::unordered_map<VkImageView, uint64_t>           g_dead;
+} // namespace
+bool Enabled() {
+	static const bool enabled = [] {
+		const char* v = std::getenv("KYTY_VIEW_CHECK");
+		return v != nullptr && v[0] == '1';
+	}();
+	return enabled;
+}
+void Add(vk::ImageView view, uint64_t guest_address) {
+	if (!Enabled()) return;
+	std::lock_guard lock(g_mutex);
+	g_live[static_cast<VkImageView>(view)] = guest_address;
+	g_dead.erase(static_cast<VkImageView>(view));
+}
+void Remove(vk::ImageView view) {
+	if (!Enabled()) return;
+	std::lock_guard lock(g_mutex);
+	auto it = g_live.find(static_cast<VkImageView>(view));
+	if (it != g_live.end()) {
+		if (g_dead.size() > 65536) g_dead.clear();
+		g_dead[it->first] = it->second;
+		g_live.erase(it);
+	}
+}
+void Use(vk::ImageView view, uint64_t guest_address, const char* where) {
+	if (!Enabled() || view == nullptr) return;
+	std::lock_guard lock(g_mutex);
+	if (g_live.find(static_cast<VkImageView>(view)) != g_live.end()) return;
+	static uint32_t reports = 0;
+	if (reports++ >= 64) return;
+	auto dead = g_dead.find(static_cast<VkImageView>(view));
+	std::printf("[viewcheck] STALE view=%p binding_guest=0x%016" PRIx64
+	            " destroyed_view_guest=0x%016" PRIx64 " where=%s\n",
+	            static_cast<void*>(static_cast<VkImageView>(view)), guest_address,
+	            dead != g_dead.end() ? dead->second : 0ull, where);
+	std::fflush(stdout);
+}
+} // namespace Libs::Graphics::ViewCheck

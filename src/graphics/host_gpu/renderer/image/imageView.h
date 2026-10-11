@@ -139,4 +139,14 @@ ValidateStorageImageResource(const ShaderRecompiler::IR::ImageResource& resource
 
 } // namespace Libs::Graphics
 
+
+namespace Libs::Graphics::ViewCheck {
+// Opt-in (KYTY_VIEW_CHECK=1) registry of live VkImageViews, used to catch descriptors that
+// reference a destroyed view (host use-after-free inside MoltenVK/Metal).
+bool Enabled();
+void Add(vk::ImageView view, uint64_t guest_address);
+void Remove(vk::ImageView view);
+void Use(vk::ImageView view, uint64_t guest_address, const char* where);
+} // namespace Libs::Graphics::ViewCheck
+
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_IMAGEVIEW_H_

@@ -757,6 +757,7 @@ Image::~Image() {
 	KYTY_PROFILER_FUNCTION();
 	for (const auto& cached: views) {
 		if (cached.view != nullptr) {
+			ViewCheck::Remove(cached.view);
 			m_graphics.device.destroyImageView(cached.view, nullptr);
 		}
 	}
