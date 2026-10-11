@@ -788,6 +788,47 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i]);
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
+		// KYTY_IMAGE_TRACE_HASH=<shader hash>: log where each image of that shader comes from
+		// (resource source, first use pc, guest T#) and which cached image it resolved to.
+		// KYTY_IMAGE_TRACE_EVERY=<n> (default 60) logs one bind in n, at most 64 lines.
+		static const uint64_t trace_hash = [] {
+			const char* value = std::getenv("KYTY_IMAGE_TRACE_HASH");
+			return value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull;
+		}();
+		static const uint32_t trace_every = [] {
+			const char* value = std::getenv("KYTY_IMAGE_TRACE_EVERY");
+			return value != nullptr ? std::max<uint32_t>(1u, std::strtoul(value, nullptr, 0)) : 60u;
+		}();
+		static std::atomic_uint trace_count = 0;
+		static std::atomic_uint trace_lines = 0;
+		if (trace_hash != 0 && program.shader_hash == trace_hash && i == 0 &&
+		    trace_count.fetch_add(1) % trace_every == 0 && trace_lines.load() < 64u) {
+			std::string user;
+			for (size_t w = 0; w < snapshot.user_data.size() && w < 32; w++) {
+				user += fmt::format("{}{:08x}", w % 8 == 0 ? " |" : " ", snapshot.user_data[w]);
+			}
+			LOGF("ImageTrace: hash=0x%016" PRIx64 " images=%zu user_data_base=%u user:%s\n",
+			     program.shader_hash, program.info.images.size(),
+			     static_cast<uint32_t>(program.user_data_base), user.c_str());
+		}
+		if (trace_hash != 0 && program.shader_hash == trace_hash &&
+		    (trace_count.load() - 1) % trace_every == 0 && trace_lines.fetch_add(1) < 64u) {
+			const auto& resource   = program.info.images[i];
+			const auto  descriptor = DecodeNativeDescriptor<ShaderTextureResource>(snapshot.images[i]);
+			uint64_t    resolved   = 0;
+			if (binding.image_id) {
+				resolved = m_context.GetTextureCache().GetImage(binding.image_id).info.data.address;
+			}
+			LOGF("ImageTrace:   image=%u source=%u class=%u first_use_pc=0x%x dim=%u tsharp_base=0x%012" PRIx64
+			     " format=%u extent=%ux%u resolved=0x%012" PRIx64 " T#=%08x,%08x,%08x,%08x\n",
+			     i, resource.source, static_cast<uint32_t>(resource.resource_class),
+			     resource.first_use_pc, static_cast<uint32_t>(resource.dimension), descriptor.Base40(),
+			     static_cast<uint32_t>(descriptor.Format()),
+			     static_cast<uint32_t>(descriptor.Width5()) + 1u,
+			     static_cast<uint32_t>(descriptor.Height5()) + 1u, resolved,
+			     snapshot.images[i].dwords[0], snapshot.images[i].dwords[1],
+			     snapshot.images[i].dwords[2], snapshot.images[i].dwords[3]);
+		}
 		binding.mip_views.swap(prepared.images[i].mip_views);
 		binding.mip_views.clear();
 		prepared.images[i] = std::move(binding);
