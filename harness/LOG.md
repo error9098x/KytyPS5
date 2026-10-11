@@ -659,3 +659,37 @@ Two Apple/MoltenVK blockers cleared; the game now reaches mesh shaders.
   compute storage-image writes.
 - New diagnostic: `KYTY_INTERNAL_FRAME_MIN_SECONDS=N` limits internal frame stats to work
   recorded N s after start (sample the menu, not boot).
+
+## 2026-10-11 15:45 IST: forced exposure test; title-menu background still black; 10/11/11 lead downgraded
+
+- New opt-in diagnostic `46914434`: `KYTY_DEBUG_FORCE_EXPOSURE=1` clears every compute-written
+  1x1 RGBA32F storage image to (1,1,1,1) after the dispatch (optional
+  `KYTY_DEBUG_FORCE_EXPOSURE_ADDRESS=<addr>` filter). Off by default. It fired on
+  `0x8063460000`, `0x8069ac0000`, `0x8069bd0000`.
+- `shtsm-forceexp-2` (`/tmp/titlerun.sh`, 105 s): the title menu is reached
+  (`frames/frame_000780.png`) and the background is **still black**. So forcing the
+  compute-written exposure textures does not bring the scene back.
+- `shtsm-forceexp-stats-3` (stats from 100 s, menu) shows why the test is not conclusive:
+  the exposure that matches the menu is ALSO written by a **pixel shader** into a render target:
+  1x1 RGBA32F `0x8047290000` = (0.0003, 0.0003, 654.75, 1), ps `0x6db13477175bcbde`, fed by a
+  16x2 RGBA32F rt `0x80aa6b0000` (z max 652, ps `0xe3125e2c8a09fe63`). The force hook only covers
+  compute writes, so this one was not forced.
+- The exposure value looks self-consistent rather than garbage: the menu scene colour (4K
+  B10G11R11 rt `0x80a76a0000`, ps `0xe0d7ba4208d69fc6`) is 36% covered (dynamic resolution 60%,
+  2304x1296 inside 3840x2160), avg ~143 over the whole surface, so ~400 inside the viewport;
+  0.0003 x ~450 = ~0.13 (middle grey). z=652 is the average luminance, x = ~0.18/652.
+- The B10G11R11 4K compute output `0x80a54f0000`/`0x80a5690000` (cs `0x3bf666b33f2d9fea`,
+  R~0, G 0..1, B avg ~9300 max 64512) matches Unreal's motion-blur velocity-flatten layout
+  (velocity length, angle, depth), not colour, so it is probably not garbage. Downgraded the
+  "10/11/11 storage-write packing" lead. One real gap remains: storage-image views use an
+  identity swizzle, so a compute write to a guest `k10_11_11Float` image (host B10G11R11 +
+  BGRA view mapping + Reverse10_11_11 transfer) lands R/B-swapped. That swaps channels; it
+  cannot make a frame black.
+- Still suspicious: cs `0xe0c73b753a708b2b` / `0x7341209544b19208` write 240x135 RGBA16F with
+  negative averages and 65504 (inf/NaN) in ~90% of texels.
+- Where the black appears: the tonemap pass (ps `0x8b3b4df51624ff13`) writes the 4K B8G8R8A8
+  `0x80ab7b0000` with only 0.0157% non-black pixels while its known inputs (scene colour, LUT
+  32/32 slices non-zero, exposure ~0.0003) look valid.
+- Next: extend the force hook to render-target writes (or a VGPR bisect of the tonemap ps with
+  `KYTY_DEBUG_EXPORT_VGPR`) to find which tonemap input zeroes the output: scene-colour UV/viewport
+  scale (60% dynamic resolution), bloom, or the exposure read.
