@@ -54,6 +54,15 @@ but the captured image remained on the Continue screen; a longer held/repeated p
 on a guest null access at `runtimeLinker.cpp:756`. Whether the title accepts this synthetic Cross
 path still needs confirmation with a real controller event.
 
+### Upstream comparison (2026-10-11)
+
+The local branch already contains official `origin/main` (`4c8fc53`) as an ancestor, so there is
+no newer official Silent Hill fix to merge from the main repository. EmK530's fork has no
+PPSA10112-specific commit. Its renderer branch adds a generic periodic draw flush and SRT cleanup
+optimization (`097e7c2`, followed by `532efa3` and `41f7794`). A flush-only transplant was tested
+here and regressed the controlled route (stage 0 at 40.5 seconds, warm pacing about 21 FPS), so it
+was reverted. The coupled SRT changes were left out rather than applying an unverified partial port.
+
 ## What fixed what
 
 | Problem | Fix | Commit |
