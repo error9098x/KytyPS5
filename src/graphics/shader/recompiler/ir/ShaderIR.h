@@ -335,10 +335,13 @@ static_assert(sizeof(PushData) == 128);
 constexpr uint32_t NativePushConstantSize = sizeof(PushData);
 
 [[nodiscard]] constexpr uint32_t NativeBinding(ShaderType stage, DescriptorBindingKind kind) {
-	// Existing descriptor groups use a stride of 56.  MeshScratch is a new
-	// binding at the end of group 0 and is emitted only for the emulated mesh
-	// compute program, so adding it must not renumber any existing stage.
+	// Existing descriptor groups use a stride of 56. MeshScratch (kind 56) would land on
+	// binding 56 = group 1 (pixel) Buffers and replace the pixel shader's storage buffers in
+	// emulated mesh draws, so it gets its own binding after the last group instead.
 	constexpr uint32_t NativeBindingStride = 56u;
+	if (kind == DescriptorBindingKind::MeshScratch) {
+		return 4u * NativeBindingStride;
+	}
 	const uint32_t group = stage == ShaderType::Pixel                    ? 1u
 	                       : stage == ShaderType::TessellationControl    ? 2u
 	                       : stage == ShaderType::TessellationEvaluation ? 3u
