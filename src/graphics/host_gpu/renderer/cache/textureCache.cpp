@@ -1904,6 +1904,31 @@ void DiagWritePng(const std::string& path, const uint8_t* rgba, uint32_t w, uint
 }
 } // namespace
 
+bool TextureCache::DebugForceExposure(ImageId id) {
+	static const uint64_t address = [] {
+		const char* value = std::getenv("KYTY_DEBUG_FORCE_EXPOSURE_ADDRESS");
+		return value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull;
+	}();
+	if (!id) return false;
+	auto& image = m_slot_images[id];
+	if (image.backing.format != vk::Format::eR32G32B32A32Sfloat || image.info.extent.width != 1 ||
+	    image.info.extent.height != 1 || image.info.IsVolume() || image.backing.image == nullptr ||
+	    (address != 0 && image.info.data.address != address)) {
+		return false;
+	}
+	vk::ClearValue clear {};
+	clear.color = vk::ClearColorValue(std::array<float, 4> {1.0f, 1.0f, 1.0f, 1.0f});
+	const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+	ClearImage(m_scheduler.Current(), id, image.backing.format, range, clear);
+	static uint32_t logged = 0;
+	if (logged < 8) {
+		logged++;
+		LOGF("DebugForceExposure: forced 1x1 RGBA32F at 0x%016" PRIx64 " to (1,1,1,1)\n",
+		     image.info.data.address);
+	}
+	return true;
+}
+
 void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t layer,
                                          uint64_t vertex_hash, uint64_t pixel_hash,
                                          const char* role) {

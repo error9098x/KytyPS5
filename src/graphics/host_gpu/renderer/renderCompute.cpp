@@ -447,6 +447,16 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	// KYTY_DEBUG_FORCE_EXPOSURE=1: force Unreal's 1x1 RGBA32F eye-adaptation output to 1.
+	static const bool force_exposure = std::getenv("KYTY_DEBUG_FORCE_EXPOSURE") != nullptr;
+	if (force_exposure) {
+		for (uint32_t i = 0; i < program.info.images.size() && i < bindings.images.size(); i++) {
+			if (program.info.images[i].written &&
+			    m_context.GetTextureCache().DebugForceExposure(bindings.images[i].image_id)) {
+				ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eTransfer);
+			}
+		}
+	}
 	// KYTY_INTERNAL_FRAME_STATS: also read back storage images written by compute dispatches.
 	if (std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr && InternalFrameStatsFrameReached(buffer)) {
 		for (uint32_t i = 0; i < program.info.images.size() && i < bindings.images.size(); i++) {
@@ -517,6 +527,16 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	// KYTY_DEBUG_FORCE_EXPOSURE=1: force Unreal's 1x1 RGBA32F eye-adaptation output to 1.
+	static const bool force_exposure = std::getenv("KYTY_DEBUG_FORCE_EXPOSURE") != nullptr;
+	if (force_exposure) {
+		for (uint32_t i = 0; i < program.info.images.size() && i < bindings.images.size(); i++) {
+			if (program.info.images[i].written &&
+			    m_context.GetTextureCache().DebugForceExposure(bindings.images[i].image_id)) {
+				ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eTransfer);
+			}
+		}
+	}
 	// KYTY_INTERNAL_FRAME_STATS: also read back storage images written by compute dispatches.
 	if (std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr && InternalFrameStatsFrameReached(buffer)) {
 		for (uint32_t i = 0; i < program.info.images.size() && i < bindings.images.size(); i++) {

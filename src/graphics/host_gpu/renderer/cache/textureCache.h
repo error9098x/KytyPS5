@@ -56,6 +56,9 @@ public:
 		return image;
 	}
 	void MarkGpuWritten(ImageId id);
+	// KYTY_DEBUG_FORCE_EXPOSURE=1: overwrite a compute-written 1x1 RGBA32F image (Unreal eye
+	// adaptation) with (1,1,1,1). Returns true if the image matched and was cleared.
+	bool DebugForceExposure(ImageId id);
 	void LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t layer,
 	                           uint64_t vertex_hash, uint64_t pixel_hash, const char* role = "rt");
 
