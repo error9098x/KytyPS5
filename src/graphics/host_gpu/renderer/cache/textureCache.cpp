@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/image/tiler.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "kernel/memory.h"
+#include "loader/systemContent.h"
 
 #include <cmath>
 #include <vector>
@@ -148,13 +149,32 @@ constexpr uint64_t NumFramesBeforeRemoval = 32;
 
 } // namespace
 
+// Unreal titles read GPU-written linear images back on the CPU. Silent Hill: The Short Message
+// (PPSA10112) reads its eye-adaptation exposure this way to derive View.PreExposure. Without the
+// readback, PreExposure stays 1, the FFT-bloom pre-filter clamps the scene, and the title-menu
+// background renders black. Enable linear-image readback for that title by default.
+// KYTY_READBACK_LINEAR_IMAGES=0|1 overrides the per-title default (--readback-linear-images true
+// always enables it).
+static bool TitleDefaultReadbackLinearImages() {
+	if (const char* value = std::getenv("KYTY_READBACK_LINEAR_IMAGES"); value != nullptr) {
+		return value[0] != '0';
+	}
+	std::string title_id;
+	const bool  enabled = Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id) && title_id == "PPSA10112";
+	if (enabled) {
+		LOGF("TextureCache: linear-image readback enabled by default for %s (KYTY_READBACK_LINEAR_IMAGES=0 disables)\n",
+		     title_id.c_str());
+	}
+	return enabled;
+}
+
 TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler,
                            PageManager& page_manager, BufferCache& buffer_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_page_manager(page_manager),
       m_blit_helper(graphics, scheduler),
       m_tiler(graphics, scheduler, buffer_cache.GetUtilityBuffer(MemoryUsage::Stream)),
       m_buffer_cache(buffer_cache),
-      m_readback_linear_images(Config::ReadbackLinearImagesEnabled()) {
+      m_readback_linear_images(Config::ReadbackLinearImagesEnabled() || TitleDefaultReadbackLinearImages()) {
 	if (m_graphics.CanReportMemoryUsage()) {
 		constexpr int64_t GiB = 1024ll * 1024 * 1024;
 		const auto        budget =
