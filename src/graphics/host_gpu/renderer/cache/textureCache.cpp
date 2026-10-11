@@ -417,6 +417,7 @@ void TextureCache::TouchImage(Image& image) {
 void TextureCache::MarkAsMaybeDirty(ImageId id, Image& image) {
 	image.MarkMaybeCpuDirty();
 	if (image.NeedsMaybeCpuHash()) {
+		m_buffer_cache.SettleCallerReadbacks(image.info.data.address, image.info.data.size);
 		image.SetMaybeCpuHash(image.HashGuestEdges());
 	}
 	UntrackImage(id);
@@ -1301,6 +1302,7 @@ void TextureCache::RefreshImage(ImageId id) {
 	}
 	TrackImage(id);
 	if (image.IsMaybeCpuDirty()) {
+		m_buffer_cache.SettleCallerReadbacks(image.info.data.address, image.info.data.size);
 		const auto hash = image.HashGuestEdges();
 		if (image.NeedsMaybeCpuHash()) {
 			image.SetMaybeCpuHash(hash);
@@ -2307,6 +2309,7 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 		EXIT("TextureCache: failed to map reusable download buffer\n");
 	}
 	download.Commit();
+	m_buffer_cache.SettleCallerReadbacks(range.address, range.size);
 	if (!LibKernel::Memory::TryReadBacking(range.address, mapped, range.size)) {
 		return false;
 	}

@@ -1213,7 +1213,18 @@ bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
+	SettleCallerReadbacks(vaddr, size);
 	return m_gpu_modified_ranges.Intersects(vaddr, size);
+}
+
+void BufferCache::SettleCallerReadbacks(uint64_t vaddr, uint64_t size) {
+	// KYTY_FAULT_WAIT_ON_CALLER: bytes a pending caller-side readback took are no longer in
+	// m_gpu_modified_ranges but their guest backing is not published yet. GPU-thread code that
+	// reads (or writes and later expects to keep) that backing finishes the readback first.
+	// m_caller_readbacks is GPU-thread state; other threads keep the old behaviour.
+	if (!m_caller_readbacks.empty() && GuestGpu::IsGpuThread()) {
+		CompleteCallerReadbacks(vaddr, size);
+	}
 }
 
 bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
