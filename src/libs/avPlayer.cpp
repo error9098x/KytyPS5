@@ -957,6 +957,13 @@ public:
 		FillCommon(id, &out->type, &out->duration, nullptr, &out->details);
 		return 0;
 	}
+	static bool UnpacedSyncNone() {
+		static const bool enabled = [] {
+			const char* v = std::getenv("KYTY_AVPLAYER_UNPACED_SYNC_NONE");
+			return v != nullptr && v[0] == '1';
+		}();
+		return enabled;
+	}
 	// Opt-in video delivery accounting (KYTY_AVPLAYER_TRACE=1). Called with mutex held.
 	static bool AvTraceEnabled() {
 		static const bool enabled = [] {
@@ -1009,7 +1016,12 @@ public:
 			AvTraceNote(false, 0, 0);
 		}
 		auto frame = video_frames.TryPopIf([&](const ReadyFrame& candidate) {
-			if (deliver_seek_frame || sync_mode != 0) {
+			// AV sync mode None only drops the audio lock; frames are still presented against the
+			// player clock. Delivering them unpaced lets a looping, audio-less movie run far ahead
+			// of real time (Silent Hill's title movie reached ~1,000 frames/s and Unreal's render
+			// thread never left its sample loop). KYTY_AVPLAYER_UNPACED_SYNC_NONE=1 restores the
+			// old behavior.
+			if (deliver_seek_frame || (sync_mode != 0 && UnpacedSyncNone())) {
 				return true;
 			}
 			auto now = CurrentTimeNoLock();
