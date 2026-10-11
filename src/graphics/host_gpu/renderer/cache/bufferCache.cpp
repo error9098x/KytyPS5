@@ -71,6 +71,9 @@ std::atomic<uint64_t> g_wfaults {0};
 std::atomic<uint64_t> g_rp_begin {0};
 std::atomic<uint64_t> g_rp_switch {0};
 std::atomic<uint64_t> g_rp_end {0};
+std::mutex            g_rp_callers_mutex;
+std::unordered_map<uint64_t, uint32_t> g_rp_end_callers; // (caller1 << 32 ^ caller0) folded
+std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> g_rp_end_caller_pcs;
 
 uint64_t MicrosSince(std::chrono::steady_clock::time_point start) {
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -92,7 +95,7 @@ void MaybePrintReadbackStats() {
 		return;
 	}
 	static const char* names[] = {"other", "fault", "clear", "indirect", "inval"};
-	char line[1024];
+	char line[1536];
 	int  n = std::snprintf(line, sizeof(line), "ReadbackStats: dt_ms=%" PRId64,
 	                       (now_us - last) / 1000);
 	for (size_t i = 0; i < g_readback.size(); i++) {
@@ -139,6 +142,23 @@ void MaybePrintReadbackStats() {
 	n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n),
 	                   " rp_begin=%" PRIu64 " rp_switch=%" PRIu64 " rp_end=%" PRIu64,
 	                   g_rp_begin.exchange(0), g_rp_switch.exchange(0), g_rp_end.exchange(0));
+	{
+		std::vector<std::pair<uint32_t, uint64_t>> callers;
+		std::scoped_lock lock {g_rp_callers_mutex};
+		for (const auto& [key, hits]: g_rp_end_callers) {
+			callers.emplace_back(hits, key);
+		}
+		std::sort(callers.rbegin(), callers.rend());
+		for (size_t i = 0; i < callers.size() && i < 6 && n < static_cast<int>(sizeof(line)) - 64;
+		     i++) {
+			const auto& pcs = g_rp_end_caller_pcs[callers[i].second];
+			n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n),
+			                   "%s0x%" PRIx64 "<0x%" PRIx64 ":%u", i == 0 ? " rp_end_by=" : ",",
+			                   pcs.first, pcs.second, callers[i].first);
+		}
+		g_rp_end_callers.clear();
+		g_rp_end_caller_pcs.clear();
+	}
 	LOGF("%s\n", line);
 }
 
@@ -164,7 +184,8 @@ void NoteWriteFault(uint64_t vaddr) {
 	}
 	MaybePrintReadbackStats();
 }
-void NoteRenderPass(bool begin, bool replaced_open_pass) {
+void NoteRenderPass(bool begin, bool replaced_open_pass, const void* caller0,
+                    const void* caller1) {
 	if (begin) {
 		g_rp_begin.fetch_add(1, std::memory_order_relaxed);
 		if (replaced_open_pass) {
@@ -172,6 +193,12 @@ void NoteRenderPass(bool begin, bool replaced_open_pass) {
 		}
 	} else {
 		g_rp_end.fetch_add(1, std::memory_order_relaxed);
+		const auto pc0 = reinterpret_cast<uint64_t>(caller0);
+		const auto pc1 = reinterpret_cast<uint64_t>(caller1);
+		const auto key = pc0 * 0x9E3779B97F4A7C15ull ^ pc1;
+		std::scoped_lock lock {g_rp_callers_mutex};
+		g_rp_end_callers[key]++;
+		g_rp_end_caller_pcs[key] = {pc0, pc1};
 	}
 }
 Scope::Scope(Origin origin): prev(g_readback_origin) {

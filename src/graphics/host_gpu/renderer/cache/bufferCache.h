@@ -39,7 +39,8 @@ void   NoteCpuFill(uint64_t bytes);
 // pages) and render-pass churn (real begins, begins that replaced an open pass with a different
 // state, explicit ends of an open pass).
 void   NoteWriteFault(uint64_t vaddr);
-void   NoteRenderPass(bool begin, bool replaced_open_pass);
+void   NoteRenderPass(bool begin, bool replaced_open_pass, const void* caller0 = nullptr,
+                      const void* caller1 = nullptr);
 struct Scope {
 	explicit Scope(Origin origin);
 	~Scope();

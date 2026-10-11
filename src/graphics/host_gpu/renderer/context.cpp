@@ -120,7 +120,9 @@ void CommandBuffer::EndRendering() const {
 		return;
 	}
 	if (ReadbackStats::Enabled()) {
-		ReadbackStats::NoteRenderPass(false, false);
+		// Who ends the pass (caller and its caller; frame pointers are kept in all builds).
+		ReadbackStats::NoteRenderPass(false, false, __builtin_return_address(0),
+		                              __builtin_return_address(1));
 	}
 	Handle().endRendering();
 	m_rendering    = false;
