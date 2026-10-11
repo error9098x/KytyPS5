@@ -107,11 +107,28 @@ static void MapGpuRange(uint64_t vaddr, uint64_t size) {
 	GetGpuResources().MapMemory(vaddr, size);
 }
 
+static bool RemapStatsEnabled();
+namespace RemapStats {
+extern std::atomic<uint64_t> g_gpu_unmaps;
+extern std::atomic<uint64_t> g_gpu_unmap_us;
+} // namespace RemapStats
+
 static void UnmapGpuRange(uint64_t vaddr, uint64_t size) {
 	if (g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
 		return;
 	}
+	if (!RemapStatsEnabled()) {
+		GetGpuResources().UnmapMemory(vaddr, size);
+		return;
+	}
+	const auto start = std::chrono::steady_clock::now();
 	GetGpuResources().UnmapMemory(vaddr, size);
+	RemapStats::g_gpu_unmaps.fetch_add(1, std::memory_order_relaxed);
+	RemapStats::g_gpu_unmap_us.fetch_add(
+	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                              std::chrono::steady_clock::now() - start)
+	                              .count()),
+	    std::memory_order_relaxed);
 }
 
 static bool DecodeMemoryProtection(int prot, VirtualMemory::Mode* mode, GpuAccessMode* gpu_mode) {
@@ -224,6 +241,59 @@ static bool IsPrivateCommittedRangeType(VirtualRangeType type) {
 static bool g_test_fail_next_range_replace = false;
 #endif
 
+// KYTY_FAST_VRANGES=1: O(log n + k) VirtualRanges updates (binary search, in-place splice,
+// local merge) instead of linear scans, whole-vector copies and full sorts. Same results.
+static bool FastVirtualRanges() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_FAST_VRANGES");
+		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+	}();
+	return enabled;
+}
+
+// KYTY_REMAP_STATS=1: periodic counters for the CPU-side remap path (BatchMap, VirtualRanges,
+// GPU unmap). Zero cost beyond one cached bool check when unset.
+static bool RemapStatsEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_REMAP_STATS");
+		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+	}();
+	return enabled;
+}
+
+namespace RemapStats {
+static std::atomic<uint64_t> g_batch_entries {0};
+static std::atomic<uint64_t> g_batch_us {0};
+static std::atomic<uint64_t> g_vr_ops {0};
+static std::atomic<uint64_t> g_vr_ns {0};
+std::atomic<uint64_t>        g_gpu_unmaps {0};
+std::atomic<uint64_t>        g_gpu_unmap_us {0};
+
+class VrTimer {
+public:
+	VrTimer(): m_enabled(RemapStatsEnabled()) {
+		if (m_enabled) {
+			m_start = std::chrono::steady_clock::now();
+		}
+	}
+	~VrTimer() {
+		if (m_enabled) {
+			g_vr_ops.fetch_add(1, std::memory_order_relaxed);
+			g_vr_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			                                            std::chrono::steady_clock::now() - m_start)
+			                                            .count()),
+			                  std::memory_order_relaxed);
+		}
+	}
+	VrTimer(const VrTimer&)            = delete;
+	VrTimer& operator=(const VrTimer&) = delete;
+
+private:
+	bool                                  m_enabled;
+	std::chrono::steady_clock::time_point m_start {};
+};
+} // namespace RemapStats
+
 class VirtualRanges {
 public:
 	struct Range {
@@ -239,7 +309,8 @@ public:
 
 	bool Add(uint64_t start, uint64_t size, uint64_t offset, int protection, int memory_type,
 	         VirtualRangeType type, const char* name, bool disallow_merge = false) {
-		Common::LockGuard lock(m_mutex);
+		Common::LockGuard   lock(m_mutex);
+		RemapStats::VrTimer timer;
 
 		if (start == 0 || size == 0) {
 			return false;
@@ -269,12 +340,21 @@ public:
 	}
 
 	bool Remove(uint64_t start, uint64_t size) {
-		Common::LockGuard lock(m_mutex);
+		Common::LockGuard   lock(m_mutex);
+		RemapStats::VrTimer timer;
 
 		auto position = LowerBound(start);
 		if (position != m_ranges.end() && position->start == start && position->size == size) {
 			m_ranges.erase(position);
 			return true;
+		}
+		if (FastVirtualRanges()) {
+			size_t index   = 0;
+			auto   removed = RemoveFastUnlocked(start, size, &index);
+			if (removed) {
+				MergeWindowUnlocked(index, index + 1);
+			}
+			return removed;
 		}
 		auto removed = RemoveUnlocked(start, size);
 		MergeUnlocked();
@@ -302,6 +382,16 @@ public:
 	bool ReleaseReserved(uint64_t start, uint64_t size) {
 		Common::LockGuard lock(m_mutex);
 
+		if (FastVirtualRanges()) {
+			// Starts are unique in the sorted vector, so the exact match can only be here.
+			auto position = LowerBound(start);
+			if (position != m_ranges.end() && position->start == start && position->size == size &&
+			    IsReservedRangeType(position->type)) {
+				m_ranges.erase(position);
+			}
+			return true;
+		}
+
 		for (size_t index = 0; index < m_ranges.size(); index++) {
 			auto& r = m_ranges[index];
 			if (r.start == start && r.size == size && IsReservedRangeType(r.type)) {
@@ -315,15 +405,34 @@ public:
 	bool ReplaceSpan(uint64_t start, uint64_t size, VirtualRangeType expected_type,
 	                 uint64_t offset, int protection, int memory_type, VirtualRangeType type,
 	                 const char* name, bool disallow_merge = false) {
-		Common::LockGuard lock(m_mutex);
+		Common::LockGuard   lock(m_mutex);
+		RemapStats::VrTimer timer;
 
 		if (start == 0 || size == 0 || size > UINT64_MAX - start) {
 			return false;
 		}
 
-		auto current = start;
-		const auto end = start + size;
-		while (current < end) {
+		const bool fast    = FastVirtualRanges();
+		auto       current = start;
+		const auto end     = start + size;
+		if (fast) {
+			// Ranges are sorted and non-overlapping: the only candidate containing `current` is the
+			// last range starting at or before it, and each next candidate is its successor.
+			auto it = UpperBound(current);
+			if (it == m_ranges.begin()) {
+				return false;
+			}
+			--it;
+			while (current < end) {
+				if (it == m_ranges.end() || it->type != expected_type || current < it->start ||
+				    current >= End(it->start, it->size)) {
+					return false;
+				}
+				current = std::min(end, End(it->start, it->size));
+				++it;
+			}
+		}
+		while (!fast && current < end) {
 			const Range* candidate = nullptr;
 			for (const auto& r: m_ranges) {
 				if (r.type == expected_type && current >= r.start &&
@@ -353,7 +462,12 @@ public:
 		replacement.type           = type;
 		replacement.disallow_merge = disallow_merge;
 		CopyVirtualRangeName(replacement.name, name);
-		RemoveUnlocked(start, size);
+		if (fast) {
+			size_t ignored = 0;
+			RemoveFastUnlocked(start, size, &ignored);
+		} else {
+			RemoveUnlocked(start, size);
+		}
 		auto position = LowerBound(start);
 		const auto index = static_cast<size_t>(position - m_ranges.begin());
 		m_ranges.insert(position, replacement);
@@ -370,13 +484,14 @@ public:
 			MergeAroundUnlocked(static_cast<size_t>(position - m_ranges.begin()));
 			return;
 		}
-		EditUnlocked(start, size, [name](Range* r) { CopyVirtualRangeName(r->name, name); });
+		EditDispatchUnlocked(start, size, [name](Range* r) { CopyVirtualRangeName(r->name, name); });
 	}
 
 	void Protect(uint64_t start, uint64_t size, int protection) {
-		Common::LockGuard lock(m_mutex);
+		Common::LockGuard   lock(m_mutex);
+		RemapStats::VrTimer timer;
 
-		EditUnlocked(start, size, [protection](Range* r) { r->protection = protection; });
+		EditDispatchUnlocked(start, size, [protection](Range* r) { r->protection = protection; });
 	}
 
 	bool Query(uint64_t addr, int flags, Range* out) {
@@ -413,8 +528,17 @@ public:
 
 		const auto end     = start + size;
 		auto       current = start;
-		for (const auto& range: m_ranges) {
-			const auto range_end = End(range.start, range.size);
+		auto       first   = m_ranges.begin();
+		if (FastVirtualRanges()) {
+			// Skip everything that ends before `start` (the old loop skipped it one by one).
+			first = UpperBound(start);
+			if (first != m_ranges.begin()) {
+				--first;
+			}
+		}
+		for (auto range_it = first; range_it != m_ranges.end(); ++range_it) {
+			const auto& range     = *range_it;
+			const auto  range_end = End(range.start, range.size);
 			if (range_end <= current) {
 				continue;
 			}
@@ -475,6 +599,11 @@ public:
 		return clamped_size;
 	}
 
+	size_t Count() {
+		Common::LockGuard lock(m_mutex);
+		return m_ranges.size();
+	}
+
 	uint64_t CountPageTableEntries(bool gpu) {
 		Common::LockGuard lock(m_mutex);
 
@@ -531,6 +660,101 @@ private:
 			piece.offset += start - source.start;
 		}
 		ranges->push_back(piece);
+	}
+
+	std::vector<Range>::iterator UpperBound(uint64_t addr) {
+		return std::upper_bound(m_ranges.begin(), m_ranges.end(), addr,
+		                        [](uint64_t value, const Range& range) { return value < range.start; });
+	}
+
+	// Remove [start, start+size) in place: binary search the overlapped run, keep at most two edge
+	// pieces, splice. *index = position of the first element after the hole (for local merging).
+	bool RemoveFastUnlocked(uint64_t start, uint64_t size, size_t* index) {
+		EXIT_IF(index == nullptr);
+		if (size == 0) {
+			return false;
+		}
+		const auto rem_end = End(start, size);
+		auto       first   = UpperBound(start);
+		if (first != m_ranges.begin() && End(std::prev(first)->start, std::prev(first)->size) > start) {
+			--first;
+		}
+		auto last = first;
+		while (last != m_ranges.end() && last->start < rem_end) {
+			++last;
+		}
+		*index = static_cast<size_t>(first - m_ranges.begin());
+		if (first == last) {
+			return false;
+		}
+		std::vector<Range> pieces;
+		const Range        head = *first;
+		const Range        tail = *std::prev(last);
+		AddPiece(&pieces, head, head.start, std::max(start, head.start));
+		AddPiece(&pieces, tail, std::min(rem_end, End(tail.start, tail.size)), End(tail.start, tail.size));
+		auto position = m_ranges.erase(first, last);
+		m_ranges.insert(position, pieces.begin(), pieces.end());
+		*index += (head.start < start ? 1 : 0);
+		return true;
+	}
+
+	// Merge adjacent mergeable pairs (i, i+1) for i in [lo-1, hi], i.e. only around a modified window.
+	void MergeWindowUnlocked(size_t lo, size_t hi) {
+		size_t i = (lo > 0 ? lo - 1 : 0);
+		while (i <= hi && i + 1 < m_ranges.size()) {
+			auto& current = m_ranges[i];
+			auto& next    = m_ranges[i + 1];
+			if (End(current.start, current.size) == next.start && SameMergeKey(current, next)) {
+				current.size += next.size;
+				m_ranges.erase(m_ranges.begin() + static_cast<std::ptrdiff_t>(i + 1));
+				if (hi > 0) {
+					hi--;
+				}
+			} else {
+				i++;
+			}
+		}
+	}
+
+	// Split the range containing `at` (if any) so that a boundary lies exactly at `at`.
+	void SplitAtUnlocked(uint64_t at) {
+		auto it = UpperBound(at);
+		if (it == m_ranges.begin()) {
+			return;
+		}
+		--it;
+		const auto it_end = End(it->start, it->size);
+		if (it->start < at && at < it_end) {
+			Range right = *it;
+			right.start = at;
+			right.size  = it_end - at;
+			if (right.type == VirtualRangeType::Direct) {
+				right.offset += at - it->start;
+			}
+			it->size = at - it->start;
+			m_ranges.insert(std::next(it), right);
+		}
+	}
+
+	template <typename EditFunc>
+	void EditDispatchUnlocked(uint64_t start, uint64_t size, EditFunc edit) {
+		if (!FastVirtualRanges()) {
+			EditUnlocked(start, size, edit);
+			return;
+		}
+		if (size == 0) {
+			return;
+		}
+		const auto edit_end = End(start, size);
+		SplitAtUnlocked(start);
+		SplitAtUnlocked(edit_end);
+		auto       it = LowerBound(start);
+		const auto lo = static_cast<size_t>(it - m_ranges.begin());
+		size_t     hi = lo;
+		for (; it != m_ranges.end() && it->start < edit_end; ++it, ++hi) {
+			edit(&*it);
+		}
+		MergeWindowUnlocked(lo, hi);
 	}
 
 	std::vector<Range>::iterator LowerBound(uint64_t start) {
@@ -4083,6 +4307,30 @@ static void Record(int op, uint64_t len, uint64_t caller) {
 }
 } // namespace MemTrace
 
+// One line every ~2 s while KYTY_REMAP_STATS=1 (counters are per interval; caller holds the
+// memory-operation mutex).
+static void LogRemapStatsPeriodically() {
+	using Clock            = std::chrono::steady_clock;
+	static Clock::time_point last = Clock::now();
+	const auto               now  = Clock::now();
+	const auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
+	if (dt_ms < 2000) {
+		return;
+	}
+	last             = now;
+	auto& unmap      = Graphics::GetUnmapCounters();
+	auto  take       = [](std::atomic<uint64_t>& v) { return v.exchange(0, std::memory_order_relaxed); };
+	const auto ranges = g_virtual_ranges != nullptr ? g_virtual_ranges->Count() : 0;
+	LOGF("RemapStats: dt_ms=%" PRId64 " fast_vranges=%d batch_entries=%" PRIu64
+	     " batch_us=%" PRIu64 " vr_ops=%" PRIu64 " vr_us=%" PRIu64 " vr_ranges=%zu gpu_unmaps=%" PRIu64
+	     " gpu_unmap_us=%" PRIu64 " unmap_fast=%" PRIu64 " unmap_slow_busy=%" PRIu64
+	     " unmap_slow_cached=%" PRIu64 " unmap_sync_us=%" PRIu64 "\n",
+	     static_cast<int64_t>(dt_ms), FastVirtualRanges() ? 1 : 0, take(RemapStats::g_batch_entries),
+	     take(RemapStats::g_batch_us), take(RemapStats::g_vr_ops), take(RemapStats::g_vr_ns) / 1000,
+	     ranges, take(RemapStats::g_gpu_unmaps), take(RemapStats::g_gpu_unmap_us), take(unmap.fast),
+	     take(unmap.slow_busy), take(unmap.slow_cached), take(unmap.sync_us));
+}
+
 int KYTY_SYSV_ABI KernelBatchMap2(KernelBatchMapEntry* entries, int num_entries,
                                   int* num_entries_out, int flags) {
 	PRINT_NAME();
@@ -4113,8 +4361,11 @@ int KYTY_SYSV_ABI KernelBatchMap2(KernelBatchMapEntry* entries, int num_entries,
 	const auto mem_trace_caller =
 	    reinterpret_cast<uint64_t>(__builtin_extract_return_addr(__builtin_return_address(0)));
 
+	const bool remap_stats = RemapStatsEnabled();
 	for (int i = 0; i < num_entries; i++, processed++) {
 		auto* entry = &entries[i];
+		const auto entry_start = remap_stats ? std::chrono::steady_clock::now()
+		                                     : std::chrono::steady_clock::time_point {};
 
 		LOGF("\t [%d] start = %p, offset = 0x%016" PRIx64 ", length = 0x%016" PRIx64
 		     ", prot = 0x%02" PRIx32 ", type = 0x%02" PRIx32 ", op = %d\n",
@@ -4156,6 +4407,15 @@ int KYTY_SYSV_ABI KernelBatchMap2(KernelBatchMapEntry* entries, int num_entries,
 
 		if (MemTrace::Enabled()) {
 			MemTrace::Record(entry->operation, entry->length, mem_trace_caller);
+		}
+		if (remap_stats) {
+			RemapStats::g_batch_entries.fetch_add(1, std::memory_order_relaxed);
+			RemapStats::g_batch_us.fetch_add(
+			    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+			                              std::chrono::steady_clock::now() - entry_start)
+			                              .count()),
+			    std::memory_order_relaxed);
+			LogRemapStatsPeriodically();
 		}
 	}
 
@@ -4529,3 +4789,4 @@ int KYTY_SYSV_ABI KernelMemoryPoolGetBlockStats(KernelMemoryPoolBlockStats* outp
 }
 
 } // namespace Libs::LibKernel::Memory
+
