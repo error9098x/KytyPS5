@@ -67,9 +67,48 @@ struct FrameDiag {
 		if (const char* dir = std::getenv("KYTY_FRAME_DUMP_DIR")) {
 			dump_dir = dir;
 		}
+		if (const char* s = std::getenv("KYTY_FRAME_SAMPLE_SECONDS")) {
+			sample_seconds = std::strtod(s, nullptr);
+		}
 	}
-	[[nodiscard]] bool ShouldSample(uint64_t n) const { return n <= 10 || n % 60 == 0; }
+	// KYTY_FRAME_SAMPLE_SECONDS=<s>: also sample when s seconds passed since the last sample,
+	// so slow scenes (1-2 fps) still get frames dumped regularly.
+	double                                sample_seconds = 0.0;
+	std::chrono::steady_clock::time_point last_sample {};
+	[[nodiscard]] bool                    ShouldSample(uint64_t n) {
+		const auto now  = std::chrono::steady_clock::now();
+		bool       take = n <= 10 || n % 60 == 0;
+		if (!take && sample_seconds > 0.0 &&
+		    std::chrono::duration<double>(now - last_sample).count() >= sample_seconds) {
+			take = true;
+		}
+		if (take) {
+			last_sample = now;
+		}
+		return take;
+	}
 };
+
+// Periodic GPU memory line (default every 30 s; KYTY_MEMORY_LOG_SECONDS=<s>, 0 disables), so the
+// growth curve towards an out-of-memory device loss is visible in the log.
+void LogMemoryPeriodically(GraphicContext& graphics) {
+	static const double interval = [] {
+		const char* s = std::getenv("KYTY_MEMORY_LOG_SECONDS");
+		return s != nullptr ? std::strtod(s, nullptr) : 30.0;
+	}();
+	if (interval <= 0.0) {
+		return;
+	}
+	static auto last = std::chrono::steady_clock::now();
+	const auto  now  = std::chrono::steady_clock::now();
+	if (std::chrono::duration<double>(now - last).count() < interval) {
+		return;
+	}
+	last = now;
+	LOGF("MemoryUsage: gpu_usage_mib=%" PRIu64 " gpu_budget_mib=%" PRIu64 "\n",
+	     graphics.GetDeviceMemoryUsage() >> 20u, graphics.GetTotalMemoryBudget() >> 20u);
+	graphics.LogMemoryBudget();
+}
 
 FrameDiag& Diag() {
 	static FrameDiag d;
@@ -1266,6 +1305,7 @@ void Presenter::Impl::Present() {
 			     static_cast<uint64_t>(micros));
 		}
 		LogPresentTiming("total", timing_n, present_start);
+		LogMemoryPeriodically(window.graphic_ctx);
 		return;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");
