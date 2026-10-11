@@ -2,18 +2,17 @@
 
 ## Where it is now
 
-**Update 2026-10-11 18:50 IST (supersedes conflicting lines below):**
+**Update 2026-10-11 19:20 IST (supersedes conflicting lines below):**
 - Boots, plays the intro video, shows the warning screen, accepts Cross, and reaches the title menu
   (`/tmp/titlerun.sh`). The OOM after Continue is fixed (`78019f9f`).
-- The title-menu 3D background is still black (first blocker; see BLOCKERS.md). The tonemap LUT is
-  correct (`86ec37b3`) and exposure is consistent with the scene. The black comes from Unreal FFT bloom's
-  pre-filter (cs `0x2bfb24830d8fcfaa`) clamping the non-pre-exposed scene (lum ~500 vs Max 50).
-  Disabling the pre-filter with a debug poke lights the menu (shtsm-prefilter-off-3); this is not a fix yet.
-  Suspected root: View.PreExposure = 1 (eye-adaptation CPU readback).
+- The title-menu 3D background now renders (`aeddbf04`: linear-image readback on by default for
+  PPSA10112, so Unreal's CPU eye-adaptation readback / PreExposure works and the FFT-bloom pre-filter
+  no longer clamps the scene). Proof: shtsm-rbdef-1 frame_000780.png. The menu presents at ~1 fps.
+  Next: New Game / gameplay.
 - Route: `KYTY_MESH_SCRATCH_HOST=1 KYTY_MESH_SCRATCH_MB=256 KYTY_MESH_SCRATCH_DESCRIPTOR=1
   MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2`
   (PREFILL works around an intermittent MoltenVK compute use-after-free; clean 5/5).
-- Animal Well regression 3/3 after 46914434 (aw-regress-*-forceexp: stage 2, 33/43 content frames; 34/44 before, same 10 black boot frames).
+- Animal Well regression 3/3 after aeddbf04 (aw-regress-*-rblinear: stage 2, 32-33/42-43 content frames, same 10 black boot frames).
 - Still stage 2. No gameplay soak or visual reference check has passed.
 
 - The game **boots and shows real screens**. The harness now captures the full warning/Continue
