@@ -14,9 +14,15 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -27,7 +33,106 @@ namespace {
 constexpr uint64_t MiB           = 1024 * 1024;
 constexpr uint64_t GdsBufferSize = 64 * 1024;
 
+bool EnvFlag(const char* name) {
+	const char* value = std::getenv(name);
+	return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+}
+
+// KYTY_FAULT_COALESCE=1: a CPU read or write fault on a GPU-dirty page downloads the whole
+// contiguous GPU-dirty run around it (capped) instead of one 4 KiB page, so a CPU loop over an
+// N-page GPU-written buffer costs one GPU drain instead of N.
+bool FaultCoalesceEnabled() {
+	static const bool enabled = EnvFlag("KYTY_FAULT_COALESCE");
+	return enabled;
+}
+
+constexpr uint64_t FaultCoalesceMaxBytes = 1 * MiB;
+
+struct ReadbackCounters {
+	std::atomic<uint64_t> count {0};
+	std::atomic<uint64_t> bytes {0};
+	std::atomic<uint64_t> wall_us {0};
+	std::atomic<uint64_t> wait_us {0};
+};
+std::array<ReadbackCounters, static_cast<size_t>(ReadbackStats::Origin::Count)> g_readback;
+std::atomic<uint64_t> g_cpu_fills {0};
+std::atomic<uint64_t> g_cpu_fill_bytes {0};
+thread_local ReadbackStats::Origin g_readback_origin = ReadbackStats::Origin::Other;
+std::mutex                         g_fault_pages_mutex;
+std::unordered_map<uint64_t, uint32_t> g_fault_pages;
+
+uint64_t MicrosSince(std::chrono::steady_clock::time_point start) {
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                                 std::chrono::steady_clock::now() - start)
+	                                 .count());
+}
+
+void MaybePrintReadbackStats() {
+	static std::atomic<int64_t> last_us {0};
+	const auto now_us = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                                             std::chrono::steady_clock::now().time_since_epoch())
+	                                             .count());
+	auto last = last_us.load(std::memory_order_relaxed);
+	if (last == 0) {
+		last_us.compare_exchange_strong(last, now_us);
+		return;
+	}
+	if (now_us - last < 2000000 || !last_us.compare_exchange_strong(last, now_us)) {
+		return;
+	}
+	static const char* names[] = {"other", "fault", "clear", "indirect", "inval"};
+	char line[768];
+	int  n = std::snprintf(line, sizeof(line), "ReadbackStats: dt_ms=%" PRId64,
+	                       (now_us - last) / 1000);
+	for (size_t i = 0; i < g_readback.size(); i++) {
+		auto& c = g_readback[i];
+		n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n),
+		                   " %s=%" PRIu64 "/%" PRIu64 "B/%" PRIu64 "us/%" PRIu64 "us", names[i],
+		                   c.count.exchange(0), c.bytes.exchange(0), c.wall_us.exchange(0),
+		                   c.wait_us.exchange(0));
+	}
+	n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n),
+	                   " cpufill=%" PRIu64 "/%" PRIu64 "B", g_cpu_fills.exchange(0),
+	                   g_cpu_fill_bytes.exchange(0));
+	std::vector<std::pair<uint32_t, uint64_t>> top;
+	{
+		std::scoped_lock lock {g_fault_pages_mutex};
+		for (const auto& [page, hits]: g_fault_pages) {
+			top.emplace_back(hits, page);
+		}
+		g_fault_pages.clear();
+	}
+	std::sort(top.rbegin(), top.rend());
+	n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), " fault_pages=%zu top=",
+	                   top.size());
+	for (size_t i = 0; i < top.size() && i < 6 && n < static_cast<int>(sizeof(line)) - 40; i++) {
+		n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), "%s0x%" PRIx64 ":%u",
+		                   i == 0 ? "" : ",", top[i].second, top[i].first);
+	}
+	LOGF("%s\n", line);
+}
+
 } // namespace
+
+namespace ReadbackStats {
+bool Enabled() {
+	static const bool enabled = EnvFlag("KYTY_READBACK_STATS");
+	return enabled;
+}
+Origin Current() {
+	return g_readback_origin;
+}
+void NoteCpuFill(uint64_t bytes) {
+	g_cpu_fills.fetch_add(1, std::memory_order_relaxed);
+	g_cpu_fill_bytes.fetch_add(bytes, std::memory_order_relaxed);
+}
+Scope::Scope(Origin origin): prev(g_readback_origin) {
+	g_readback_origin = origin;
+}
+Scope::~Scope() {
+	g_readback_origin = prev;
+}
+} // namespace ReadbackStats
 
 void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* source,
                                   uint64_t size) {
@@ -209,9 +314,16 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	if constexpr (async) {
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else {
-		const auto tick = m_scheduler.CurrentTick();
+		const auto tick       = m_scheduler.CurrentTick();
+		const bool stats      = ReadbackStats::Enabled();
+		const auto wait_start = std::chrono::steady_clock::now();
 		m_scheduler.Wait(tick);
 		m_scheduler.WaitPriorityOperations(tick);
+		if (stats) {
+			auto& c = g_readback[static_cast<size_t>(g_readback_origin)];
+			c.wait_us.fetch_add(MicrosSince(wait_start), std::memory_order_relaxed);
+			c.bytes.fetch_add(total_size, std::memory_order_relaxed);
+		}
 		publish();
 	}
 	return true;
@@ -269,8 +381,10 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");
 	}
-	m_memory_tracker.InvalidateRegion(vaddr, size,
-	                                  [this, vaddr, size] { ReadMemory(vaddr, size, true); });
+	m_memory_tracker.InvalidateRegion(vaddr, size, [this, vaddr, size] {
+		ReadbackStats::Scope scope(ReadbackStats::Origin::Invalidate);
+		ReadMemory(vaddr, size, true);
+	});
 }
 
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
@@ -279,19 +393,60 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 		     vaddr, size);
 	}
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
+	const auto origin     = ReadbackStats::Current();
+	const bool stats      = ReadbackStats::Enabled();
+	const auto wall_start = stats ? std::chrono::steady_clock::now()
+	                              : std::chrono::steady_clock::time_point {};
+	if (stats && origin == ReadbackStats::Origin::Fault) {
+		std::scoped_lock lock {g_fault_pages_mutex};
+		g_fault_pages[vaddr & ~(TRACKER_PAGE_SIZE - 1)]++;
+	}
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, origin] {
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
 		}
+		ReadbackStats::Scope scope(origin);
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
-		if (DownloadBufferMemory<false>(buffer, vaddr, size)) {
-			m_memory_tracker.UnmarkRegionAsGpuModified(vaddr, size);
+		uint64_t start = vaddr;
+		uint64_t end   = vaddr + size;
+		const bool coalesce = FaultCoalesceEnabled() &&
+		                      ((origin == ReadbackStats::Origin::Fault && !is_write) ||
+		                       (origin == ReadbackStats::Origin::Invalidate && is_write));
+		if (coalesce) {
+			// Widen to the contiguous run of GPU-dirty tracker pages inside this buffer. Every
+			// page in the run would fault and drain on its own next; downloading them now
+			// publishes the same bytes before their read protection is lifted. For a CPU write
+			// only the written range becomes CPU-modified; the neighbours become clean (their
+			// backing equals the GPU copy), so a later write to them faults without a drain.
+			const uint64_t lo = buffer.CpuAddress();
+			const uint64_t hi = buffer.CpuAddress() + buffer.Size();
+			start             = std::max(lo, vaddr & ~(TRACKER_PAGE_SIZE - 1));
+			end               = std::min(hi, Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE));
+			while (end - start < FaultCoalesceMaxBytes && end < hi &&
+			       m_memory_tracker.IsRegionGpuModified(end, std::min(TRACKER_PAGE_SIZE, hi - end))) {
+				end = std::min(hi, end + TRACKER_PAGE_SIZE);
+			}
+			while (end - start < FaultCoalesceMaxBytes && start > lo &&
+			       m_memory_tracker.IsRegionGpuModified(
+			           std::max(lo, start - TRACKER_PAGE_SIZE),
+			           start - std::max(lo, start - TRACKER_PAGE_SIZE))) {
+				start = std::max(lo, start - TRACKER_PAGE_SIZE);
+			}
+		}
+		if (DownloadBufferMemory<false>(buffer, start, end - start)) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
 		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 		}
 	});
+	if (stats) {
+		auto& c = g_readback[static_cast<size_t>(origin)];
+		c.count.fetch_add(1, std::memory_order_relaxed);
+		c.wall_us.fetch_add(MicrosSince(wall_start), std::memory_order_relaxed);
+		MaybePrintReadbackStats();
+	}
 }
 
 BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {

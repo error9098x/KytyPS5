@@ -80,6 +80,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr,
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
+		ReadbackStats::Scope scope(ReadbackStats::Origin::Fault);
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
 #if defined(__APPLE__)

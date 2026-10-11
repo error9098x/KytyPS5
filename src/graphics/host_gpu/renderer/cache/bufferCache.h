@@ -25,6 +25,23 @@ class TextureCache;
 using BufferId = Common::SlotId;
 inline constexpr BufferId NULL_BUFFER_ID {0};
 
+// KYTY_READBACK_STATS=1: per-origin counters for synchronous GPU->CPU buffer readbacks
+// (count, bytes, caller-side wall time, GPU wait), printed every 2 s. Callers tag the origin
+// with a Scope; untagged readbacks count as "other".
+namespace ReadbackStats {
+enum class Origin : int { Other = 0, Fault, ClearMeta, IndirectArgs, Invalidate, Count };
+bool   Enabled();
+Origin Current();
+void   NoteCpuFill(uint64_t bytes);
+struct Scope {
+	explicit Scope(Origin origin);
+	~Scope();
+	Scope(const Scope&)            = delete;
+	Scope& operator=(const Scope&) = delete;
+	Origin prev;
+};
+} // namespace ReadbackStats
+
 class BufferCache {
 public:
 	static constexpr uint32_t CACHING_PAGEBITS  = 14;
