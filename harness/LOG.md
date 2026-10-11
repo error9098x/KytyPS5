@@ -644,3 +644,18 @@ Two Apple/MoltenVK blockers cleared; the game now reaches mesh shaders.
   the opt-in descriptor-scratch route emits it.
 - Verification `shtsm-fix-1`: LUT 32/32 slices non-zero, avg RGB (0.72, 0.70, 0.66). The warning
   screen now shows the 3D room (a lit doorway) behind the text instead of black.
+
+## 2026-10-11 15:20 IST: correction: title-menu background is still black after `86ec37b3`
+
+- `86ec37b3` did fix the all-zero tonemap LUT (CombineLUTs now non-zero), but the claim in
+  `281db93e` that the warning screen "now shows the 3D room" was wrong: that doorway is a 2D
+  asset and is identical before and after the fix.
+- `shtsm-title-1` (`/tmp/titlerun.sh`, PREFILL=2, Cross at 25/29/33 s) reaches the title menu;
+  its background is still black. The menu presents at ~1 fps.
+- `shtsm-title-stats-2`: the eye-adaptation 1x1 RGBA32F (`0x8069ac0000`) is
+  (0.0003, 0.0003, 652, 1), which scales the scene to black. Its inputs are garbage: the
+  compute-written 4K B10G11R11 at `0x80a54f0000` decodes B~9300, max 64512, and the 240x135
+  RGBA16F holds 65504 and negatives. Suspect: 10/11/11 float format mapping or packing for
+  compute storage-image writes.
+- New diagnostic: `KYTY_INTERNAL_FRAME_MIN_SECONDS=N` limits internal frame stats to work
+  recorded N s after start (sample the menu, not boot).
