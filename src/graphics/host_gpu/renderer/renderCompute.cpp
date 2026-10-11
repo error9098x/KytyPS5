@@ -198,7 +198,30 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 		return false;
 	}
 	if (!cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear)) {
-		return false;
+		// KYTY_CLEAR_META_NOSYNC=1: a recognised uniform fill of plain memory (typically DCC /
+		// CMASK fast-clear metadata) that no cached image aliases and no recorded GPU write has
+		// dirtied is applied on the CPU, the same rule DMA_DATA fills already follow. The
+		// metadata then stays CPU-visible, so MaterializeColorClear no longer drains the GPU to
+		// read it back. Earlier GPU readers still see the old device copy (CPU-dirty pages are
+		// uploaded only at the next use, later in command order).
+		static const bool nosync = [] {
+			const char* value = std::getenv("KYTY_CLEAR_META_NOSYNC");
+			return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+		}();
+		auto&          context = command.GetContext();
+		const uint64_t address = descriptor.Base48();
+		constexpr uint64_t MaxCpuFill = 16ull * 1024 * 1024;
+		if (!nosync || (address & 3u) != 0 || (size & 3u) != 0 || size > MaxCpuFill ||
+		    !context.IsMapped(address, size) ||
+		    context.GetBufferCache().IsRegionGpuModified(address, size) ||
+		    cache.IsRegionRegistered(address, size)) {
+			return false;
+		}
+		context.GetBufferCache().FillBuffer(address, size, packed_clear, false);
+		if (ReadbackStats::Enabled()) {
+			ReadbackStats::NoteCpuFill(size);
+		}
+		return true;
 	}
 	static std::atomic<uint32_t> logged_clears {0};
 	if (logged_clears.fetch_add(1, std::memory_order_relaxed) < 32) {
