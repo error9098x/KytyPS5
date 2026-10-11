@@ -967,3 +967,47 @@ FPS per 40 s window (same tr2 route; no same-route best-set 480 s baseline exist
 - win480-3: GpuIndirect gpu=54/2 s, resolve 0, fallback not_mesh=252. Peak footprint 23.1 G, swap peak 9.5 GB.
 - notrap480-3: trap hits 16 384 total in 480 s. RenderThread `_sigtramp` share in the 360 s sample is 5.7 % vs 14.7 % in win480-3 (target < 2 % not met; the remainder is presumably write-fault SIGSEGV). Peak footprint 24.0 G, swap 10.1 GB.
 - In game (320-480 s), notrap ≈ win (1.48-1.62 vs 1.40-1.77). There is no same-run best baseline yet.
+
+## 2026-10-12 ~04:40 IST — r7: same-route best480 baseline, entry 34 KYTY_GUEST_IMPORT (c9401c87) PROOF §8
+
+**shtsm-r7-best480-4** (best flags, b3-label probe + F10/J×12, binary 9211bfe2; clean 480 s, no exception):
+- fps per 40 s: 20.2 / 11.3 / 6.7 / 1.75 / 1.2 / 0.8 / 0.85 / 1.5 / 1.6 / 1.5 / 1.48 / 1.32.
+- Peak footprint 22.6–23 G, swap 9.4 GB. Wide-store traps reach 4.19 M. RenderThread `_sigtramp` share 16.2 % in the 360 s sample.
+
+**In-game 320–480 s, like for like (same route, same session), mean of the four 40 s windows:**
+
+| arm | 320-360 | 360-400 | 400-440 | 440-480 | mean | vs best |
+|---|---|---|---|---|---|---|
+| best480-4 | 1.60 | 1.50 | 1.48 | 1.32 | 1.48 | – |
+| win480-3 (+GPU_INDIRECT +SPEC_READ_HOIST +DEPTH_READ_UNION) | 1.77 | 1.40 | 1.50 | 1.40 | 1.52 | +3 % |
+| notrap480-3 (+WIDE_STORE_NOTRAP) | 1.62 | 1.48 | 1.60 | 1.55 | 1.56 | +6 % |
+
+- These are single runs, and the differences are within run-to-run noise. All three arms end on the phone message; none reached free walking.
+- NOTRAP cuts RenderThread `_sigtramp` from 16.2 % to 5.7 %, the one mechanistic win.
+
+**Entry 34 KYTY_GUEST_IMPORT:** `git apply --3way` hit 3 conflicted files, all mechanical, resolved by keeping both sides:
+- bufferCache.h: `<memory>`+`<mutex>`, b4 members + import members.
+- commandScheduler.cpp: includes.
+- bufferCache.cpp: CompleteCallerReadbacks before the imported early-return, teardown of both, and the producer-tick block closed before the imported unmark block.
+
+Build OK; committed c9401c87 (opt-in).
+
+PROOF §8 runs (480 s, shtsm-ab-base-1 route F10 + J×12, PREFILL=2, SCRATCH_DESCRIPTOR, FRAME_TIMING; no best flags):
+
+| window | ab-base-1 (hist.) | gi-1 | gi-storage-1 | ab-all-2 (hist.) | gi-b2-1 |
+|---|---|---|---|---|---|
+| 0-40 | 24.7 | 14.1 | 14.4 | 14.1 | 10.9 |
+| 40-80 | 13.9 | 4.0 | 4.0 | 6.3 | 4.7 |
+| 80-120 | 4.9 | 3.1 | 2.7 | 6.6 | 3.7 |
+| 320-360 | 1.18 | 1.02 | 1.00 | 1.57 | 1.20 |
+| 360-400 | 1.00 | 1.18 | 1.15 | 1.35 | 1.25 |
+| 400-440 | 1.15 | 1.32 | 1.23 | 1.45 | 1.32 |
+| 440-480 | 1.10 | 1.18 | 1.20 | 1.45 | 1.20 |
+| mean 320-480 | 1.11 | 1.18 | 1.15 | 1.46 | 1.24 |
+
+- Boot line: `VK_EXT_external_memory_host enabled, minImportedHostPointerAlignment=4096` (Rosetta 4 K pages). fb_vk=0 and fb_align=0 throughout; no "must be host-visible"; no exception; all runs timed out cleanly. The gi-1 last frame (1192) is the phone message and looks sane.
+- **live_mib peaks at 201–233 MiB** (need ≥ 1000). No RAM win: footprint peak 22.0–23.0 G and swap 9.1–9.3 GB, the same as non-import runs.
+- **war_wait sustained past 120 s:** gi-1 16–290 per 2 s, storage 8–201, b2 51–2114. `fb_demoted` climbs to 300–470. gi-1 RenderThread `_sigtramp` share is 44.7 % (write-after-read faults).
+- Intro fps is roughly halved (40–120 s) in all three. In game, gi-b2 is −15 % vs ab-all-2; gi-1 is +6 % vs ab-base-1, but the baselines are from an older session.
+- Animal Well with GUEST_IMPORT: 32/42, 33/43, 33/43 content/sampled, stage 2, 3/3. live_mib 12, created 0, no exception.
+- **Verdict: kill criteria met** (war_wait > 20 per 2 s sustained past 120 s, also with CLASSES=storage; live_mib ≪ 1000; no memory gain). Entry 34 is a null result for SH → revert c9401c87, or leave it opt-in and never default; that is Alan's call.
