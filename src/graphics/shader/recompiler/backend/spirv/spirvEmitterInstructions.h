@@ -209,6 +209,11 @@ void                  EmitBarrier(EmitterState& state);
 void                  EmitStoreCompletion(EmitterState& state);
 void                  EmitMeshAllocate(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitMeshDrawParameter(ValueEmitContext& ctx, const IR::Inst& inst);
+// KYTY_GPU_INDIRECT param mode helpers (spirvEmitterMesh.cpp).
+bool                  MeshParamModeCompiled(const EmitterState& state);
+uint32_t              EmitMeshParamModeFlag(EmitterState& state);
+uint32_t              EmitMeshParamOr(EmitterState& state, uint32_t param_dword, uint32_t fallback);
+uint32_t              EmitMeshPatchedUserData(EmitterState& state, uint32_t sgpr, uint32_t value);
 uint32_t              EmitGetTessellationAttribute(ValueEmitContext& ctx, const IR::Inst& inst);
 void                  EmitSetTessellationAttribute(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitGetUserData(EmitterState& state, IR::ScalarReg reg);

@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <span>
 
 // Mesh-shader emulation for hosts without VK_EXT_mesh_shader (MoltenVK).
@@ -29,6 +31,45 @@ inline constexpr uint32_t ScratchAddressHiDword = 7;
 inline constexpr uint32_t GroupBaseDword        = 8;
 inline constexpr uint32_t ChunkGroupsDword      = 9;
 static_assert(ChunkGroupsDword < ShaderRecompiler::IR::PushData::MeshDrawDwordCount);
+
+// KYTY_GPU_INDIRECT=1: GPU-sourced mesh draw parameters ("param mode").
+//
+// A single-draw guest DRAW_INDIRECT / DRAW_INDEX_INDIRECT whose arguments live in GPU memory is
+// converted by a one-thread compute pass (host_gpu/shaders/gpu_indirect_mesh_args.comp) into a
+// param block in the tail of the mesh scratch buffer plus VkDispatchIndirectCommand /
+// VkDrawIndirectCommand records, so the CPU never dereferences the arguments. The mesh compute
+// program then takes draw parameters 0..5, the chunk group count and up to three patched user
+// SGPRs from the param block instead of push constants. Param mode is selected per draw by
+// ParamModeBit in push dword ParamModeDword; with the bit clear every value comes from push
+// constants exactly as before, so direct draws behave identically with the flag on.
+inline bool GpuIndirectEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_GPU_INDIRECT");
+		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+	}();
+	return enabled;
+}
+
+inline constexpr uint32_t ParamModeDword       = 3;  // carries the mode bit + patch map
+inline constexpr uint32_t ParamBlockDword      = 0;  // param mode: dword index of the param block
+inline constexpr uint32_t ParamModeBit         = 0x80000000u;
+inline constexpr uint32_t ParamPatchShift      = 8;  // 3 x 7-bit fields: valid(0x40) | sgpr(0..63)
+inline constexpr uint32_t ParamPatchBits       = 7;
+inline constexpr uint32_t ParamPatchValid      = 0x40u;
+inline constexpr uint32_t ParamPatchSgprMask   = 0x3fu;
+inline constexpr uint32_t ParamPatchCount      = 3;  // vertex offset, instance offset, index offset
+// Param block layout (dwords), written by the conversion pass.
+inline constexpr uint32_t ParamDrawDwords      = 6;  // == mesh draw parameters 0..5
+inline constexpr uint32_t ParamPatchValueDword = 6;  // 6..8: patched SGPR values by role
+inline constexpr uint32_t ParamChunkGroupsDword = 9; // replaces push ChunkGroupsDword
+inline constexpr uint32_t ParamBlockDwords     = 16;
+static_assert(ParamPatchShift + ParamPatchCount * ParamPatchBits <= 31u);
+
+[[nodiscard]] constexpr uint32_t EncodeParamPatch(uint32_t role, int32_t sgpr) {
+	return sgpr < 0 ? 0u
+	                : (ParamPatchValid | (static_cast<uint32_t>(sgpr) & ParamPatchSgprMask))
+	                      << (ParamPatchShift + role * ParamPatchBits);
+}
 
 inline constexpr uint32_t PrimitiveLiveBit = 0x80000000u;
 inline constexpr uint32_t PrimitiveLayerMask = 0xffffu;

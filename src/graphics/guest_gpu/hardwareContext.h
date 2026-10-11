@@ -1051,11 +1051,17 @@ public:
 		    ((id + 1) > m_vs.hs_user_sgpr.count ? (id + 1) : m_vs.hs_user_sgpr.count);
 	}
 	void SetGsUserSgpr(uint32_t id, uint32_t value, UserSgprType type) {
+		m_gs_user_written |= 1u << (id & 31u);
 		m_vs.gs_user_sgpr.value[id] = value;
 		m_vs.gs_user_sgpr.type[id]  = type;
 		m_vs.gs_user_sgpr.count =
 		    ((id + 1) > m_vs.gs_user_sgpr.count ? (id + 1) : m_vs.gs_user_sgpr.count);
 	}
+
+	// KYTY_GPU_INDIRECT: GS user SGPRs written since the last ClearGsUserWritten. Starts (and
+	// Reset()s) as all-written, so a context reset drops every GPU-resident register value.
+	[[nodiscard]] uint32_t GsUserWritten() const { return m_gs_user_written; }
+	void                   ClearGsUserWritten(uint32_t mask) { m_gs_user_written &= ~mask; }
 
 	[[nodiscard]] const PixelShaderInfo&   GetPs() const { return m_ps; }
 	[[nodiscard]] const VertexShaderInfo&  GetVs() const { return m_vs; }
@@ -1071,6 +1077,7 @@ private:
 	VertexShaderInfo  m_vs;
 	PixelShaderInfo   m_ps;
 	ComputeShaderInfo m_cs;
+	uint32_t          m_gs_user_written = ~0u;
 };
 
 } // namespace Libs::Graphics::HW

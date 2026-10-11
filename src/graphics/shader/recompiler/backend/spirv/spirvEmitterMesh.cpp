@@ -2,6 +2,8 @@
 #include "graphics/shader/meshEmulation.h"
 #include "common/assert.h"
 
+#include <array>
+
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
 
@@ -38,6 +40,109 @@ uint32_t MeshOutputType(EmitterState& state, IR::StageOutputKind kind) {
 }
 
 } // namespace
+
+// KYTY_GPU_INDIRECT param mode (see meshEmulation.h). Only the emulated mesh compute program reads
+// the param block; it lives in the mesh scratch buffer, reached the same way the item writes are.
+static uint32_t MeshPushDword(EmitterState& state, uint32_t index) {
+	const auto pointer = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain, TypePushConstantElementPointer(state), pointer,
+	                          state.push_constant_variable, ConstantU32(state, 0),
+	                          ConstantU32(state, index));
+	const auto value = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, pointer);
+	return value;
+}
+
+static uint32_t MeshScratchLoad(EmitterState& state, uint32_t dword_index) {
+	const auto value = state.builder.AllocateId();
+	if (state.mesh_scratch_variable != 0) {
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain,
+		                          TypePointer(state, spv::StorageClassStorageBuffer, TypeU32(state)),
+		                          pointer, state.mesh_scratch_variable, ConstantU32(state, 0),
+		                          dword_index);
+		state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, pointer);
+		return value;
+	}
+	const auto u64  = TypeU64(state);
+	const auto lo   = Unary(state, spv::OpUConvert, u64,
+	                        MeshPushDword(state, MeshEmulation::ScratchAddressLoDword));
+	const auto hi   = Unary(state, spv::OpUConvert, u64,
+	                        MeshPushDword(state, MeshEmulation::ScratchAddressHiDword));
+	const auto base = Binary(state, spv::OpBitwiseOr, u64, lo,
+	                         Binary(state, spv::OpShiftLeftLogical, u64, hi, ConstantU32(state, 32)));
+	const auto address =
+	    Binary(state, spv::OpIAdd, u64, base,
+	           Binary(state, spv::OpIMul, u64, Unary(state, spv::OpUConvert, u64, dword_index),
+	                  ConstantU64(state, 4u)));
+	const auto pointer = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpConvertUToPtr,
+	                          TypePointer(state, spv::StorageClassPhysicalStorageBuffer, TypeU32(state)),
+	                          pointer, address);
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, pointer,
+	                          spv::MemoryAccessAlignedMask, 4u);
+	return value;
+}
+
+bool MeshParamModeCompiled(const EmitterState& state) {
+	return state.mesh_compute && MeshEmulation::GpuIndirectEnabled();
+}
+
+uint32_t EmitMeshParamModeFlag(EmitterState& state) {
+	const auto mode = MeshPushDword(state, MeshEmulation::ParamModeDword);
+	return Binary(state, spv::OpINotEqual, TypeBool(state),
+	              Binary(state, spv::OpBitwiseAnd, TypeU32(state), mode,
+	                     ConstantU32(state, MeshEmulation::ParamModeBit)),
+	              ConstantU32(state, 0));
+}
+
+uint32_t EmitMeshParamOr(EmitterState& state, uint32_t param_dword, uint32_t fallback) {
+	// Always-in-bounds read: param mode reads the block, otherwise scratch dword 0 (ignored).
+	const auto flag  = EmitMeshParamModeFlag(state);
+	const auto block = MeshPushDword(state, MeshEmulation::ParamBlockDword);
+	const auto index = Select(state, TypeU32(state), flag,
+	                          Binary(state, spv::OpIAdd, TypeU32(state), block,
+	                                 ConstantU32(state, param_dword)),
+	                          ConstantU32(state, 0));
+	return Select(state, TypeU32(state), flag, MeshScratchLoad(state, index), fallback);
+}
+
+uint32_t EmitMeshPatchedUserData(EmitterState& state, uint32_t sgpr, uint32_t value) {
+	// PatchIndirectDrawOffsets writes vertex, instance, then index offset: the last role wins.
+	// One always-in-bounds scratch load per user SGPR (dword 0 when nothing matches).
+	const auto u32     = TypeU32(state);
+	const auto boolean = TypeBool(state);
+	const auto mode    = MeshPushDword(state, MeshEmulation::ParamModeDword);
+	const auto flag    = EmitMeshParamModeFlag(state);
+	std::array<uint32_t, MeshEmulation::ParamPatchCount> match {};
+	for (uint32_t role = 0; role < MeshEmulation::ParamPatchCount; role++) {
+		const auto field = Binary(
+		    state, spv::OpBitwiseAnd, u32,
+		    Binary(state, spv::OpShiftRightLogical, u32, mode,
+		           ConstantU32(state, MeshEmulation::ParamPatchShift +
+		                                  role * MeshEmulation::ParamPatchBits)),
+		    ConstantU32(state, (1u << MeshEmulation::ParamPatchBits) - 1u));
+		match[role] = Binary(
+		    state, spv::OpLogicalAnd, boolean, flag,
+		    Binary(state, spv::OpIEqual, boolean, field,
+		           ConstantU32(state, MeshEmulation::ParamPatchValid |
+		                                  (sgpr & MeshEmulation::ParamPatchSgprMask))));
+	}
+	static_assert(MeshEmulation::ParamPatchCount == 3);
+	const auto role = Select(state, u32, match[2], ConstantU32(state, 2),
+	                         Select(state, u32, match[1], ConstantU32(state, 1),
+	                                ConstantU32(state, 0)));
+	const auto any = Binary(state, spv::OpLogicalOr, boolean, match[0],
+	                        Binary(state, spv::OpLogicalOr, boolean, match[1], match[2]));
+	const auto block = MeshPushDword(state, MeshEmulation::ParamBlockDword);
+	const auto index = Select(
+	    state, u32, any,
+	    Binary(state, spv::OpIAdd, u32, block,
+	           Binary(state, spv::OpIAdd, u32, role,
+	                  ConstantU32(state, MeshEmulation::ParamPatchValueDword))),
+	    ConstantU32(state, 0));
+	return Select(state, u32, any, MeshScratchLoad(state, index), value);
+}
 
 void DefineMeshOutputs(EmitterState& state, uint32_t clip_distance_count,
                        uint32_t cull_distance_count) {
@@ -186,9 +291,13 @@ struct ScratchWriter {
 		const auto group_y = EmitInputComponentU32(state, IR::StageInputKind::WorkgroupId, 1);
 		const auto local_x = EmitBinaryU32(state, spv::OpISub, group_x,
 		                                   PushDword(MeshEmulation::GroupBaseDword));
-		const auto slot = EmitBinaryU32(
-		    state, spv::OpIAdd, local_x,
-		    EmitBinaryU32(state, spv::OpIMul, group_y, PushDword(MeshEmulation::ChunkGroupsDword)));
+		auto chunk_groups = PushDword(MeshEmulation::ChunkGroupsDword);
+		if (MeshParamModeCompiled(state)) {
+			chunk_groups =
+			    EmitMeshParamOr(state, MeshEmulation::ParamChunkGroupsDword, chunk_groups);
+		}
+		const auto slot = EmitBinaryU32(state, spv::OpIAdd, local_x,
+		                                EmitBinaryU32(state, spv::OpIMul, group_y, chunk_groups));
 		if (state.mesh_scratch_variable != 0) {
 			// The emulation scratch is a regular storage-buffer descriptor.  Keeping
 			// it out of the physical-BDA path lets MoltenVK track the resource in

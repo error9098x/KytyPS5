@@ -348,21 +348,37 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	BindRenderTarget(r.image_id);
 }
 
-bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
-	const auto& hw       = buffer.GetRegisters();
+static void DepthStencilCopyKinds(const HW::Context& hw, bool& depth_copy, bool& stencil_copy) {
 	const auto& z        = hw.GetDepthRenderTarget();
 	const auto& override = hw.GetDepthRenderOverride();
+	depth_copy = override.force_z_dirty && override.force_z_valid &&
+	             z.z_info.format != Prospero::DepthFormat::kInvalid && z.z_read_base_addr != 0 &&
+	             z.z_write_base_addr != 0 && z.z_read_base_addr != z.z_write_base_addr;
+	stencil_copy = override.force_stencil_dirty && override.force_stencil_valid &&
+	               z.stencil_info.format != Prospero::StencilFormat::kInvalid &&
+	               z.stencil_read_base_addr != 0 && z.stencil_write_base_addr != 0 &&
+	               z.stencil_read_base_addr != z.stencil_write_base_addr;
+}
+
+bool DepthStencilCopyRequested(const HW::Context& hw) {
 	if (hw.GetColorControl().mode != 0) {
 		return false;
 	}
-	const bool depth_copy = override.force_z_dirty && override.force_z_valid &&
-	                        z.z_info.format != Prospero::DepthFormat::kInvalid &&
-	                        z.z_read_base_addr != 0 && z.z_write_base_addr != 0 &&
-	                        z.z_read_base_addr != z.z_write_base_addr;
-	const bool stencil_copy = override.force_stencil_dirty && override.force_stencil_valid &&
-	                          z.stencil_info.format != Prospero::StencilFormat::kInvalid &&
-	                          z.stencil_read_base_addr != 0 && z.stencil_write_base_addr != 0 &&
-	                          z.stencil_read_base_addr != z.stencil_write_base_addr;
+	bool depth_copy   = false;
+	bool stencil_copy = false;
+	DepthStencilCopyKinds(hw, depth_copy, stencil_copy);
+	return depth_copy || stencil_copy;
+}
+
+bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
+	const auto& hw       = buffer.GetRegisters();
+	const auto& z        = hw.GetDepthRenderTarget();
+	if (hw.GetColorControl().mode != 0) {
+		return false;
+	}
+	bool depth_copy   = false;
+	bool stencil_copy = false;
+	DepthStencilCopyKinds(hw, depth_copy, stencil_copy);
 	if (!depth_copy && !stencil_copy) {
 		return false;
 	}

@@ -18,6 +18,13 @@ inline constexpr bool depth_htile_stencil_acceleration_compatible(bool has_stenc
 	return !has_stencil || htile_stencil_disabled || has_htile;
 }
 
+namespace HW {
+class Context;
+} // namespace HW
+
+// Side-effect-free: whether RenderExecutor::DepthStencilCopy would consume the current draw.
+[[nodiscard]] bool DepthStencilCopyRequested(const HW::Context& hw);
+
 struct RenderDepthInfo {
 	// Discovery keeps guest image information but can remap the view into a larger cache image.
 	TextureCache::ImageDesc     desc;

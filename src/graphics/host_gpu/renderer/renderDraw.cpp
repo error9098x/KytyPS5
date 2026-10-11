@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/shaders/gpu_indirect_mesh_args_spv.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -895,7 +896,7 @@ static bool GetDrawTopology(const HW::UserConfig& ucfg, vk::PrimitiveTopology& t
 }
 
 static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
-                                    const DrawIndexBufferSource& source) {
+                                    const DrawIndexBufferSource& source, bool allow_scan = true) {
 	const auto control = buffer.GetUserConfig().GetPrimitiveResetControl();
 	EXIT_NOT_IMPLEMENTED((control & ~0x3u) != 0);
 	if ((control & 0x1u) == 0) {
@@ -923,6 +924,10 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 	// A game can set a custom reset value without using it in the index buffer.
 	// Keep restart off in that case; fail if we actually find the value.
 	// Scan before preparing draw resources: readback can restart the command buffer.
+	if (!allow_scan) {
+		// KYTY_GPU_INDIRECT: the count is GPU-resident; the scan only ever EXITs or returns false.
+		return false;
+	}
 	EXIT_NOT_IMPLEMENTED(source.address == 0);
 	const auto* indices = reinterpret_cast<const uint8_t*>(source.address);
 	for (uint64_t offset = 0; offset < source.size; offset += element_size) {
@@ -1473,6 +1478,18 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		ResetBindings();
 		return;
 	}
+	if (m_gpu_pending_mask != 0) {
+		// KYTY_GPU_INDIRECT: this program reads a GS user SGPR that only a GPU-converted indirect
+		// draw knows. Fetch it (may drain), then re-derive the state from the real value.
+		if (const auto slots = GpuPendingSlotsReadBy(buffer, state); slots != 0) {
+			ResolveGpuPendingRegisters(buffer, slots);
+			state = {};
+			if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+				ResetBindings();
+				return;
+			}
+		}
+	}
 
 	LogDrawStateIfNeeded(buffer, draw, state, args.index_type_and_size,
 	                     args.index_addr);
@@ -1552,6 +1569,17 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		ResetBindings();
 		return;
 	}
+	if (m_gpu_pending_mask != 0) {
+		// KYTY_GPU_INDIRECT: see DrawIndex.
+		if (const auto slots = GpuPendingSlotsReadBy(buffer, state); slots != 0) {
+			ResolveGpuPendingRegisters(buffer, slots);
+			state = {};
+			if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+				ResetBindings();
+				return;
+			}
+		}
+	}
 
 	const bool rect_list = Prospero::IsRectList(ucfg.GetPrimType());
 	if (rect_list && state.vertex_info[0].buffers_num == 0 &&
@@ -1619,6 +1647,83 @@ bool RenderExecutor::ResolveColorTargets(CommandBuffer& buffer, uint32_t render_
 }
 
 
+namespace {
+
+// KYTY_GPU_INDIRECT constants.
+constexpr uint64_t GpuIndirectTailBytes     = 256;  // param block at the end of the mesh scratch
+constexpr uint32_t GpuIndirectSlots         = 4096; // command + history ring entries
+constexpr uint32_t GpuIndirectSlotBytes     = 32;
+constexpr uint32_t GpuIndirectHistoryHeader = 16;   // [0] status!=ok count, [1] oob count
+constexpr uint32_t GpuIndirectPushDwords    = 17;
+
+static_assert(MeshEmulation::ParamBlockDwords * 4u <= GpuIndirectTailBytes);
+
+uint64_t MeshScratchItemBytes(const Buffer& scratch) {
+	return MeshEmulation::GpuIndirectEnabled() ? scratch.Size() - GpuIndirectTailBytes
+	                                          : scratch.Size();
+}
+
+enum class GpuIndirectReason : uint32_t {
+	Gpu,
+	NoMeshEmulation,
+	SpecialColorMode,
+	NoVertexShader,
+	Topology,
+	NoIndexBufferSize,
+	NoTargets,
+	NotMeshProgram,
+	MeshShape,
+	RectListSkip,
+	PendingRead,
+	UserDataLayout,
+	Count,
+};
+
+constexpr const char* GpuIndirectReasonName(GpuIndirectReason reason) {
+	switch (reason) {
+		case GpuIndirectReason::Gpu: return "gpu";
+		case GpuIndirectReason::NoMeshEmulation: return "no_mesh_emu";
+		case GpuIndirectReason::SpecialColorMode: return "special_cb";
+		case GpuIndirectReason::NoVertexShader: return "no_vs";
+		case GpuIndirectReason::Topology: return "topology";
+		case GpuIndirectReason::NoIndexBufferSize: return "no_ib_size";
+		case GpuIndirectReason::NoTargets: return "no_targets";
+		case GpuIndirectReason::NotMeshProgram: return "not_mesh";
+		case GpuIndirectReason::MeshShape: return "mesh_shape";
+		case GpuIndirectReason::RectListSkip: return "rect_skip";
+		case GpuIndirectReason::PendingRead: return "pending_read";
+		case GpuIndirectReason::UserDataLayout: return "ud_layout";
+		default: return "?";
+	}
+}
+
+struct GpuIndirectStats {
+	std::array<uint64_t, static_cast<size_t>(GpuIndirectReason::Count)> draws {};
+	uint64_t resolve_regs      = 0; // lazy CPU reads of GPU-resident registers (each may drain)
+	uint64_t resolve_drains    = 0; // ... that had to submit/wait
+	uint64_t resolve_wait_us   = 0;
+	uint64_t resolve_seq_miss  = 0; // history slot recycled: fell back to the guest memory read
+	uint64_t cpu_multi         = 0; // multi-draw / count-indirect packets (CPU path)
+	uint64_t cpu_dest          = 0; // non-GS patch destination / unaligned record (CPU path)
+	std::chrono::steady_clock::time_point last_log = std::chrono::steady_clock::now();
+};
+
+GpuIndirectStats g_gpu_indirect_stats; // GPU thread only
+
+uint64_t& GpuIndirectCount(GpuIndirectReason reason) {
+	return g_gpu_indirect_stats.draws[static_cast<size_t>(reason)];
+}
+
+} // namespace
+
+void GpuIndirectNoteCpuMulti() {
+	g_gpu_indirect_stats.cpu_multi++;
+}
+
+void GpuIndirectNoteCpuDestination() {
+	g_gpu_indirect_stats.cpu_dest++;
+}
+
 Buffer& RenderExecutor::MeshEmulationScratch() {
 	if (m_mesh_scratch == nullptr) {
 		uint64_t megabytes = 256;
@@ -1658,7 +1763,8 @@ void RenderExecutor::ExecuteEmulatedMeshDraw(CommandBuffer& buffer, const DrawCa
 	auto&      scratch      = MeshEmulationScratch();
 	const auto item_bytes   = layout.ItemBytes();
 	const auto instances    = draw.instance_count;
-	const auto capacity     = scratch.Size() / item_bytes;
+	// KYTY_GPU_INDIRECT reserves the scratch tail for the GPU-written param block.
+	const auto capacity     = MeshScratchItemBytes(scratch) / item_bytes;
 	if (capacity < instances) {
 		EXIT("mesh emulation scratch too small: item=%" PRIu64 " instances=%u (raise "
 		     "KYTY_MESH_SCRATCH_MB)\n",
@@ -1757,6 +1863,533 @@ void RenderExecutor::ExecuteEmulatedMeshDraw(CommandBuffer& buffer, const DrawCa
 		     " vertex_slots=%u primitives/group=%u\n",
 		     mesh_groups, instances, item_bytes, layout.VertexSlots(), mesh.max_primitives);
 	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// KYTY_GPU_INDIRECT=1: native GPU-driven execution of single guest indirect draws.
+//
+// The CPU path (CommandProcessor::DrawIndirectMulti) dereferences the guest argument record. When
+// a GPU pass in the still-open command buffer wrote it, that load faults, and the fault handler
+// submits the command buffer and waits for all of it (DownloadBufferMemory<false>, a full drain).
+// Here the record stays on the GPU: a one-thread compute pass converts it into the emulated mesh
+// draw's param block plus dispatch/draw indirect commands; the mesh compute program reads its draw
+// parameters (and the patched user SGPRs) from that block. See meshEmulation.h and
+// host_gpu/shaders/gpu_indirect_mesh_args.comp.
+// ------------------------------------------------------------------------------------------------
+
+RenderExecutor::~RenderExecutor() {
+	if (m_gpu_indirect_pipeline || m_gpu_indirect_pipeline_layout || m_gpu_indirect_set_layout) {
+		const auto device = m_context.GetGraphics().device;
+		device.destroyPipeline(m_gpu_indirect_pipeline, nullptr);
+		device.destroyPipelineLayout(m_gpu_indirect_pipeline_layout, nullptr);
+		device.destroyDescriptorSetLayout(m_gpu_indirect_set_layout, nullptr);
+	}
+}
+
+void RenderExecutor::EnsureGpuIndirect() {
+	if (m_gpu_indirect_pipeline) {
+		return;
+	}
+	auto& graphics  = m_context.GetGraphics();
+	auto& scheduler = m_context.GetCommandScheduler();
+	m_gpu_indirect_commands = std::make_unique<Buffer>(
+	    graphics, scheduler, MemoryUsage::DeviceLocal, 0,
+	    vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eIndirectBuffer,
+	    uint64_t {GpuIndirectSlots} * GpuIndirectSlotBytes);
+	m_gpu_indirect_history = std::make_unique<Buffer>(
+	    graphics, scheduler, MemoryUsage::Download, 0, vk::BufferUsageFlagBits::eStorageBuffer,
+	    GpuIndirectHistoryHeader + uint64_t {GpuIndirectSlots} * GpuIndirectSlotBytes);
+	EXIT_IF(m_gpu_indirect_history->Mapped().size() < m_gpu_indirect_history->Size());
+	std::memset(m_gpu_indirect_history->Mapped().data(), 0, m_gpu_indirect_history->Size());
+	m_gpu_indirect_history->Flush(0, m_gpu_indirect_history->Size());
+	SetVulkanObjectNameF(graphics.device, m_gpu_indirect_commands->Handle(), "GPU indirect commands");
+	SetVulkanObjectNameF(graphics.device, m_gpu_indirect_history->Handle(), "GPU indirect history");
+
+	std::array<vk::DescriptorSetLayoutBinding, 4> bindings {};
+	for (uint32_t i = 0; i < bindings.size(); i++) {
+		bindings[i] = {i, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute,
+		               nullptr};
+	}
+	vk::DescriptorSetLayoutCreateInfo layout_info {};
+	layout_info.flags        = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
+	layout_info.bindingCount = static_cast<uint32_t>(bindings.size());
+	layout_info.pBindings    = bindings.data();
+	RequireVulkanSuccess(graphics.device.createDescriptorSetLayout(&layout_info, nullptr,
+	                                                               &m_gpu_indirect_set_layout),
+	                     "create GPU indirect descriptor layout");
+	vk::PushConstantRange push_range {vk::ShaderStageFlagBits::eCompute, 0,
+	                                  GpuIndirectPushDwords * sizeof(uint32_t)};
+	vk::PipelineLayoutCreateInfo pipeline_layout_info {};
+	pipeline_layout_info.setLayoutCount         = 1;
+	pipeline_layout_info.pSetLayouts            = &m_gpu_indirect_set_layout;
+	pipeline_layout_info.pushConstantRangeCount = 1;
+	pipeline_layout_info.pPushConstantRanges    = &push_range;
+	RequireVulkanSuccess(graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
+	                                                          &m_gpu_indirect_pipeline_layout),
+	                     "create GPU indirect pipeline layout");
+	const auto module = CompileSPV(GPU_INDIRECT_MESH_ARGS_SPV, graphics.device);
+	vk::PipelineShaderStageCreateInfo stage {};
+	stage.stage  = vk::ShaderStageFlagBits::eCompute;
+	stage.module = module;
+	stage.pName  = "main";
+	vk::ComputePipelineCreateInfo pipeline_info {};
+	pipeline_info.stage  = stage;
+	pipeline_info.layout = m_gpu_indirect_pipeline_layout;
+	const auto result = graphics.device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr,
+	                                                           &m_gpu_indirect_pipeline);
+	graphics.device.destroyShaderModule(module, nullptr);
+	RequireVulkanSuccess(result, "create GPU indirect pipeline");
+	SetVulkanObjectNameF(graphics.device, m_gpu_indirect_pipeline, "GPU indirect mesh args");
+	LOGF("GpuIndirect: enabled (mesh-emulated single indirect draws convert on the GPU)\n");
+}
+
+bool RenderExecutor::ReadGpuIndirectHistory(const GpuIndirectHistoryRef& ref,
+                                            GpuIndirectHistoryValues& values) {
+	Common::LockGuard lock(m_context.GetMutex());
+	EXIT_IF(m_gpu_indirect_history == nullptr);
+	auto& scheduler = m_context.GetCommandScheduler();
+	g_gpu_indirect_stats.resolve_regs++;
+	if (!scheduler.IsFree(ref.tick)) {
+		const auto start = std::chrono::steady_clock::now();
+		scheduler.Wait(ref.tick);
+		g_gpu_indirect_stats.resolve_drains++;
+		g_gpu_indirect_stats.resolve_wait_us += static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+		                                                          start)
+		        .count());
+	}
+	const auto offset = GpuIndirectHistoryHeader + uint64_t {ref.index} * GpuIndirectSlotBytes;
+	m_gpu_indirect_history->Invalidate(offset, GpuIndirectSlotBytes);
+	std::array<uint32_t, GpuIndirectSlotBytes / 4u> words {};
+	std::memcpy(words.data(), m_gpu_indirect_history->Mapped().data() + offset, sizeof(words));
+	if (words[0] != ref.sequence) {
+		g_gpu_indirect_stats.resolve_seq_miss++;
+		return false;
+	}
+	values.count          = words[1];
+	values.instances      = words[2];
+	values.vertex_offset  = words[3];
+	values.start_instance = words[4];
+	values.start_index    = words[5];
+	return true;
+}
+
+uint32_t RenderExecutor::GpuPendingSlots(CommandBuffer& buffer) {
+	// A register the guest rewrote since the GPU draw holds the guest's value again.
+	m_gpu_pending_mask &= ~buffer.GetShaders().GsUserWritten();
+	return m_gpu_pending_mask;
+}
+
+uint32_t RenderExecutor::GpuPendingSlotsReadBy(CommandBuffer& buffer, const DrawRenderState& state) {
+	const auto pending = GpuPendingSlots(buffer);
+	if (pending == 0) {
+		return 0;
+	}
+	const auto* program = state.vertex_info[0].stage.program;
+	if (program == nullptr || program->stage != ShaderType::Mesh ||
+	    state.programs.VertexStageCount() != 1) {
+		return pending; // conservative: only mesh user-data layouts are decoded below
+	}
+	const auto user_sgprs = buffer.GetShaders().GetVs().gs_regs.rsrc2.user_sgpr;
+	if (program->user_data_count < user_sgprs + program->user_data_base) {
+		return pending;
+	}
+	// GS user-data slot i lands in SGPR user_data_base + offset + i (offset 8 for NGG, see
+	// PrepareProgram/GetShaderParams in shader.cpp).
+	const auto first = program->user_data_base + (program->user_data_count -
+	                                              program->user_data_base - user_sgprs);
+	uint32_t   reads = 0;
+	const auto add   = [&](int64_t sgpr) {
+		if (sgpr >= first && sgpr - first < 32) {
+			reads |= 1u << static_cast<uint32_t>(sgpr - first);
+		}
+	};
+	for (const auto sgpr: program->info.user_data_registers) {
+		add(sgpr);
+	}
+	if (state.vertex_info[0].fetch_embedded) {
+		add(program->info.vertex_offset_sgpr);
+		add(program->info.instance_offset_sgpr);
+	}
+	return pending & reads;
+}
+
+void RenderExecutor::ResolveGpuPendingRegisters(CommandBuffer& buffer, uint32_t slots) {
+	auto& shaders = buffer.GetShaders();
+	for (uint32_t slot = 0; slot < 32; slot++) {
+		if ((slots & m_gpu_pending_mask & (1u << slot)) == 0) {
+			continue;
+		}
+		const auto&              pending = m_gpu_pending[slot];
+		GpuIndirectHistoryValues values;
+		uint32_t                 value = 0;
+		if (ReadGpuIndirectHistory(pending.ref, values)) {
+			value = pending.role == 0   ? values.vertex_offset
+			        : pending.role == 1 ? values.start_instance
+			                            : values.start_index;
+		} else {
+			// History slot recycled (>4096 GPU draws since): read the guest record, as the CPU
+			// path would have, accepting that it may be newer. Counted as resolve_seq_miss.
+			const auto* words = reinterpret_cast<const volatile uint32_t*>(pending.ref_args_addr);
+			const auto  indexed = pending.ref_indexed;
+			value = pending.role == 0   ? words[indexed ? 3 : 2]
+			        : pending.role == 1 ? words[indexed ? 4 : 3]
+			                            : (indexed ? words[2] : 0u);
+		}
+		shaders.SetGsUserSgpr(slot, value, HW::UserSgprType::Unknown);
+		m_gpu_pending_mask &= ~(1u << slot);
+	}
+}
+
+void RenderExecutor::LogGpuIndirectStats() {
+	auto&      stats = g_gpu_indirect_stats;
+	const auto now   = std::chrono::steady_clock::now();
+	const auto dt =
+	    std::chrono::duration_cast<std::chrono::milliseconds>(now - stats.last_log).count();
+	if (dt < 2000) {
+		return;
+	}
+	uint32_t overflow = 0;
+	uint32_t oob      = 0;
+	if (m_gpu_indirect_history != nullptr) {
+		m_gpu_indirect_history->Invalidate(0, GpuIndirectHistoryHeader);
+		std::memcpy(&overflow, m_gpu_indirect_history->Mapped().data() + 0, 4);
+		std::memcpy(&oob, m_gpu_indirect_history->Mapped().data() + 4, 4);
+	}
+	std::string reasons;
+	for (size_t i = 1; i < stats.draws.size(); i++) {
+		if (stats.draws[i] != 0) {
+			reasons += fmt::format(" {}={}", GpuIndirectReasonName(static_cast<GpuIndirectReason>(i)),
+			                       stats.draws[i]);
+		}
+	}
+	LOGF("GpuIndirect: dt_ms=%lld gpu=%" PRIu64 " cpu_multi=%" PRIu64 " cpu_dest=%" PRIu64
+	     " resolve=%" PRIu64 "/%" PRIu64 "drains/%" PRIu64 "us seq_miss=%" PRIu64
+	     " overflow_total=%u oob_total=%u fallback:%s\n",
+	     static_cast<long long>(dt), stats.draws[0], stats.cpu_multi, stats.cpu_dest,
+	     stats.resolve_regs,
+	     stats.resolve_drains, stats.resolve_wait_us, stats.resolve_seq_miss, overflow, oob,
+	     reasons.empty() ? " none" : reasons.c_str());
+	const auto last = now;
+	stats           = {};
+	stats.last_log  = last;
+}
+
+bool RenderExecutor::DrawIndirectGpu(uint64_t submit_id, CommandBuffer& buffer,
+                                     const GpuIndirectDraw& args) {
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(buffer.IsInvalid());
+	LogGpuIndirectStats();
+	const auto reject = [](GpuIndirectReason reason) {
+		GpuIndirectCount(reason)++;
+		return false;
+	};
+	auto& graphics = m_context.GetGraphics();
+	if (!graphics.mesh_emulation) {
+		return reject(GpuIndirectReason::NoMeshEmulation);
+	}
+	m_context.GetCommandScheduler().PopPendingOperations();
+	auto& ucfg   = buffer.GetUserConfig();
+	auto& sh_ctx = buffer.GetShaders();
+	const auto debug_op = args.indexed ? CommandBufferDebugOp::DrawIndex
+	                                   : CommandBufferDebugOp::DrawIndexAuto;
+	buffer.SetDebugInfo(static_cast<uint32_t>(debug_op), submit_id, 0, 0, 0x1d,
+	                    static_cast<uint32_t>(args.args_addr), args.args_addr);
+
+	Common::LockGuard lock(m_context.GetMutex());
+
+	// Register-only gates, evaluated in the CPU path's order before it touches any resource.
+	// Any draw these would divert keeps the CPU path (which reads the arguments).
+	const auto cb_mode = buffer.GetRegisters().GetColorControl().mode;
+	if (ConsumeMetadataColorOperation(buffer) || cb_mode == 3u /* ResolveColorTargets */ ||
+	    DepthStencilCopyRequested(buffer.GetRegisters())) {
+		return reject(GpuIndirectReason::SpecialColorMode);
+	}
+	if (!DrawHasValidVertexShader(sh_ctx)) {
+		return reject(GpuIndirectReason::NoVertexShader);
+	}
+	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
+	if (!GetDrawTopology(ucfg, topology)) {
+		return reject(GpuIndirectReason::Topology);
+	}
+	DrawIndexBufferSource index_source {};
+	if (args.indexed) {
+		if (args.index_buffer_size == 0) {
+			return reject(GpuIndirectReason::NoIndexBufferSize);
+		}
+		switch (static_cast<Prospero::IndexType>(args.index_type_and_size)) {
+			case Prospero::IndexType::kIndex16:
+				index_source.type               = vk::IndexType::eUint16;
+				index_source.guest_element_size = 2;
+				break;
+			case Prospero::IndexType::kIndex32:
+				index_source.type               = vk::IndexType::eUint32;
+				index_source.guest_element_size = 4;
+				break;
+			case Prospero::IndexType::kIndex8: index_source.guest_element_size = 1; break;
+			default: EXIT("unknown index_type_and_size: %u\n", args.index_type_and_size);
+		}
+		index_source.address = args.index_base_addr;
+		index_source.size =
+		    uint64_t {args.index_buffer_size} * index_source.guest_element_size;
+	}
+	const bool primitive_restart =
+	    args.indexed && ResolvePrimitiveRestart(buffer, index_source, /*allow_scan=*/false);
+
+	// Count placeholders: only names and logging read them before the mesh path below.
+	const DrawCallInfo draw {debug_op, 1, 1, 0};
+	DrawRenderState    state {};
+	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+		ResetBindings();
+		return reject(GpuIndirectReason::NoTargets);
+	}
+	const auto& vertex_info = state.vertex_info[0];
+	const auto& program     = *vertex_info.stage.program;
+	const auto& mesh        = vertex_info.mesh;
+	if (program.stage != ShaderType::Mesh || state.programs.VertexStageCount() != 1) {
+		ResetBindings();
+		return reject(GpuIndirectReason::NotMeshProgram);
+	}
+	if (mesh.primitives_per_group == 0 ||
+	    (mesh.fast_launch && (args.indexed || primitive_restart))) {
+		ResetBindings();
+		return reject(GpuIndirectReason::MeshShape);
+	}
+	if (!args.indexed && Prospero::IsRectList(ucfg.GetPrimType()) && vertex_info.buffers_num == 0 &&
+	    program.param_export_mask == 0 && state.ps_input_info.input_num != 0) {
+		ResetBindings();
+		return reject(GpuIndirectReason::RectListSkip);
+	}
+	// Map patched GS user-data slots to the program's SGPRs (and check pending registers).
+	const auto user_sgprs = sh_ctx.GetVs().gs_regs.rsrc2.user_sgpr;
+	if (program.user_data_count < program.user_data_base + user_sgprs) {
+		ResetBindings();
+		return reject(GpuIndirectReason::UserDataLayout);
+	}
+	const auto first_sgpr =
+	    program.user_data_base + (program.user_data_count - program.user_data_base - user_sgprs);
+	uint32_t patch_mask = 0;
+	uint32_t mode_word  = MeshEmulation::ParamModeBit;
+	for (uint32_t role = 0; role < GpuIndirectDraw::RoleCount; role++) {
+		const auto slot = args.patch_slots[role];
+		if (slot < 0) {
+			continue;
+		}
+		const auto sgpr = static_cast<int32_t>(first_sgpr) + slot;
+		if (sgpr > static_cast<int32_t>(MeshEmulation::ParamPatchSgprMask)) {
+			ResetBindings();
+			return reject(GpuIndirectReason::UserDataLayout);
+		}
+		patch_mask |= 1u << static_cast<uint32_t>(slot);
+		mode_word |= MeshEmulation::EncodeParamPatch(role, sgpr);
+	}
+	if ((GpuPendingSlotsReadBy(buffer, state) & ~patch_mask) != 0) {
+		// An older GPU draw's register value would be read: the CPU path resolves it.
+		ResetBindings();
+		return reject(GpuIndirectReason::PendingRead);
+	}
+	if (primitive_restart) {
+		static std::atomic_bool restart_warned = false;
+		if (!restart_warned.exchange(true, std::memory_order_relaxed)) {
+			std::printf("Warning: primitive restart is not implemented for mesh shaders; "
+			            "continuing draw (primitive=%u indexed=%u)\n",
+			            static_cast<uint32_t>(ucfg.GetPrimType()), args.indexed);
+		}
+	}
+
+	// ---- From here on the draw is committed to the GPU path. ----
+	EnsureGpuIndirect();
+	auto& cache = m_context.GetBufferCache();
+	if (args.indexed) {
+		// Register the guest index range for the mesh program's BDA reads. INDEX_BUFFER_SIZE bounds
+		// every index the CPU path could fetch (its count is clamped to it).
+		(void)cache.FindBuffer(index_source.address, index_source.size);
+	}
+	auto&                            bindings = m_graphics_bindings;
+	std::array<PreparedBindings*, 4> descriptor_stages {};
+	uint32_t                         stage_count = 0;
+	PrepareBindings(vertex_info.stage, bindings.vertex[0]);
+	descriptor_stages[stage_count++] = &bindings.vertex[0];
+	if (state.ps_active) {
+		if (!bindings.pixel) bindings.pixel.emplace();
+		PrepareBindings(state.ps_input_info.stage, *bindings.pixel);
+		descriptor_stages[stage_count++] = &*bindings.pixel;
+	}
+	const auto stages = std::span {descriptor_stages.data(), stage_count};
+	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
+	const uint64_t args_size   = args.indexed ? 20u : 16u;
+	const auto [args_buffer, args_offset] = cache.ObtainBuffer(args.args_addr, args_size, false);
+	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
+	const auto vertex_stages = std::span {state.vertex_info.data(), 1u};
+	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
+	    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
+	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart,
+	    state.programs);
+	EXIT_IF(pipeline.mesh_compute == nullptr);
+	vk::ImageAspectFlags feedback_aspects;
+	const auto rendering = AcquireRenderTargets(buffer, state.color_info, state.color_count,
+	                                            state.depth_info, feedback_aspects, stages);
+
+	// Resource preparation above may have restarted the scheduler: use the current handle.
+	auto& scheduler = m_context.GetCommandScheduler();
+	scheduler.EndRendering();
+	auto vk_buffer = buffer.Handle();
+	SetDrawDebugPhase(buffer, submit_id, draw, args.indexed ? 0x1100u : 0x1200u);
+
+	const auto layout =
+	    MeshEmulation::ComputeLayout(program.info.outputs, mesh.max_vertices, mesh.max_primitives);
+	auto&      scratch    = MeshEmulationScratch();
+	const auto item_bytes = layout.ItemBytes();
+	const auto capacity   = MeshScratchItemBytes(scratch) / item_bytes;
+	const auto tail       = scratch.Size() - GpuIndirectTailBytes;
+	const auto slot       = m_gpu_indirect_cursor;
+	m_gpu_indirect_cursor = (m_gpu_indirect_cursor + 1u) % GpuIndirectSlots;
+	const auto sequence   = ++m_gpu_indirect_sequence;
+	const auto& limits    = graphics.GetPhysicalDeviceProperties().limits;
+
+	// 1. Conversion pass. Producer writes (shader/transfer, any earlier stage) -> argument read;
+	//    earlier indirect reads / mesh reads of the reused param block and ring -> overwrite.
+	{
+		vk::MemoryBarrier before {};
+		before.srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite;
+		before.dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+		vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllGraphics |
+		                              vk::PipelineStageFlagBits::eComputeShader |
+		                              vk::PipelineStageFlagBits::eTransfer,
+		                          vk::PipelineStageFlagBits::eComputeShader, {}, 1, &before, 0,
+		                          nullptr, 0, nullptr);
+		const auto align = std::max<uint64_t>(limits.minStorageBufferOffsetAlignment, 4u);
+		const auto args_bind = args_offset / align * align;
+		const std::array<vk::DescriptorBufferInfo, 4> infos {{
+		    {args_buffer->Handle(), args_bind, args_offset - args_bind + args_size},
+		    {scratch.Handle(), tail, GpuIndirectTailBytes},
+		    {m_gpu_indirect_commands->Handle(), 0, m_gpu_indirect_commands->Size()},
+		    {m_gpu_indirect_history->Handle(), 0, m_gpu_indirect_history->Size()},
+		}};
+		std::array<vk::WriteDescriptorSet, 4> writes {};
+		for (uint32_t i = 0; i < writes.size(); i++) {
+			writes[i].dstBinding      = i;
+			writes[i].descriptorCount = 1;
+			writes[i].descriptorType  = vk::DescriptorType::eStorageBuffer;
+			writes[i].pBufferInfo     = &infos[i];
+		}
+		const std::array<uint32_t, GpuIndirectPushDwords> push {
+		    static_cast<uint32_t>((args_offset - args_bind) / 4u),
+		    0u,
+		    slot * (GpuIndirectSlotBytes / 4u),
+		    GpuIndirectHistoryHeader / 4u + slot * (GpuIndirectSlotBytes / 4u),
+		    (args.indexed ? 1u : 0u) | (vertex_info.fetch_embedded ? 2u : 0u),
+		    index_source.guest_element_size,
+		    static_cast<uint32_t>(args.index_base_addr),
+		    static_cast<uint32_t>(args.index_base_addr >> 32u),
+		    args.index_buffer_size,
+		    mesh.InputPrimitiveSize(),
+		    mesh.InputPrimitiveStep(),
+		    mesh.primitives_per_group,
+		    layout.max_primitives,
+		    static_cast<uint32_t>(std::min<uint64_t>(capacity, UINT32_MAX)),
+		    limits.maxComputeWorkGroupCount[0],
+		    limits.maxComputeWorkGroupCount[1],
+		    sequence,
+		};
+		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_gpu_indirect_pipeline);
+		vk_buffer.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute,
+		                               m_gpu_indirect_pipeline_layout, 0, writes);
+		vk_buffer.pushConstants(m_gpu_indirect_pipeline_layout, vk::ShaderStageFlagBits::eCompute,
+		                        0, static_cast<uint32_t>(sizeof(push)), push.data());
+		vk_buffer.dispatch(1, 1, 1);
+		vk::MemoryBarrier after {};
+		after.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+		after.dstAccessMask = vk::AccessFlagBits::eIndirectCommandRead |
+		                      vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eHostRead;
+		vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+		                          vk::PipelineStageFlagBits::eDrawIndirect |
+		                              vk::PipelineStageFlagBits::eComputeShader |
+		                              vk::PipelineStageFlagBits::eVertexShader |
+		                              vk::PipelineStageFlagBits::eHost,
+		                          {}, 1, &after, 0, nullptr, 0, nullptr);
+	}
+
+	// 2. Mesh pass, mirroring ExecuteEmulatedMeshDraw for one chunk with GPU-sourced counts.
+	std::array<uint32_t, ShaderRecompiler::IR::PushData::MeshDrawDwordCount> draw_data {};
+	draw_data[MeshEmulation::ParamBlockDword] = static_cast<uint32_t>(tail / 4u);
+	draw_data[MeshEmulation::ParamModeDword]  = mode_word;
+	const bool descriptor_scratch             = Config::MeshScratchDescriptorEnabled();
+	if (!descriptor_scratch) {
+		const auto address = scratch.BufferDeviceAddress();
+		draw_data[MeshEmulation::ScratchAddressLoDword] = static_cast<uint32_t>(address);
+		draw_data[MeshEmulation::ScratchAddressHiDword] = static_cast<uint32_t>(address >> 32u);
+	}
+	draw_data[MeshEmulation::GroupBaseDword]   = 0;
+	draw_data[MeshEmulation::ChunkGroupsDword] = 0; // param block supplies it
+	constexpr auto push_stages = vk::ShaderStageFlagBits::eVertex |
+	                             vk::ShaderStageFlagBits::eFragment |
+	                             vk::ShaderStageFlagBits::eCompute;
+	const auto commands_offset = uint64_t {slot} * GpuIndirectSlotBytes;
+	{
+		vk::MemoryBarrier reuse {};
+		reuse.srcAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+		reuse.dstAccessMask = vk::AccessFlagBits::eShaderWrite;
+		vk_buffer.pipelineBarrier(
+		    vk::PipelineStageFlagBits::eVertexShader | vk::PipelineStageFlagBits::eComputeShader,
+		    vk::PipelineStageFlagBits::eComputeShader, {}, 1, &reuse, 0, nullptr, 0, nullptr);
+	}
+	std::array<PreparedBindings*, 1> compute_stages {stages.front()};
+	const auto graphics_stages = stages.subspan(1);
+	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.mesh_compute);
+	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline, compute_stages);
+	vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0,
+	                        static_cast<uint32_t>(draw_data.size() * sizeof(uint32_t)),
+	                        draw_data.data());
+	vk_buffer.dispatchIndirect(m_gpu_indirect_commands->Handle(), commands_offset);
+	{
+		vk::MemoryBarrier produced {};
+		produced.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+		produced.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+		vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+		                          vk::PipelineStageFlagBits::eVertexShader, {}, 1, &produced, 0,
+		                          nullptr, 0, nullptr);
+	}
+	if (!graphics_stages.empty() || descriptor_scratch) {
+		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, graphics_stages);
+	}
+	vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0,
+	                        static_cast<uint32_t>(draw_data.size() * sizeof(uint32_t)),
+	                        draw_data.data());
+	SetGraphicsDynamicParams(buffer, vk_buffer, vertex_info, state.depth_info, rendering);
+	if (graphics.attachment_feedback_loop_enabled) {
+		vk_buffer.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
+	}
+	scheduler.BeginRendering(rendering);
+	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	vk_buffer.drawIndirect(m_gpu_indirect_commands->Handle(), commands_offset + 16u, 1, 16u);
+
+	vk::PipelineStageFlags shader_write_stages = {};
+	if (HasShaderBufferWrites(vertex_info.stage)) {
+		shader_write_stages |= ShaderPipelineStages(NativeShaderStage(vertex_info.logical_stage));
+	}
+	if (state.ps_active && HasShaderBufferWrites(state.ps_input_info.stage)) {
+		shader_write_stages |= vk::PipelineStageFlagBits::eFragmentShader;
+	}
+	if (shader_write_stages) {
+		scheduler.EndRendering();
+		ShaderWriteBarrier(vk_buffer, shader_write_stages);
+	}
+	ResetBindings();
+
+	// The patched registers and NUM_INSTANCES now live in history slot `slot`.
+	const GpuIndirectHistoryRef ref {scheduler.CurrentTick(), slot, sequence};
+	for (uint32_t role = 0; role < GpuIndirectDraw::RoleCount; role++) {
+		const auto patch_slot = args.patch_slots[role];
+		if (patch_slot >= 0) {
+			m_gpu_pending[patch_slot] = {ref, role, args.args_addr, args.indexed};
+		}
+	}
+	sh_ctx.ClearGsUserWritten(patch_mask);
+	m_gpu_pending_mask |= patch_mask;
+	m_gpu_last_ref = {ref, 0, args.args_addr, args.indexed};
+	GpuIndirectCount(GpuIndirectReason::Gpu)++;
+	return true;
 }
 
 } // namespace Libs::Graphics

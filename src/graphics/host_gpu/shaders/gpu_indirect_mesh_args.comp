@@ -1,0 +1,153 @@
+// KYTY_GPU_INDIRECT: converts one guest DRAW_INDIRECT / DRAW_INDEX_INDIRECT argument record into
+// the arguments of an emulated mesh draw, entirely on the GPU, so the command processor never
+// reads GPU-written indirect arguments on the CPU (which forces a full command-buffer drain).
+//
+// It reproduces, bit for bit, what CommandProcessor::DrawIndirectMulti + RenderExecutor::DrawIndex/
+// DrawAuto + ExecutePreparedDraw compute on the CPU for a single mesh-emulated draw:
+//   * index_count clamp to INDEX_BUFFER_SIZE (graphicsRun.cpp DrawIndirectMulti)
+//   * index address = index_base + start_index * index_size
+//   * draw_data[0..5] mesh draw parameters (renderDraw.cpp ExecutePreparedDraw)
+//   * the values PatchIndirectDrawOffsets writes into user SGPRs (vertex/instance/index offset)
+//   * mesh_groups = ceil(InputPrimitiveCount(count) / primitives_per_group)
+//   * the vkCmdDispatch(groups, instances, 1) + vkCmdDraw(groups*instances*max_prims*3) pair
+// A draw the CPU path would have chunked or rejected (scratch capacity / workgroup limits) is
+// written as an empty draw and flagged in the status word + overflow counter instead.
+//
+// The committed SPIR-V is gpu_indirect_mesh_args_spv.h; regenerate with
+// swarm/entries/06-gpu-indirect-args/bench/build_spv.sh (glslang, --target-env vulkan1.3).
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer GuestArgs { uint guest_args[]; };
+layout(std430, set = 0, binding = 1) buffer ParamBlock { uint params[]; };
+layout(std430, set = 0, binding = 2) buffer Commands { uint commands[]; };
+layout(std430, set = 0, binding = 3) buffer History { uint history[]; };
+
+layout(push_constant) uniform Push {
+	uint args_dword;        // first dword of the guest record inside binding 0
+	uint params_dword;      // param block (scratch tail) inside binding 1
+	uint commands_dword;    // 8 dwords: VkDispatchIndirectCommand + pad, VkDrawIndirectCommand
+	uint history_dword;     // 8 dwords inside binding 3 (dwords 0..3 of binding 3 are counters)
+	uint flags;             // bit0 indexed, bit1 fetch_embedded
+	uint index_size;        // bytes per guest index (indexed only)
+	uint index_base_lo;
+	uint index_base_hi;
+	uint index_buffer_size; // INDEX_BUFFER_SIZE in indices, 0 = no clamp
+	uint prim_size;         // ShaderMeshInputInfo::InputPrimitiveSize()
+	uint prim_step;         // ShaderMeshInputInfo::InputPrimitiveStep()
+	uint prims_per_group;   // ShaderMeshInputInfo::primitives_per_group (!= 0)
+	uint max_primitives;    // MeshEmulation::Layout::max_primitives (vertex slots / 3)
+	uint capacity;          // scratch items available to one pass
+	uint max_groups_x;      // maxComputeWorkGroupCount[0]
+	uint max_groups_y;      // maxComputeWorkGroupCount[1]
+	uint sequence;          // CPU sequence number of this record (history validation)
+} pc;
+
+const uint StatusOk       = 0u;
+const uint StatusOverflow = 1u; // groups * instances > scratch capacity (CPU path would chunk)
+const uint StatusLimit    = 2u; // workgroup-count limits (CPU path EXITs)
+const uint StatusVertices = 3u; // vertex count > UINT32_MAX (CPU path EXITs)
+
+void main() {
+	const bool indexed  = (pc.flags & 1u) != 0u;
+	const bool embedded = (pc.flags & 2u) != 0u;
+	const uint a = pc.args_dword;
+
+	// DrawIndexedIndirectArgs {count, instances, start_index, base_vertex, start_instance}
+	// DrawIndirectArgs        {count, instances, start_vertex, start_instance}
+	const uint count          = guest_args[a + 0u];
+	const uint instances      = guest_args[a + 1u];
+	const uint start_index    = indexed ? guest_args[a + 2u] : 0u;
+	const uint vertex_offset  = indexed ? guest_args[a + 3u] : guest_args[a + 2u];
+	const uint start_instance = indexed ? guest_args[a + 4u] : guest_args[a + 3u];
+
+	const uint clamped =
+	    (indexed && pc.index_buffer_size != 0u) ? min(count, pc.index_buffer_size) : count;
+
+	// 64-bit index address: base + start_index * index_size (CPU: uint64 arithmetic).
+	uint mul_hi;
+	uint mul_lo;
+	umulExtended(start_index, pc.index_size, mul_hi, mul_lo);
+	uint carry;
+	const uint addr_lo = uaddCarry(pc.index_base_lo, mul_lo, carry);
+	const uint addr_hi = pc.index_base_hi + mul_hi + carry;
+
+	const uint p = pc.params_dword;
+	params[p + 0u] = clamped;
+	params[p + 1u] = embedded ? vertex_offset : 0u;
+	params[p + 2u] = embedded ? start_instance : 0u;
+	params[p + 3u] = indexed ? pc.index_size : 0u;
+	params[p + 4u] = indexed ? addr_lo : 0u;
+	params[p + 5u] = indexed ? addr_hi : 0u;
+	// User-SGPR values PatchIndirectDrawOffsets would have written, by role.
+	params[p + 6u] = vertex_offset;
+	params[p + 7u] = start_instance;
+	params[p + 8u] = start_index;
+
+	const uint primitives =
+	    clamped < pc.prim_size ? 0u : (clamped - pc.prim_size) / pc.prim_step + 1u;
+	uint groups = primitives == 0u ? 0u : (primitives - 1u) / pc.prims_per_group + 1u;
+	uint status = StatusOk;
+	uint vertex_count = 0u;
+	if (primitives == 0u || instances == 0u) {
+		groups = 0u;
+	} else if (groups > pc.max_groups_x || instances > pc.max_groups_y) {
+		status = StatusLimit;
+	} else {
+		// groups, instances, max_primitives are all < 2^32; compare without 64-bit types.
+		uint items_hi;
+		uint items_lo;
+		umulExtended(groups, instances, items_hi, items_lo);
+		if (items_hi != 0u || items_lo > pc.capacity) {
+			status = StatusOverflow;
+		} else {
+			uint v_hi;
+			uint v_lo;
+			umulExtended(items_lo, pc.max_primitives * 3u, v_hi, v_lo);
+			if (v_hi != 0u) {
+				status = StatusVertices;
+			} else {
+				vertex_count = v_lo;
+			}
+		}
+	}
+	if (status != StatusOk) {
+		groups = 0u;
+		vertex_count = 0u;
+	}
+
+	// Chunk group count for the item-slot computation (single pass: chunk == whole draw).
+	params[p + 9u] = groups;
+
+	const uint c = pc.commands_dword;
+	commands[c + 0u] = groups;
+	commands[c + 1u] = groups == 0u ? 0u : instances;
+	commands[c + 2u] = groups == 0u ? 0u : 1u;
+	commands[c + 3u] = 0u;
+	commands[c + 4u] = vertex_count; // VkDrawIndirectCommand
+	commands[c + 5u] = 1u;
+	commands[c + 6u] = 0u;
+	commands[c + 7u] = 0u;
+
+	// Per-draw history, read by the CPU only when a later command needs the patched registers
+	// or NUM_INSTANCES (lazy resolve). Raw args, as the CPU path would have read them.
+	const uint h = pc.history_dword;
+	history[h + 0u] = pc.sequence;
+	history[h + 1u] = count;
+	history[h + 2u] = instances;
+	history[h + 3u] = vertex_offset;
+	history[h + 4u] = start_instance;
+	history[h + 5u] = start_index;
+	history[h + 6u] = status;
+	const bool oob = indexed && pc.index_buffer_size != 0u &&
+	                 (start_index > pc.index_buffer_size ||
+	                  clamped > pc.index_buffer_size - start_index);
+	history[h + 7u] = oob ? 1u : 0u;
+	if (status != StatusOk) {
+		atomicAdd(history[0], 1u);
+	}
+	if (oob) {
+		atomicAdd(history[1], 1u);
+	}
+}

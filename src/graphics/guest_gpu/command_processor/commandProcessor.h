@@ -90,6 +90,10 @@ public:
 	void DrawIndirectMulti(uint32_t data_offset, uint32_t max_count_or_count,
 	                       const volatile uint32_t* count_addr, uint32_t stride_in_bytes,
 	                       IndirectDrawRegisters registers, uint32_t draw_initiator, bool indexed);
+	// KYTY_GPU_INDIRECT: run one indirect draw from GPU-resident arguments (no CPU read).
+	[[nodiscard]] bool TryDrawIndirectGpu(uint32_t data_offset, IndirectDrawRegisters registers,
+	                                      bool indexed);
+	void               ResolveGpuNumInstances();
 	void WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_write_dest,
 	                        uint32_t eop_event_type, uint32_t cache_action, uint32_t event_index,
 	                        uint32_t event_write_source, void* dst_gpu_addr, uint32_t value,
@@ -175,6 +179,9 @@ private:
 	uint64_t         m_dispatch_indirect_args_base_addr = 0;
 	// Persistent draw state: indirect draws update it for subsequent draws.
 	uint32_t m_num_instances = 1;
+	// KYTY_GPU_INDIRECT: m_num_instances is the instance count of the last GPU-converted indirect
+	// draw, which only the GPU knows; resolved lazily if a later draw relies on it.
+	bool     m_num_instances_gpu_pending = false;
 
 	uint32_t m_de_count    = 0;
 	uint32_t m_ce_count    = 0;

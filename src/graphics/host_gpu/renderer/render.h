@@ -76,6 +76,34 @@ struct DrawAutoArgs {
 	uint32_t         render_target_slice_offset = 0;
 };
 
+// KYTY_GPU_INDIRECT=1: a single guest indirect draw executed from GPU-resident arguments.
+struct GpuIndirectDraw {
+	static constexpr uint32_t RoleCount = 3; // vertex offset, instance offset, index offset
+
+	uint64_t                         args_addr                  = 0;
+	bool                             indexed                    = false;
+	uint32_t                         index_type_and_size        = 0;
+	uint64_t                         index_base_addr            = 0;
+	uint32_t                         index_buffer_size          = 0;
+	std::array<int32_t, RoleCount>   patch_slots                = {-1, -1, -1}; // GS user-data slot
+	uint32_t                         render_target_slice_offset = 0;
+};
+
+// Where the GPU wrote a converted draw's raw arguments, for a later lazy CPU read.
+struct GpuIndirectHistoryRef {
+	uint64_t tick     = 0;
+	uint32_t index    = 0;
+	uint32_t sequence = 0;
+};
+
+struct GpuIndirectHistoryValues {
+	uint32_t count          = 0;
+	uint32_t instances      = 0;
+	uint32_t vertex_offset  = 0; // base vertex (indexed) or start vertex
+	uint32_t start_instance = 0;
+	uint32_t start_index    = 0;
+};
+
 struct SubmitInfo {
 	static constexpr uint32_t MaxSemaphores = 3;
 
@@ -156,6 +184,7 @@ private:
 class RenderExecutor {
 public:
 	explicit RenderExecutor(RenderContext& context): m_context(context) {}
+	~RenderExecutor();
 	KYTY_CLASS_NO_COPY(RenderExecutor);
 
 	void DispatchDirect(uint64_t submit_id, CommandBuffer& buffer, uint32_t thread_group_x,
@@ -172,6 +201,25 @@ public:
 	                    std::span<PreparedBindings* const> bindings);
 
 private:
+	// KYTY_GPU_INDIRECT (renderDraw.cpp). Returns false, before recording anything that the CPU
+	// path would not also record, when the draw cannot run from GPU-resident arguments.
+	[[nodiscard]] bool DrawIndirectGpu(uint64_t submit_id, CommandBuffer& buffer,
+	                                   const GpuIndirectDraw& args);
+	// GS user SGPRs / NUM_INSTANCES whose current value is only known to the GPU.
+	struct GpuPendingRegister {
+		GpuIndirectHistoryRef ref;
+		uint32_t              role          = 0; // 0 vertex offset, 1 instance offset, 2 index offset
+		uint64_t              ref_args_addr = 0; // guest record (fallback when the slot recycled)
+		bool                  ref_indexed   = false;
+	};
+	void ResolveGpuPendingRegisters(CommandBuffer& buffer, uint32_t slots);
+	[[nodiscard]] bool ReadGpuIndirectHistory(const GpuIndirectHistoryRef& ref,
+	                                          GpuIndirectHistoryValues& values);
+	[[nodiscard]] uint32_t GpuPendingSlots(CommandBuffer& buffer);
+	[[nodiscard]] uint32_t GpuPendingSlotsReadBy(CommandBuffer& buffer, const DrawRenderState& state);
+	void                   EnsureGpuIndirect();
+	void                   LogGpuIndirectStats();
+
 	void DrawIndex(uint64_t submit_id, CommandBuffer& buffer, const DrawIndexArgs& args);
 	void DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args);
 
@@ -222,6 +270,17 @@ private:
 
 	RenderContext&                        m_context;
 	std::unique_ptr<Buffer>               m_mesh_scratch;
+	// KYTY_GPU_INDIRECT state (all GPU-thread only).
+	std::unique_ptr<Buffer>                       m_gpu_indirect_commands;
+	std::unique_ptr<Buffer>                       m_gpu_indirect_history;
+	vk::DescriptorSetLayout                       m_gpu_indirect_set_layout      = nullptr;
+	vk::PipelineLayout                            m_gpu_indirect_pipeline_layout = nullptr;
+	vk::Pipeline                                  m_gpu_indirect_pipeline        = nullptr;
+	uint32_t                                      m_gpu_indirect_cursor          = 0;
+	uint32_t                                      m_gpu_indirect_sequence        = 0;
+	std::array<GpuPendingRegister, 32>            m_gpu_pending {};
+	uint32_t                                      m_gpu_pending_mask             = 0;
+	GpuPendingRegister                            m_gpu_last_ref {}; // NUM_INSTANCES source
 	GraphicsBindings                     m_graphics_bindings;
 	PreparedBindings                     m_compute_bindings;
 	std::vector<ImageId>                  m_bound_images;
@@ -231,6 +290,11 @@ private:
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;
 };
+
+// KYTY_GPU_INDIRECT statistics for packets the command processor keeps on the CPU path:
+// a multi/count-indirect packet, or a patch destination outside GS user data / unaligned record.
+void GpuIndirectNoteCpuMulti();
+void GpuIndirectNoteCpuDestination();
 
 [[nodiscard]] bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x,
                                             uint32_t group_y, uint32_t group_z, uint32_t mode,

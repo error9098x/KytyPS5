@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/threadQos.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
+#include "graphics/shader/meshEmulation.h"
 #include "graphics/shader/shader.h"
 #include "kernel/memory.h"
 #include "libs/agc.h"
@@ -236,6 +237,7 @@ void CommandProcessor::Reset() {
 	m_index_buffer_size                = 0;
 	m_index_base_addr                  = 0;
 	m_num_instances                    = 1;
+	m_num_instances_gpu_pending        = false;
 	m_predicate_skip                   = false;
 	m_user_data_marker                 = HW::UserSgprType::Unknown;
 	m_draw_indirect_args_base_addr     = 0;
@@ -874,7 +876,8 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 		num_instances = 1;
 	}
 
-	m_num_instances = num_instances;
+	m_num_instances             = num_instances;
+	m_num_instances_gpu_pending = false;
 }
 
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
@@ -933,6 +936,9 @@ void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 	LogGraphicsCommand("draw_index");
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
+		if (m_num_instances_gpu_pending) {
+			ResolveGpuNumInstances();
+		}
 		args.instance_count = m_num_instances;
 	}
 	if (GraphicsRunDebugDumpEnabled() && (args.base_vertex != 0 || args.first_instance != 0)) {
@@ -1004,6 +1010,17 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	const auto args_size = indexed ? sizeof(DrawIndexedIndirectArgs) : sizeof(DrawIndirectArgs);
 	EXIT_NOT_IMPLEMENTED(stride_in_bytes < args_size);
 
+	if (MeshEmulation::GpuIndirectEnabled()) {
+		// Single draw with an immediate count: the record is never read on the CPU here.
+		if (count_addr == nullptr && draw_count == 1 &&
+		    TryDrawIndirectGpu(data_offset, registers, indexed)) {
+			return;
+		}
+		if (count_addr != nullptr || draw_count != 1) {
+			GpuIndirectNoteCpuMulti();
+		}
+	}
+
 	uint64_t index_size = 0;
 	if (indexed) {
 		switch (m_index_type_and_size) {
@@ -1022,7 +1039,8 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 			auto* args = reinterpret_cast<const DrawIndirectArgs*>(args_addr);
 			PatchIndirectDrawOffsets(*this, registers, args->start_vertex_location,
 			                         args->start_instance_location, 0);
-			m_num_instances = args->instance_count;
+			m_num_instances             = args->instance_count;
+			m_num_instances_gpu_pending = false;
 			DrawIndexAuto({.vertex_count   = args->vertex_count_per_instance,
 			               .instance_count = args->instance_count,
 			               .first_vertex   = args->start_vertex_location,
@@ -1051,7 +1069,8 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 			}
 		}
 
-		m_num_instances = args->instance_count;
+		m_num_instances             = args->instance_count;
+		m_num_instances_gpu_pending = false;
 		DrawIndex({.index_count    = index_count,
 		           .index_addr     = index_addr,
 		           .instance_count = args->instance_count,
@@ -1059,6 +1078,51 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		           .first_instance = args->start_instance_location,
 		           .offset_source  = DrawOffsetSource::IndirectArgs});
 	}
+}
+
+bool CommandProcessor::TryDrawIndirectGpu(uint32_t data_offset, IndirectDrawRegisters registers,
+                                          bool indexed) {
+	GpuIndirectDraw draw {};
+	draw.args_addr           = m_draw_indirect_args_base_addr + data_offset;
+	draw.indexed             = indexed;
+	draw.index_type_and_size = m_index_type_and_size;
+	draw.index_base_addr     = m_index_base_addr;
+	draw.index_buffer_size   = m_index_buffer_size;
+	if ((draw.args_addr & 3u) != 0) {
+		GpuIndirectNoteCpuDestination();
+		return false;
+	}
+	// Only GS user-data destinations (NGG / mesh programs) can be patched on the GPU.
+	const uint32_t locations[GpuIndirectDraw::RoleCount] {
+	    registers.vertex_offset, registers.instance_offset, registers.index_offset};
+	for (uint32_t role = 0; role < GpuIndirectDraw::RoleCount; role++) {
+		const auto location = locations[role];
+		if (location == Pm4::SH_NOP) {
+			continue;
+		}
+		if (location < Pm4::SPI_SHADER_USER_DATA_GS_0 || location > Pm4::SPI_SHADER_USER_DATA_GS_31) {
+			GpuIndirectNoteCpuDestination();
+			return false;
+		}
+		draw.patch_slots[role] = static_cast<int32_t>(location - Pm4::SPI_SHADER_USER_DATA_GS_0);
+	}
+	if (!m_renderer.GetRenderExecutor().DrawIndirectGpu(m_submit_id, CurrentBuffer(), draw)) {
+		return false;
+	}
+	m_num_instances_gpu_pending = true;
+	return true;
+}
+
+void CommandProcessor::ResolveGpuNumInstances() {
+	auto&                    executor = m_renderer.GetRenderExecutor();
+	const auto&              last     = executor.m_gpu_last_ref;
+	GpuIndirectHistoryValues values;
+	if (executor.ReadGpuIndirectHistory(last.ref, values)) {
+		m_num_instances = values.instances;
+	} else {
+		m_num_instances = reinterpret_cast<const volatile uint32_t*>(last.ref_args_addr)[1];
+	}
+	m_num_instances_gpu_pending = false;
 }
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
@@ -1111,6 +1175,9 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 	GetScheduler().NoteWork();
 	LogGraphicsCommand("draw_auto");
 	if (args.instance_count == 0) {
+		if (m_num_instances_gpu_pending) {
+			ResolveGpuNumInstances();
+		}
 		args.instance_count = m_num_instances;
 	}
 	m_renderer.GetRenderExecutor().DrawAuto(m_submit_id, CurrentBuffer(), args);

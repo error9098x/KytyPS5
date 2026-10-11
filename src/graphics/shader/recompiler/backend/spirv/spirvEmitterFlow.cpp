@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include "common/logging/log.h"
+#include "graphics/shader/meshEmulation.h"
 
 #include <cstdlib>
 #include <algorithm>
@@ -681,6 +682,9 @@ uint32_t EmitMeshDrawParameter(ValueEmitContext& ctx, const IR::Inst& inst) {
 	                          state.push_constant_variable, ConstantU32(state, 0),
 	                          ConstantU32(state, index));
 	state.builder.AddFunction(spv::OpLoad, TypeU32(state), result, pointer);
+	if (MeshParamModeCompiled(state) && index < MeshEmulation::ParamDrawDwords) {
+		return EmitMeshParamOr(state, index, result);
+	}
 	return result;
 }
 
@@ -690,7 +694,11 @@ uint32_t EmitGetUserData(EmitterState& state, IR::ScalarReg reg) {
 	if (!UserDataDwordIndex(state, reg, dword)) {
 		return ConstantU32(state, 0);
 	} else {
-		return EmitShaderDataDwordLoad(state, dword);
+		const auto value = EmitShaderDataDwordLoad(state, dword);
+		if (MeshParamModeCompiled(state)) {
+			return EmitMeshPatchedUserData(state, IR::RegIndex(reg), value);
+		}
+		return value;
 	}
 }
 
