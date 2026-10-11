@@ -524,3 +524,29 @@ Two Apple/MoltenVK blockers cleared; the game now reaches mesh shaders.
 - Animal Well: 3 of 3 runs clean after the shader and descriptor changes, 2 of 2 after the final
   fault-handler change (title content visible, about 60 FPS).
 - Silent Hill: still no rendered frames. Not solved.
+
+## 2026-10-11: post-Continue "guest null access" was a MoltenVK null descriptor set (fixed, `8ea17d3d`)
+
+- The `runtimeLinker.cpp:756` report in `shtsm-descriptor-crosshold-1` was not guest code. The
+  faulting PC (`0xff7bada77d`) lies in the x86-64 slice of `libMoltenVK.dylib` (load base
+  `0xff7b9f3000`, slice offset `0xe777d`); `atos` resolves it to `bindMetalResources(...) + 909`
+  (inlined `executeBindOps`). The instruction is `mov rdx, [rdx+0x10]` with `rdx = 0`:
+  `common._descriptorSets[op.set]` was null when the graphics encoder bound resources.
+- Cause: `ExecuteEmulatedMeshDraw` called `CommitBindings` for the graphics bind point only when
+  `graphics_stages` was non-empty. Depth-only emulated mesh draws (no pixel shader) skipped it, but
+  the descriptor-backed generated vertex shader still reads the scratch binding, so set 0 was never
+  bound. The physical-BDA route needs no descriptor there, which is why only the descriptor route hit it.
+- Fix: always commit graphics bindings on the descriptor route (`KYTY_MESH_SCRATCH_DESCRIPTOR=1` only;
+  other routes and titles are unchanged).
+- Verification: `shtsm-nullset-fix-1` (descriptor route, 256 MB, input probe start 25 s, interval 4 s,
+  hold 250 ms) ran 86 s, past the previous 43 s crash point, with no MoltenVK fault.
+- New first blocker: guest abort from Unreal `LowLevelFatalError`: "Ran out of memory allocating
+  262144 bytes with alignment 65536", `AvailablePhysical: 65536`, `UsedPhysical: 13107068928`.
+  At boot Unreal reserves the whole 12.5 GiB (`0x320000000`) direct-memory pool by halving requests
+  (300 MB, then 6.25 GiB, 3.125 GiB, ... until failure), so this is Unreal's own sub-allocator running
+  dry, not Kyty's pool or host RAM. Next step: find why demand exceeds the real-console budget
+  (suspect deferred frees that wait on GPU fences/labels that complete late or never, plus the
+  steady 64 KB batch-map page moves seen before the abort).
+- Debug tip: to symbolize a host-side PC, subtract the module base and use
+  `atos -arch x86_64 -o harness/tools/MoltenVK-1.4.2/libMoltenVK.dylib -l <base> <pc>`; the fat-file
+  x86-64 slice starts at file offset 0x4000.
