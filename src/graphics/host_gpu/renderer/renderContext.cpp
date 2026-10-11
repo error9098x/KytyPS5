@@ -181,6 +181,7 @@ void RenderContext::MapMemory(uint64_t vaddr, uint64_t size) {
 	m_mapped_ranges.Add(vaddr, size);
 	g_cpu_dirty_generation.fetch_add(1, std::memory_order_acq_rel);
 	QueueBdaDirtyRange(vaddr, size);
+	BumpBdaSyncEpoch();
 }
 
 UnmapCounters& GetUnmapCounters() {
@@ -279,6 +280,16 @@ void RenderContext::PrepareBda() {
 		m_fault_process_pending = true;
 		return;
 	}
+	static const bool epoch_enabled = [] {
+		const char* value = std::getenv("KYTY_BDA_SYNC_EPOCH");
+		return value != nullptr && *value != '\0' && *value != '0';
+	}();
+	const uint64_t epoch = g_bda_sync_epoch.load(std::memory_order_acquire);
+	if (epoch_enabled && m_bda_synced_valid && epoch == m_bda_synced_epoch) {
+		m_fault_process_pending = true;
+		return;
+	}
+	m_bda_synced_epoch = epoch;
 	std::shared_lock lock(m_mapped_ranges_mutex);
 	bool full_scan = true;
 	if (BdaDirtyRegionsEnabled() && m_bda_synced_valid) {

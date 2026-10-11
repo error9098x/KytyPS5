@@ -265,6 +265,7 @@ void BufferCache::ChangeRegister(BufferId id) {
 		// were not owned by any buffer then; force the next PrepareBda to scan.
 		g_cpu_dirty_generation.fetch_add(1, std::memory_order_acq_rel);
 		QueueBdaDirtyRange(m_slot_buffers[id].CpuAddress(), m_slot_buffers[id].Size());
+		BumpBdaSyncEpoch();
 	}
 	auto& buffer = m_slot_buffers[id];
 	PageTable::PageRange pages {};

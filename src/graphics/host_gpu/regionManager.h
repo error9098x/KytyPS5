@@ -84,6 +84,16 @@ static_assert(std::atomic_uint32_t::is_always_lock_free);
 // has become CPU-modified since that scan began.
 inline std::atomic<uint64_t> g_cpu_dirty_generation {0};
 
+// KYTY_BDA_SYNC_EPOCH=1: guest-visible synchronization epoch. Bumped when the CP starts or
+// resumes processing a submission, on every WAIT_REG_MEM evaluation, when a buffer is
+// registered and when a range is mapped. With the flag on, PrepareBda synchronizes CPU writes
+// once per epoch instead of before every draw: CPU writes the guest ordered before the
+// submission (or before a wait it satisfied) are still uploaded before the first draw.
+inline std::atomic<uint64_t> g_bda_sync_epoch {1};
+inline void BumpBdaSyncEpoch() noexcept {
+	g_bda_sync_epoch.fetch_add(1, std::memory_order_acq_rel);
+}
+
 // KYTY_BDA_DIRTY_REGIONS=1: tracker regions (4 MiB) that may hold CPU-dirty pages a BDA sync
 // has not uploaded yet. Producers append region bases (a page became CPU-modified, a region was
 // created, a buffer was registered or a range mapped over it); PrepareBda drains the list and

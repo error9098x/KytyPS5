@@ -96,6 +96,7 @@ private:
 	bool                      m_bda_logged = false;
 	bool                      m_bda_synced_valid      = false;
 	uint64_t                  m_bda_synced_generation = 0;
+	uint64_t                  m_bda_synced_epoch      = 0;
 
 	Common::Mutex                        m_interrupt_mutex;
 	std::vector<InterruptEqRegistration> m_interrupt_eqs;
