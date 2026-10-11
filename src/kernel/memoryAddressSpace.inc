@@ -79,6 +79,15 @@ public:
 				if (m_fd >= 0) {
 					(void)unlink(file_name);
 				}
+				// Not silent: this backs all of direct memory with a disk file, so dirty pages
+				// can be written back to disk (I/O stalls, disk usage of up to the full size).
+				LOGF_COLOR(Log::Color::Red,
+				           "\t direct-memory backing: shm_open denied (EPERM); falling back to an "
+				           "unlinked /tmp file (size 0x%016" PRIx64 ", fd %d)\n",
+				           static_cast<uint64_t>(m_size), m_fd);
+				std::fprintf(stderr,
+				             "WARNING: direct-memory backing uses a /tmp file (shm_open EPERM); "
+				             "expect disk I/O\n");
 			}
 		}
 #else
