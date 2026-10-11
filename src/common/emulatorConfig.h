@@ -148,6 +148,27 @@ inline bool MeshPsbTrimEnabled() {
 	}();
 	return enabled;
 }
+// KYTY_SEM_SPIN=1|true: MasterSemaphore::Wait polls the timeline counter for up to
+// KYTY_SEM_SPIN_US microseconds (default 50, clamped 1..2000) before the blocking
+// vkWaitSemaphores, which on MoltenVK creates a MTLSharedEventListener per call.
+inline bool SemSpinEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_SEM_SPIN");
+		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+	}();
+	return enabled;
+}
+inline uint32_t SemSpinMicros() {
+	static const uint32_t micros = [] {
+		const char* value = std::getenv("KYTY_SEM_SPIN_US");
+		if (value == nullptr || *value == '\0') {
+			return 50u;
+		}
+		const unsigned long parsed = std::strtoul(value, nullptr, 10);
+		return static_cast<uint32_t>(parsed < 1ul ? 1ul : (parsed > 2000ul ? 2000ul : parsed));
+	}();
+	return micros;
+}
 bool SyncRawImageBuffersEnabled();
 bool TessellationEnabled();
 bool TrophyEnabled();
