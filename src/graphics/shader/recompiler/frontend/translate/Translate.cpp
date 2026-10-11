@@ -971,7 +971,8 @@ void ValidateTranslateOptions(const TranslateOptions& options) {
 
 // Diagnostics: KYTY_DEBUG_EXPORT_VGPR=<hash hex>:<pc hex>:<vgpr> captures vN right after the
 // instruction at <pc> in that pixel shader and replaces its compressed MRT0 export with
-// (|vN|, |vN|/1024, 1, 1). Used to bisect where a shader's result turns zero or NaN.
+// (|vN|, |vN|/1024, B, A); B and A stay the shader's own so its resources stay live.
+// Used to bisect where a shader's result turns zero or NaN.
 struct DebugExportVgpr {
 	uint64_t hash    = 0;
 	uint32_t pc      = 0;
@@ -1427,9 +1428,8 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 				translator.TranslateInstruction(DebugVop3(pc, Decoder::Opcode::V_CVT_PKRTZ_F16_F32,
 				                                          DebugVgpr(instruction.src0.reg),
 				                                          DebugVgpr(250, true), DebugVgpr(251), 2));
-				translator.TranslateInstruction(DebugVop3(pc, Decoder::Opcode::V_CVT_PKRTZ_F16_F32,
-				                                          DebugVgpr(instruction.src1.reg),
-				                                          DebugLiteral(0x3f800000u), DebugLiteral(0x3f800000u), 2));
+				// B/A keep the shader's own values so every resource stays live (dropping them let
+				// dead-code elimination remove image samples and broke resource materialization).
 			}
 			if (IsCodeTableLoad(cfg, instruction.pc)) {
 				continue;
