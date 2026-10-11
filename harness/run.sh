@@ -59,6 +59,10 @@ if present_mode:
 vblank_frequency = os.environ.get("KYTY_VBLANK_FREQUENCY")
 if vblank_frequency:
     args += ["--vblank-frequency", vblank_frequency]
+extra_args = os.environ.get("KYTY_EXTRA_ARGS")
+if extra_args:
+    import shlex
+    args += shlex.split(extra_args)
 started = time.time()
 with log.open("w") as stream:
     proc = subprocess.Popen(args, stdout=stream, stderr=subprocess.STDOUT,
