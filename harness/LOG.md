@@ -727,3 +727,34 @@ Findings:
   - A k10_11_11 storage-swizzle (R/B swap) fix was tried in ResourceMaterialization. The velocity-flatten output is unchanged, so that image is k11_11_10. Reverted, not committed.
   - VGPR bisect numbers: v13@0x1c8 ≈ 42 (pre-exposure red), v8@0x198 ≈ 0.675 (s44 constant, lens term 0), v5@0x180 ≈ 0 (bloom dummy).
 - The title menu needs ≥ 82 s runs: the menu appears at dump frame 660–720.
+
+## 2026-10-11 ~18:45 IST — title-menu black: FFT bloom is fine; its pre-filter clamps the scene because PreExposure=1 (LDS wave-sync hypothesis rejected)
+
+Relabel (from the ~16:45 investigation): cs 0x2bfb24830d8fcfaa / 0x674e5a7163897bc9 are Unreal convolution (FFT) bloom, not the DOF chain.
+- Forward: 0x2bfb reads the 4K B10G11R11 scene (0x80a75a0000 in shtsm-fft-3) and writes a 4098x1296 RGBA32F row spectrum.
+- 0x674e (1x1x4098) does the column FFT, the kernel multiply (kernel spectrum 4098x4096 RGBA32F, rebuilt by 0x2bfb 4098x4096→4098x4096) and the inverse column pass.
+- Inverse: 0x2bfb writes the 4K B10G11R11 that the tonemap uses as its scene input (Bloom/lens inputs are 1x1 dummies, as Unreal does when FFT bloom is enabled).
+
+Rejected: the LdsWaveSync hypothesis (s_waitcnt lgkmcnt(0) → subgroup barrier).
+- Both FFT shaders DO use s_barrier: 40 in 0x2bfb, 48 in 0x674e. The disassembler prints it in lowercase, so the earlier case-sensitive grep missed it.
+- With the fix, the 0x2bfb output was unchanged: lum median 48.93 (shtsm-ldsstats-on) vs 48.82 before (shtsm-swzfix-1). The menu was still black (shtsm-ldssync-3 frame_000780.png).
+- The fix did not slow anything down: shtsm-ldssync-2 matched shtsm-title-1 frame timing. The 29-minute stall in shtsm-ldssync-1 was the Mac sleeping while the MCP was down.
+- Reverted, not committed. The patch is kept at /tmp/ldswavesync_rejected.patch on the Mac.
+
+Numerical check (shtsm-fft-2, raw readbacks via new KYTY_INTERNAL_FRAME_RAW_DIR, analysis in project work/fft/):
+- Column/kernel pass 0x674e is ≈ identity on the spectrum (avg/max within ~1%).
+- numpy irfft of the forward spectrum row reproduces the final output row exactly (mean 43.3, std 1.8, zero outside x≥2304). The inverse FFT is correct.
+- The forward FFT is also correct. Alpha DC = 2305 ≈ 2304 pixels, and the spectrum follows the input. BUT the input the FFT sees is ~constant: every row mean ≈ 43 R, while scene row means run 164→485.
+- Cause: the forward pre-filter in 0x2bfb (pc 0x5b0): lum = 0.2126R+0.7152G+0.0722B; if lum > Min: color *= min(Max, Mult*(lum−Min)+Min)/lum. UB dwords 0..2.
+- Menu-frame UB (shtsm-fftub-2, KYTY_RESOURCE_DUMP_HASH=0x2bfb24830d8fcfaa): Min=0.6 (0x3f199998), Max=50 (0x42480000), Mult=150 (0x43160000). Boot frames: (5.32, 11068, 50.5) and (2.76, 5088, 104.5).
+- Scene lum ≈ 500, so every pixel is clamped to lum 50. Measured output lum ≈ 50.9 → the result is flat and 10x dark. The tonemap then multiplies by exposure 0.0003, giving black.
+- This also explains the earlier "forced exposure 0.003 → foggy, very blurred blue-grey scene".
+- Interpretation: the thresholds expect a pre-exposed scene colour (×~0.001–0.003), but Kyty's view UB has PreExposure = 1 (seen earlier, tonemap s31 @2168). Unreal sets View.PreExposure on the CPU from a GPU readback of the previous frame's eye adaptation. Suspect: that readback never reaches guest memory in Kyty (GPU-resident image/buffer not written back, or its fence/label path), so PreExposure stays 1.
+
+New diagnostics: KYTY_INTERNAL_FRAME_STATS meters the top rows of images too large for the 64 MiB download (rows_clamped). KYTY_INTERNAL_FRAME_RAW_DIR=<dir> writes raw readbacks.
+
+Causal proof (opt-in debug poke, commit 2de0bc80):
+- Run shtsm-prefilter-off-3 used KYTY_DEBUG_BUFFER_POKE=0x2bfb24830d8fcfaa:0:0:3f199998:7f7fffff, which sets pre-filter Min to FLT_MAX so the pre-filter never fires.
+- Result: FFT bloom output lum median went from 49 to 463, and the TITLE MENU BACKGROUND IS LIT (rooftop scene with the girl holding her phone): harness/runs/shtsm-prefilter-off-3/frames/frame_000780.png. Baseline, still black: harness/runs/shtsm-ldssync-3/frames/frame_000780.png.
+- This is a proof only, NOT a fix. The real fix is to make the scene colour arrive in the units the pre-filter expects, most likely by making Unreal's View.PreExposure correct (the CPU eye-adaptation readback).
+- Commits: 51945a2b (rows_clamped + KYTY_INTERNAL_FRAME_RAW_DIR), 2de0bc80 (KYTY_DEBUG_BUFFER_POKE). Both are opt-in; default paths unchanged.
