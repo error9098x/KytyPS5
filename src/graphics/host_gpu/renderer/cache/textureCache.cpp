@@ -1952,8 +1952,17 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 	                  backing.format == vk::Format::eB8G8R8A8Srgb;
 	const bool rg16f   = backing.format == vk::Format::eR16G16Sfloat;
 	const bool rgba16f = backing.format == vk::Format::eR16G16B16A16Sfloat;
-	const uint32_t bpp = rgba16f ? 8u : 4u;
-	if (!(rgba || rg16f || rgba16f) || backing.samples != 1 || backing.image_type != vk::ImageType::e2D ||
+	// Generic float-decoded formats (post-process chain: LUTs, eye adaptation, bloom).
+	const bool rgba32f   = backing.format == vk::Format::eR32G32B32A32Sfloat;
+	const bool a2b10     = backing.format == vk::Format::eA2B10G10R10UnormPack32;
+	const bool b10g11r11 = backing.format == vk::Format::eB10G11R11UfloatPack32;
+	const bool rgba16u   = backing.format == vk::Format::eR16G16B16A16Unorm;
+	const bool r8        = backing.format == vk::Format::eR8Unorm;
+	const bool generic   = rgba32f || a2b10 || b10g11r11 || rgba16u || r8;
+	const bool is_3d     = backing.image_type == vk::ImageType::e3D;
+	const uint32_t bpp   = rgba32f ? 16u : (rgba16f || rgba16u) ? 8u : r8 ? 1u : 4u;
+	if (!(rgba || rg16f || rgba16f || generic) || backing.samples != 1 ||
+	    (backing.image_type != vk::ImageType::e2D && !(is_3d && generic)) ||
 	    mip >= backing.mip_levels ||
 	    layer >= backing.layers || backing.image == nullptr) {
 		LOGF("InternalFrameStats: sample=%u role=%s skip format=%s samples=%u mip=%u layer=%u address=0x%016" PRIx64 " ps=0x%016" PRIx64 "\n",
@@ -1977,8 +1986,11 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 	download.Commit();
 	vk::BufferImageCopy copy {};
 	copy.bufferOffset = offset;
-	copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, mip, layer, 1};
+	copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, mip, is_3d ? 0u : layer, 1};
 	copy.imageExtent = {width, height, 1};
+	if (is_3d) {
+		copy.imageOffset.z = static_cast<int32_t>(std::max(backing.extent.depth >> mip, 1u) / 2);
+	}
 	image.Download(std::span {&copy, 1}, download.Handle(), offset, size);
 	vk::BufferMemoryBarrier barrier {};
 	barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
@@ -1991,6 +2003,55 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 	    vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &barrier, 0, nullptr);
 	m_scheduler.FlushAndWait();
 	download.Invalidate(offset, size);
+	if (generic) {
+		auto half_to_float = [](uint32_t h, uint32_t man_bits) {
+			const uint32_t exp = (h >> man_bits) & 0x1Fu, man = h & ((1u << man_bits) - 1u);
+			if (exp == 0) return std::ldexp(static_cast<float>(man), -14 - static_cast<int>(man_bits));
+			if (exp == 31) return 65504.0f;
+			return std::ldexp(static_cast<float>(man | (1u << man_bits)),
+			                  static_cast<int>(exp) - 15 - static_cast<int>(man_bits));
+		};
+		std::array<double, 4> sum {};
+		std::array<float, 4>  mx {};
+		uint64_t              nonzero = 0;
+		const auto*           base    = static_cast<const uint8_t*>(mapped);
+		for (uint64_t i = 0; i < pixels; ++i) {
+			std::array<float, 4> v {};
+			if (rgba32f) {
+				std::memcpy(v.data(), base + i * 16, 16);
+			} else if (rgba16u) {
+				uint16_t c[4];
+				std::memcpy(c, base + i * 8, 8);
+				for (int k = 0; k < 4; k++) v[k] = c[k] / 65535.0f;
+			} else if (r8) {
+				v[0] = base[i] / 255.0f;
+			} else {
+				uint32_t w;
+				std::memcpy(&w, base + i * 4, 4);
+				if (a2b10) {
+					v = {(w & 0x3FFu) / 1023.0f, ((w >> 10) & 0x3FFu) / 1023.0f,
+					     ((w >> 20) & 0x3FFu) / 1023.0f, (w >> 30) / 3.0f};
+				} else {
+					v = {half_to_float(w & 0x7FFu, 6), half_to_float((w >> 11) & 0x7FFu, 6),
+					     half_to_float((w >> 22) & 0x3FFu, 5), 1.0f};
+				}
+			}
+			bool any = false;
+			for (int k = 0; k < 4; k++) {
+				sum[k] += v[k];
+				mx[k] = std::max(mx[k], std::fabs(v[k]));
+				any |= (k < 3 || !b10g11r11) && v[k] != 0.0f;
+			}
+			nonzero += any;
+		}
+		LOGF("InternalFrameStats: sample=%u role=%s address=0x%016" PRIx64 " format=%s%s extent=%ux%u "
+		     "mip=%u layer=%u nonzero=%.4f%% avg=(%.4f,%.4f,%.4f,%.4f) max=(%.4f,%.4f,%.4f,%.4f) "
+		     "vs=0x%016" PRIx64 " ps=0x%016" PRIx64 "\n", sample, role, image.info.data.address,
+		     vk::to_string(backing.format).c_str(), is_3d ? "(3d-mid-slice)" : "", width, height,
+		     mip, layer, 100.0 * nonzero / pixels, sum[0] / pixels, sum[1] / pixels,
+		     sum[2] / pixels, sum[3] / pixels, mx[0], mx[1], mx[2], mx[3], vertex_hash, pixel_hash);
+		return;
+	}
 	if (rg16f || rgba16f) {
 		const auto* halves = reinterpret_cast<const uint16_t*>(mapped);
 		const uint32_t channels = rgba16f ? 4u : 2u;

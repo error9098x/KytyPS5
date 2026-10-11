@@ -433,6 +433,17 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	// KYTY_INTERNAL_FRAME_STATS: also read back storage images written by compute dispatches.
+	if (std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr) {
+		for (uint32_t i = 0; i < program.info.images.size() && i < bindings.images.size(); i++) {
+			if (program.info.images[i].written) {
+				const auto& texture = bindings.images[i];
+				m_context.GetTextureCache().LogInternalFrameStats(
+				    texture.image_id, texture.desc.view_info.base_level,
+				    texture.desc.view_info.base_layer, program.shader_hash, 0, "cs");
+			}
+		}
+	}
 	ResetBindings();
 }
 
@@ -492,6 +503,17 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	// KYTY_INTERNAL_FRAME_STATS: also read back storage images written by compute dispatches.
+	if (std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr) {
+		for (uint32_t i = 0; i < program.info.images.size() && i < bindings.images.size(); i++) {
+			if (program.info.images[i].written) {
+				const auto& texture = bindings.images[i];
+				m_context.GetTextureCache().LogInternalFrameStats(
+				    texture.image_id, texture.desc.view_info.base_level,
+				    texture.desc.view_info.base_layer, program.shader_hash, 0, "cs");
+			}
+		}
+	}
 	ResetBindings();
 }
 
