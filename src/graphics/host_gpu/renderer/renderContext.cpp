@@ -154,11 +154,54 @@ void RenderContext::MapMemory(uint64_t vaddr, uint64_t size) {
 	m_mapped_ranges.Add(vaddr, size);
 }
 
+UnmapCounters& GetUnmapCounters() {
+	static UnmapCounters counters;
+	return counters;
+}
+
+// KYTY_UNMAP_FASTPATH=1: when the GPU thread is parked and nothing cached overlaps the range, do
+// the (then trivial) unmap bookkeeping on the guest thread instead of a blocking GPU-thread round
+// trip. The GPU thread is held parked meanwhile, so ordering is identical to SendCommandSync.
+static bool UnmapFastPathEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_UNMAP_FASTPATH");
+		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+	}();
+	return enabled;
+}
+
 void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	if (CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported memory unmap from an asynchronous GPU completion, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 		     vaddr, size);
+	}
+	auto& counters = GetUnmapCounters();
+	if (UnmapFastPathEnabled() && m_gpu != nullptr) {
+		bool       declined = false;
+		const bool done     = m_gpu->TryRunInlineWhileIdle([this, vaddr, size, &declined] {
+            // The GPU thread is parked and cannot register cache objects, queue priority
+            // operations or mark pages GPU-modified until we return.
+            if (m_command_scheduler.HasPendingPriorityOperations() ||
+                m_buffer_cache.IsRegionRegistered(vaddr, size) ||
+                m_texture_cache.IsRegionRegistered(vaddr, size) ||
+                m_buffer_cache.IsRegionGpuModified(vaddr, size)) {
+                declined = true;
+                return false;
+            }
+            // Not GPU-modified, so InvalidateRegion only marks pages CPU-modified (no flush,
+            // no GPU command). TextureCache::UnmapMemory drops surface metadata under its lock.
+            m_buffer_cache.InvalidateMemory(vaddr, size);
+            m_texture_cache.UnmapMemory(vaddr, size);
+            std::lock_guard lock(m_mapped_ranges_mutex);
+            m_mapped_ranges.Subtract(vaddr, size);
+            return true;
+        });
+		if (done) {
+			counters.fast.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		(declined ? counters.slow_cached : counters.slow_busy).fetch_add(1, std::memory_order_relaxed);
 	}
 	const auto unmap = [this, vaddr, size] {
 		// Check cache ownership on the GPU thread. Guest-memory callbacks can still
@@ -182,7 +225,12 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		unmap();
 		return;
 	}
+	const auto sync_start = std::chrono::steady_clock::now();
 	m_gpu->SendCommandSync(unmap);
+	counters.sync_us.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                                                     std::chrono::steady_clock::now() - sync_start)
+	                                                     .count()),
+	                           std::memory_order_relaxed);
 }
 
 void RenderContext::PrepareBda() {
@@ -265,3 +313,4 @@ void RenderContext::TriggerInterrupt(int event_id, uint32_t context_id) {
 }
 
 } // namespace Libs::Graphics
+

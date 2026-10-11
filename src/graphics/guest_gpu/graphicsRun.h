@@ -31,6 +31,35 @@ public:
 	[[nodiscard]] bool IsStopping();
 	void               SendCommand(Common::UniqueFunction<void>&& command);
 	void               SendCommandSync(Common::UniqueFunction<void>&& command);
+	// Run `command` on the calling (non-GPU) thread exactly where SendCommandSync would have run
+	// it, but only when the GPU thread is parked: not inside a command or submission slice and no
+	// command queued. The GPU thread is held parked until `command` returns. `command` returns
+	// false to decline (nothing done), in which case the caller should use SendCommandSync.
+	// Returns false without running anything when the GPU thread is busy.
+	template <typename Func>
+	bool TryRunInlineWhileIdle(Func&& command) {
+		if (IsGpuThread()) {
+			return false;
+		}
+		{
+			Common::LockGuard lock(m_queue_mutex);
+			if (m_processing || m_inline_active || !m_commands.empty() || m_stopping ||
+			    !m_accepting) {
+				return false;
+			}
+			m_inline_active = true;
+		}
+		const bool done = command();
+		{
+			Common::LockGuard lock(m_queue_mutex);
+			m_inline_active = false;
+			m_work_available.SignalAll();
+			if (!m_processing && m_commands.empty() && m_submission_count == 0) {
+				m_idle.SignalAll();
+			}
+		}
+		return done;
+	}
 
 	// Submitted command memory is borrowed and must remain valid until GPU execution completes.
 	void Submit(std::span<const uint32_t> draw_commands,
@@ -85,6 +114,7 @@ private:
 	uint32_t                                       m_next_queue        = 0;
 	uint32_t                                       m_submission_count  = 0;
 	bool                                           m_processing        = false;
+	bool                                           m_inline_active     = false;
 	bool                                           m_accepting         = true;
 	bool                                           m_stopping          = false;
 	bool                                           m_shutdown_complete = false;
@@ -104,3 +134,4 @@ private:
 } // namespace Libs::Graphics
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GRAPHICSRUN_H_ */
+

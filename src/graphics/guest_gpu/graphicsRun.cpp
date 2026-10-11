@@ -462,7 +462,7 @@ void GuestGpu::Enqueue(Submission submission) {
 void GuestGpu::WaitForIdle() {
 	EXIT_IF(IsGpuThread() || CommandScheduler::InDeferredOperation());
 	Common::LockGuard lock(m_queue_mutex);
-	while (m_processing || !m_commands.empty() || m_submission_count != 0) {
+	while (m_processing || m_inline_active || !m_commands.empty() || m_submission_count != 0) {
 		m_idle.Wait(&m_queue_mutex);
 	}
 }
@@ -481,7 +481,10 @@ void GuestGpu::ThreadRun(void* data) {
 		bool                         should_stop    = false;
 		{
 			Common::LockGuard lock(gpu->m_queue_mutex);
-			while (gpu->m_commands.empty() && gpu->m_submission_count == 0 && !gpu->m_stopping) {
+			// m_inline_active: a guest thread is running a TryRunInlineWhileIdle command in our
+			// place; stay parked until it finishes.
+			while ((gpu->m_commands.empty() && gpu->m_submission_count == 0 && !gpu->m_stopping) ||
+			       gpu->m_inline_active) {
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
@@ -1477,3 +1480,4 @@ bool GuestGpu::IsGpuThread() noexcept {
 }
 
 } // namespace Libs::Graphics
+

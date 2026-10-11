@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "kernel/eventQueue.h"
 
+#include <atomic>
 #include <memory>
 #include <shared_mutex>
 #include <vector>
@@ -26,6 +27,15 @@ class VideoOutDriver;
 namespace Libs::Graphics {
 
 class GuestGpu;
+
+// KYTY_REMAP_STATS counters for RenderContext::UnmapMemory (read by the kernel memory stats).
+struct UnmapCounters {
+	std::atomic<uint64_t> fast {0};        // KYTY_UNMAP_FASTPATH handled inline, no GPU round trip
+	std::atomic<uint64_t> slow_busy {0};   // GPU thread busy -> SendCommandSync
+	std::atomic<uint64_t> slow_cached {0}; // range cached/GPU-modified/priority ops -> sync path
+	std::atomic<uint64_t> sync_us {0};     // time spent in SendCommandSync
+};
+UnmapCounters& GetUnmapCounters();
 
 class RenderContext {
 public:
@@ -92,3 +102,4 @@ private:
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_RENDERCONTEXT_H_
+
