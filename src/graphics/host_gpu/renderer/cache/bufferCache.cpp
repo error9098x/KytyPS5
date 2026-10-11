@@ -60,6 +60,11 @@ std::atomic<uint64_t> g_cpu_fill_bytes {0};
 thread_local ReadbackStats::Origin g_readback_origin = ReadbackStats::Origin::Other;
 std::mutex                         g_fault_pages_mutex;
 std::unordered_map<uint64_t, uint32_t> g_fault_pages;
+std::unordered_map<uint64_t, uint32_t> g_wfault_pages;
+std::atomic<uint64_t> g_wfaults {0};
+std::atomic<uint64_t> g_rp_begin {0};
+std::atomic<uint64_t> g_rp_switch {0};
+std::atomic<uint64_t> g_rp_end {0};
 
 uint64_t MicrosSince(std::chrono::steady_clock::time_point start) {
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -81,7 +86,7 @@ void MaybePrintReadbackStats() {
 		return;
 	}
 	static const char* names[] = {"other", "fault", "clear", "indirect", "inval"};
-	char line[768];
+	char line[1024];
 	int  n = std::snprintf(line, sizeof(line), "ReadbackStats: dt_ms=%" PRId64,
 	                       (now_us - last) / 1000);
 	for (size_t i = 0; i < g_readback.size(); i++) {
@@ -109,6 +114,25 @@ void MaybePrintReadbackStats() {
 		n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), "%s0x%" PRIx64 ":%u",
 		                   i == 0 ? "" : ",", top[i].second, top[i].first);
 	}
+	std::vector<std::pair<uint32_t, uint64_t>> wtop;
+	{
+		std::scoped_lock lock {g_fault_pages_mutex};
+		for (const auto& [page, hits]: g_wfault_pages) {
+			wtop.emplace_back(hits, page);
+		}
+		g_wfault_pages.clear();
+	}
+	std::sort(wtop.rbegin(), wtop.rend());
+	n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n),
+	                   " wfault=%" PRIu64 " wfault_pages=%zu wtop=", g_wfaults.exchange(0),
+	                   wtop.size());
+	for (size_t i = 0; i < wtop.size() && i < 4 && n < static_cast<int>(sizeof(line)) - 80; i++) {
+		n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), "%s0x%" PRIx64 ":%u",
+		                   i == 0 ? "" : ",", wtop[i].second, wtop[i].first);
+	}
+	n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n),
+	                   " rp_begin=%" PRIu64 " rp_switch=%" PRIu64 " rp_end=%" PRIu64,
+	                   g_rp_begin.exchange(0), g_rp_switch.exchange(0), g_rp_end.exchange(0));
 	LOGF("%s\n", line);
 }
 
@@ -125,6 +149,24 @@ Origin Current() {
 void NoteCpuFill(uint64_t bytes) {
 	g_cpu_fills.fetch_add(1, std::memory_order_relaxed);
 	g_cpu_fill_bytes.fetch_add(bytes, std::memory_order_relaxed);
+}
+void NoteWriteFault(uint64_t vaddr) {
+	g_wfaults.fetch_add(1, std::memory_order_relaxed);
+	{
+		std::scoped_lock lock {g_fault_pages_mutex};
+		g_wfault_pages[vaddr & ~(TRACKER_PAGE_SIZE - 1)]++;
+	}
+	MaybePrintReadbackStats();
+}
+void NoteRenderPass(bool begin, bool replaced_open_pass) {
+	if (begin) {
+		g_rp_begin.fetch_add(1, std::memory_order_relaxed);
+		if (replaced_open_pass) {
+			g_rp_switch.fetch_add(1, std::memory_order_relaxed);
+		}
+	} else {
+		g_rp_end.fetch_add(1, std::memory_order_relaxed);
+	}
 }
 Scope::Scope(Origin origin): prev(g_readback_origin) {
 	g_readback_origin = origin;

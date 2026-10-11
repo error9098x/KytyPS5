@@ -78,6 +78,9 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr,
 		return false;
 	}
 	if (access == PageFaultAccess::Write) {
+		if (ReadbackStats::Enabled()) {
+			ReadbackStats::NoteWriteFault(fault_vaddr);
+		}
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 	} else {

@@ -66,7 +66,14 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	}
 	EXIT_IF(state.width == 0 || state.height == 0 || state.num_layers == 0 ||
 	        state.num_color_attachments > RENDER_COLOR_ATTACHMENTS_MAX);
-	EndRendering();
+	if (ReadbackStats::Enabled()) {
+		ReadbackStats::NoteRenderPass(true, m_rendering);
+	}
+	if (m_rendering) {
+		Handle().endRendering();
+		m_rendering    = false;
+		m_render_state = {};
+	}
 
 	std::array<vk::RenderingAttachmentInfo, RENDER_COLOR_ATTACHMENTS_MAX> colors {};
 	for (uint32_t i = 0; i < state.num_color_attachments; i++) {
@@ -111,6 +118,9 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 void CommandBuffer::EndRendering() const {
 	if (!m_rendering) {
 		return;
+	}
+	if (ReadbackStats::Enabled()) {
+		ReadbackStats::NoteRenderPass(false, false);
 	}
 	Handle().endRendering();
 	m_rendering    = false;

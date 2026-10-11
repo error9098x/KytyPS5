@@ -33,6 +33,11 @@ enum class Origin : int { Other = 0, Fault, ClearMeta, IndirectArgs, Invalidate,
 bool   Enabled();
 Origin Current();
 void   NoteCpuFill(uint64_t bytes);
+// Counters printed on the same ReadbackStats line: CPU write faults (all, plus the hottest
+// pages) and render-pass churn (real begins, begins that replaced an open pass with a different
+// state, explicit ends of an open pass).
+void   NoteWriteFault(uint64_t vaddr);
+void   NoteRenderPass(bool begin, bool replaced_open_pass);
 struct Scope {
 	explicit Scope(Origin origin);
 	~Scope();
