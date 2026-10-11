@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
+#include "graphics/host_gpu/renderer/pipeline/srtMemo.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -28,9 +29,12 @@
 #include <cstdlib>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
@@ -107,6 +111,26 @@ bool PipelineCacheNeedsVertexSubgroupFallback() {
 	return title_id == "PPSA22520" || title_id == "PPSA10112";
 }
 
+// KYTY_SRT_MEMO=2 (swarm entry 11 design): reuse a program-cache entry's materialized resources when the user data,
+// shader base, workgroup counts and every guest word the SRT walk read are unchanged
+// (srtMemo.h). KYTY_SRT_MEMO_VERIFY=1 additionally re-materializes on every hit and exits on
+// any difference (debug cross-check; costs more than the memo saves).
+bool SrtMemo2Enabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_SRT_MEMO");
+		return value != nullptr && std::strcmp(value, "2") == 0;
+	}();
+	return enabled;
+}
+
+bool SrtMemoVerify() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_SRT_MEMO_VERIFY");
+		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+	}();
+	return enabled;
+}
+
 template <typename... Args>
 void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 	auto message = fmt::format(format, std::forward<Args>(args)...);
@@ -128,7 +152,7 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 bool SrtMemoEnabled() {
 	static const bool enabled = [] {
 		const char* v = std::getenv("KYTY_SRT_MEMO");
-		return v != nullptr && *v != '\0' && *v != '0';
+		return v != nullptr && *v != '\0' && *v != '0' && std::strcmp(v, "2") != 0;
 	}();
 	return enabled;
 }
@@ -347,6 +371,7 @@ struct PipelineCache::ProgramCache {
 		static constexpr size_t      MemoSlots = 4;
 		std::array<MemoSlot, MemoSlots> memo {};
 		size_t                       memo_next = 0;
+		std::unique_ptr<SrtMemo::EntryMemo>          srt_memo; // KYTY_SRT_MEMO only
 	};
 
 	struct ProgramKeyHash {
@@ -421,6 +446,13 @@ struct PipelineCache::ProgramCache {
 		};
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			runtime.workgroup_counts = input_info.workgroup_counts;
+		}
+		if (entry != programs.end() && SrtMemo2Enabled()) {
+			if (const auto handle = GetMemoized(entry->second, runtime, input_info, push_data_cursor)) {
+				return *handle;
+			}
+			// No compiled permutation matches: fall through to the default path, which
+			// re-materializes into the entry and compiles.
 		}
 		const bool memo_enabled = SrtMemoEnabled();
 		if (memo_enabled && entry != programs.end()) {
@@ -579,6 +611,64 @@ struct PipelineCache::ProgramCache {
 		return permutation.handle;
 	}
 
+	// KYTY_SRT_MEMO path for an existing entry. Returns the handle when a compiled permutation
+	// matches the (memoized or freshly materialized) specialization, else nullopt.
+	template <typename InputInfo>
+	std::optional<ShaderProgram> GetMemoized(SourceEntry& source, const ShaderRecompiler::IR::SrtRuntime& runtime,
+	                                         InputInfo& input_info, uint32_t& push_data_cursor) {
+		if (source.srt_memo == nullptr) {
+			source.srt_memo = std::make_unique<SrtMemo::EntryMemo>();
+		}
+		bool ok   = false;
+		auto* slot = source.srt_memo->Acquire(source.resource_plan, runtime, srt_memo_stats, ok);
+		EXIT_IF(!ok);
+		if (slot == nullptr) {
+			return std::nullopt; // adaptive bypass: default path
+		}
+		if (SrtMemoVerify()) {
+			ShaderRecompiler::IR::ResourceSnapshot       snapshot;
+			ShaderRecompiler::IR::ResourceSpecialization specialization;
+			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(source.resource_plan, runtime,
+			                                                   snapshot, specialization));
+			if (!SrtMemo::SnapshotEquals(snapshot, slot->resources) ||
+			    !(specialization == slot->specialization)) {
+				EXIT("KYTY_SRT_MEMO_VERIFY: memoized resources differ, hash=0x%016" PRIx64 "\n",
+				     source.resource_plan.shader_hash);
+			}
+		}
+		if ((srt_memo_stats.calls & 0x7fffu) == 0u) {
+			const auto& st = srt_memo_stats;
+			LOGF("SrtMemo: calls=%" PRIu64 " hits=%" PRIu64 " key_miss=%" PRIu64 " value_miss=%" PRIu64
+			     " read_fail=%" PRIu64 " uncacheable=%" PRIu64 " bypassed=%" PRIu64
+			     " replayed_words=%" PRIu64 "\n",
+			     st.calls, st.hits, st.key_misses, st.value_misses, st.read_failures, st.uncacheable,
+			     st.bypassed, st.replayed_words);
+		}
+		const auto& permutations = source.permutations;
+		uint32_t    index        = UINT32_MAX;
+		if (slot->permutation_cursor == push_data_cursor && slot->permutation < permutations.size()) {
+			index = slot->permutation;
+		} else {
+			const auto found = std::ranges::find_if(permutations, [&](const Permutation& candidate) {
+				const auto& layout = candidate.program.bindings;
+				return layout.push_data_start_dword ==
+				           ShaderRecompiler::IR::PushData::StartFor(push_data_cursor,
+				                                                    layout.ShaderDataDwords()) &&
+				       candidate.specialization == slot->specialization;
+			});
+			if (found == permutations.end()) {
+				return std::nullopt;
+			}
+			index                    = static_cast<uint32_t>(found - permutations.begin());
+			slot->permutation_cursor = push_data_cursor;
+			slot->permutation        = index;
+		}
+		auto& permutation = source.permutations[index];
+		input_info.stage  = {.program = &permutation.program, .resources = &slot->resources};
+		permutation.program.bindings.AdvancePushData(push_data_cursor);
+		return permutation.handle;
+	}
+
 	explicit ProgramCache(vk::Device device, GraphicContext& graphics): device(device), graphics(graphics) {
 		lookup_key.static_state.reserve(MaxStaticKeyWords);
 	}
@@ -596,6 +686,7 @@ struct PipelineCache::ProgramCache {
 	vk::Device                                                  device;
 	GraphicContext&                                             graphics;
 	uint64_t                                                    next_shader_id = 0;
+	SrtMemo::Stats                                              srt_memo_stats;
 };
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
