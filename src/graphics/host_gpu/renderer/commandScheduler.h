@@ -68,6 +68,8 @@ public:
 	[[nodiscard]] MasterSemaphore& GetMasterSemaphore() noexcept { return m_master; }
 	[[nodiscard]] RenderContext&   Context() const noexcept { return m_context; }
 	[[nodiscard]] GraphicContext&  Graphics() const noexcept { return m_graphics; }
+	// KYTY_SUBMIT_THREAD=1: vkEndCommandBuffer + vkQueueSubmit run on a FIFO thread.
+	[[nodiscard]] static bool SubmitThreadEnabled() noexcept;
 
 private:
 	void WaitImpl(uint64_t tick);
@@ -91,6 +93,9 @@ private:
 		std::vector<vk::CommandBuffer> m_buffers;
 		std::vector<uint64_t>          m_ticks;
 		size_t                         m_hint = 0;
+		// KYTY_SUBMIT_THREAD: one pool per buffer, so vkEndCommandBuffer on the submit thread never
+		// shares a VkCommandPool with the buffer being recorded (Vulkan external-sync rule).
+		std::vector<vk::CommandPool> m_own_pools;
 	};
 
 	enum class OperationState { Open, Draining, Closed };
@@ -110,6 +115,28 @@ private:
 	GraphicContext&              m_graphics;
 	CommandPool                  m_command_pool;
 	CommandBuffer                m_command;
+
+	// KYTY_SUBMIT_THREAD=1: vkEndCommandBuffer + vkQueueSubmit run on a FIFO submit thread.
+	struct SubmitJob {
+		vk::CommandBuffer buffer;
+		SubmitInfo        submit;
+		uint64_t          tick = 0;
+		uint32_t          debug_op = 0;
+		uint64_t          debug_submit = 0;
+		uint32_t          debug_arg[4] {};
+		uint64_t          debug_arg4 = 0;
+	};
+	uint64_t                  SubmitAsync(SubmitInfo& submit);
+	void                      DrainSubmitQueue();
+	void                      SubmitThread(std::stop_token stop);
+	void                      ExecuteSubmitJob(SubmitJob& job);
+	void                      StopSubmitThread();
+	std::mutex                m_submit_mutex;
+	std::condition_variable   m_submit_cv;
+	std::queue<SubmitJob>     m_submit_jobs;
+	bool                      m_submit_busy  = false;
+	uint64_t                  m_submit_stats[4] {}; // jobs, max depth, enqueue ns, thread ns
+	std::jthread              m_submit_thread;
 	std::queue<PendingOperation> m_pending_operations;
 	std::queue<PendingOperation> m_priority_operations;
 	std::mutex                   m_operation_mutex;

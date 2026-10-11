@@ -518,7 +518,9 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			} else {
 				g_ptick.older.fetch_add(1, std::memory_order_relaxed);
 				g_ptick.age_sum.fetch_add(open_tick - producer.max_tick, std::memory_order_relaxed);
-				use_side = ProducerTickEnabled();
+				// With KYTY_SUBMIT_THREAD an "older" tick may still sit in the FIFO, not yet on the
+				// queue, so queue order would not put the side buffer after its producer.
+				use_side = ProducerTickEnabled() && !CommandScheduler::SubmitThreadEnabled();
 			}
 		}
 	}

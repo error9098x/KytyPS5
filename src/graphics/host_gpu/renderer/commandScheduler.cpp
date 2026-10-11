@@ -46,6 +46,9 @@ CommandScheduler::CommandPool::CommandPool(GraphicContext& graphics, MasterSemap
 }
 
 CommandScheduler::CommandPool::~CommandPool() {
+	for (auto pool: m_own_pools) {
+		m_graphics.device.destroyCommandPool(pool, nullptr);
+	}
 	m_graphics.device.destroyCommandPool(m_pool, nullptr);
 }
 
@@ -58,6 +61,21 @@ size_t CommandScheduler::CommandPool::Grow() {
 	allocate.commandPool        = m_pool;
 	allocate.level              = vk::CommandBufferLevel::ePrimary;
 	allocate.commandBufferCount = static_cast<uint32_t>(GrowStep);
+	if (SubmitThreadEnabled()) {
+		vk::CommandPoolCreateInfo create {};
+		create.queueFamilyIndex = m_graphics.queue_family;
+		create.flags            = vk::CommandPoolCreateFlagBits::eTransient |
+		                          vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+		allocate.commandBufferCount = 1;
+		for (size_t index = first; index < first + GrowStep; ++index) {
+			EXIT_IF(m_graphics.device.createCommandPool(&create, nullptr, &allocate.commandPool) !=
+			        vk::Result::eSuccess);
+			m_own_pools.push_back(allocate.commandPool);
+			EXIT_IF(m_graphics.device.allocateCommandBuffers(&allocate, &m_buffers[index]) !=
+			        vk::Result::eSuccess);
+		}
+		return first;
+	}
 	EXIT_IF(m_graphics.device.allocateCommandBuffers(&allocate, m_buffers.data() + first) !=
 	        vk::Result::eSuccess);
 	return first;
@@ -137,6 +155,7 @@ void CommandScheduler::Shutdown() {
 	if (m_priority_thread.joinable()) {
 		m_priority_thread.join();
 	}
+	StopSubmitThread();
 	{
 		std::lock_guard lock(m_operation_mutex);
 		EXIT_IF(!m_pending_operations.empty() || !m_priority_operations.empty() ||
@@ -390,6 +409,14 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(m_command.IsInvalid());
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
+	if (SubmitThreadEnabled()) {
+		// Binary semaphores (swapchain) keep the inline path: a present must never wait on a
+		// semaphore whose signal has not been submitted yet. Inline submits drain the FIFO first.
+		if (submit.num_wait_semaphores == 0 && submit.num_signal_semaphores == 0) {
+			return SubmitAsync(submit);
+		}
+		DrainSubmitQueue();
+	}
 
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
@@ -451,6 +478,143 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 void CommandScheduler::BeginNext() {
 	CheckActive();
 	BeginCommand();
+}
+
+bool CommandScheduler::SubmitThreadEnabled() noexcept {
+	static const bool enabled = [] {
+		const char* v  = std::getenv("KYTY_SUBMIT_THREAD");
+		const auto  is = [v](const char* s) {
+			for (size_t i = 0;; ++i) {
+				if (v[i] != s[i]) {
+					return false;
+				}
+				if (v[i] == '\0') {
+					return true;
+				}
+			}
+		};
+		const bool on = v != nullptr && (is("1") || is("true"));
+		if (on) {
+			LOGF("SubmitThread: enabled (vkEndCommandBuffer + vkQueueSubmit off the recording thread)\n");
+		}
+		return on;
+	}();
+	return enabled;
+}
+
+// Recording thread. The tick is taken here, synchronously, so CurrentTick(), DeferOperation and
+// Wait(tick) keep their meaning; the FIFO thread submits in tick order, so the timeline values are
+// signalled in increasing submission order. Host waits on a not-yet-submitted timeline value are
+// legal (wait-before-signal) and already happen today on the priority thread.
+uint64_t CommandScheduler::SubmitAsync(SubmitInfo& submit) {
+	const auto start = std::chrono::steady_clock::now();
+	m_command.EndRendering(); // a recorded command: stays on the recording thread
+	SubmitJob job;
+	job.buffer       = m_command.m_buffer;
+	job.submit       = submit;
+	job.debug_op     = m_command.m_debug_op;
+	job.debug_submit = m_command.m_debug_submit_id;
+	job.debug_arg[0] = m_command.m_debug_arg0;
+	job.debug_arg[1] = m_command.m_debug_arg1;
+	job.debug_arg[2] = m_command.m_debug_arg2;
+	job.debug_arg[3] = m_command.m_debug_arg3;
+	job.debug_arg4   = m_command.m_debug_arg4;
+	uint64_t tick = 0;
+	{
+		std::lock_guard lock(m_submit_mutex);
+		tick     = m_master.NextTick();
+		job.tick = tick;
+		if (!m_submit_thread.joinable()) {
+			m_submit_thread = std::jthread([this](std::stop_token stop) { SubmitThread(stop); });
+		}
+		m_submit_jobs.push(std::move(job));
+		m_submit_stats[0]++;
+		m_submit_stats[1] = std::max<uint64_t>(m_submit_stats[1], m_submit_jobs.size());
+		m_submit_stats[2] += static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+		                                                         start)
+		        .count());
+	}
+	m_submit_cv.notify_all(); // the cv is shared with DrainSubmitQueue waiters
+	m_command.m_buffer  = nullptr;
+	m_work_since_submit = 0; // KYTY_FLUSH_DRAWS budget restarts per submission, as in Submit()
+	return tick;
+}
+
+void CommandScheduler::DrainSubmitQueue() {
+	std::unique_lock lock(m_submit_mutex);
+	m_submit_cv.wait(lock, [this] { return m_submit_jobs.empty() && !m_submit_busy; });
+}
+
+void CommandScheduler::SubmitThread(std::stop_token stop) {
+	auto last_log = std::chrono::steady_clock::now();
+	std::unique_lock lock(m_submit_mutex);
+	for (;;) {
+		m_submit_cv.wait(lock, [this, &stop] { return stop.stop_requested() || !m_submit_jobs.empty(); });
+		if (m_submit_jobs.empty()) {
+			return; // stop requested and nothing left: jobs are never dropped
+		}
+		auto job = std::move(m_submit_jobs.front());
+		m_submit_jobs.pop();
+		m_submit_busy = true;
+		lock.unlock();
+		const auto start = std::chrono::steady_clock::now();
+		ExecuteSubmitJob(job);
+		const auto now = std::chrono::steady_clock::now();
+		lock.lock();
+		m_submit_busy = false;
+		m_submit_stats[3] += static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count());
+		if (now - last_log >= std::chrono::seconds(2)) {
+			LOGF("SubmitThreadStats: jobs=%" PRIu64 " max_depth=%" PRIu64
+			     " enqueue_us=%" PRIu64 " thread_us=%" PRIu64 "\n",
+			     m_submit_stats[0], m_submit_stats[1], m_submit_stats[2] / 1000,
+			     m_submit_stats[3] / 1000);
+			m_submit_stats[0] = m_submit_stats[1] = m_submit_stats[2] = m_submit_stats[3] = 0;
+			last_log                                                                     = now;
+		}
+		m_submit_cv.notify_all(); // DrainSubmitQueue waiters
+	}
+}
+
+void CommandScheduler::ExecuteSubmitJob(SubmitJob& job) {
+	auto&      graphics = m_graphics;
+	vk::Result result   = job.buffer.end();
+	if (result == vk::Result::eSuccess) {
+		Common::LockGuard lock(graphics.queue_mutex);
+		job.submit.AddSignal(m_master.Handle(), job.tick);
+
+		vk::TimelineSemaphoreSubmitInfo timeline_info {};
+		timeline_info.signalSemaphoreValueCount = job.submit.num_signal_semaphores;
+		timeline_info.pSignalSemaphoreValues    = job.submit.signal_ticks.data();
+
+		vk::SubmitInfo submit_info {};
+		submit_info.pNext                = &timeline_info;
+		submit_info.commandBufferCount   = 1;
+		submit_info.pCommandBuffers      = &job.buffer;
+		submit_info.signalSemaphoreCount = job.submit.num_signal_semaphores;
+		submit_info.pSignalSemaphores    = job.submit.signal_semaphores.data();
+
+		result = graphics.queue.submit(1, &submit_info, nullptr);
+	}
+	if (result != vk::Result::eSuccess) {
+		ReportVulkanFatal("vkEndCommandBuffer/vkQueueSubmit (submit thread)", result, job.tick,
+		                  job.debug_op, job.debug_submit, job.debug_arg[0], job.debug_arg[1],
+		                  job.debug_arg[2], job.debug_arg[3], job.debug_arg4);
+	}
+	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+}
+
+void CommandScheduler::StopSubmitThread() {
+	if (!m_submit_thread.joinable()) {
+		return;
+	}
+	m_submit_thread.request_stop();
+	{
+		std::lock_guard lock(m_submit_mutex); // no lost wake-up between predicate and wait
+	}
+	m_submit_cv.notify_all();
+	m_submit_thread.join();
 }
 
 } // namespace Libs::Graphics
