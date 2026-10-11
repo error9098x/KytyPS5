@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cinttypes>
+#include <cstdlib>
 #include <cerrno>
 #include <condition_variable>
 #include <cstddef>
@@ -955,6 +957,42 @@ public:
 		FillCommon(id, &out->type, &out->duration, nullptr, &out->details);
 		return 0;
 	}
+	// Opt-in video delivery accounting (KYTY_AVPLAYER_TRACE=1). Called with mutex held.
+	static bool AvTraceEnabled() {
+		static const bool enabled = [] {
+			const char* v = std::getenv("KYTY_AVPLAYER_TRACE");
+			return v != nullptr && v[0] == '1';
+		}();
+		return enabled;
+	}
+	void AvTraceNote(bool delivered, uint64_t frame_ms, uint64_t now_ms) {
+		using namespace std::chrono;
+		const auto tnow = steady_clock::now();
+		if (trace_last == steady_clock::time_point {}) {
+			trace_last = tnow;
+		}
+		(delivered ? trace_delivered : trace_calls)++;
+		if (delivered) {
+			trace_last_frame_ms = frame_ms;
+			trace_last_now_ms   = now_ms;
+		}
+		if (tnow - trace_last >= seconds(2)) {
+			::printf("[avtrace] calls=%u delivered=%u sync_mode=%u loop=%d paused=%d "
+			         "empty=%d last_frame_ms=%" PRIu64 " clock_ms=%" PRIu64 "\n",
+			         trace_calls, trace_delivered, sync_mode, loop.load() ? 1 : 0, paused ? 1 : 0,
+			         video_frames.Empty() ? 1 : 0, trace_last_frame_ms,
+			         trace_last_now_ms);
+			fflush(stdout);
+			trace_calls = trace_delivered = 0;
+			trace_last                    = tnow;
+		}
+	}
+	uint32_t                              trace_calls         = 0;
+	uint32_t                              trace_delivered     = 0;
+	uint64_t                              trace_last_frame_ms = 0;
+	uint64_t                              trace_last_now_ms   = 0;
+	std::chrono::steady_clock::time_point trace_last {};
+
 	bool Video(AvPlayerFrameInfoEx* out) {
 		if (out == nullptr) {
 			return false;
@@ -966,6 +1004,9 @@ public:
 		const bool deliver_seek_frame = paused && seek_video_frame_pending;
 		if (paused && !deliver_seek_frame) {
 			return false;
+		}
+		if (AvTraceEnabled()) {
+			AvTraceNote(false, 0, 0);
 		}
 		auto frame = video_frames.TryPopIf([&](const ReadyFrame& candidate) {
 			if (deliver_seek_frame || sync_mode != 0) {
@@ -986,6 +1027,10 @@ public:
 		}
 		current_video = std::move(*frame);
 		*out          = current_video->info;
+		if (AvTraceEnabled()) {
+			AvTraceNote(true, current_video->info.time_stamp + current_video->timestamp_offset,
+			            CurrentTimeNoLock());
+		}
 		RecordLoopBoundary(*current_video);
 		if (deliver_seek_frame) {
 			seek_video_frame_pending = false;
