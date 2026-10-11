@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/threadQos.h"
 
 #include <algorithm>
 #include <chrono>
@@ -262,6 +263,7 @@ bool CommandScheduler::HasPendingPriorityOperations() {
 }
 
 void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
+	ApplyCriticalThreadQos("gpu-priority-ops");
 	while (!stop.stop_requested()) {
 		PendingOperation operation;
 		{
