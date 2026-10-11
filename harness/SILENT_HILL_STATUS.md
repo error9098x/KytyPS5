@@ -1,4 +1,4 @@
-# Silent Hill: The Short Message (PPSA10112) — status, 2026-10-10
+# Silent Hill: The Short Message (PPSA10112) — status, 2026-10-11
 
 ## Where it is now
 
@@ -73,6 +73,7 @@ was reverted. The coupled SRT changes were left out rather than applying an unve
 | Metal rejects ballot/shuffle in vertex functions | one-lane subgroup mode for Apple vertex programs | `a3302568` |
 | MoltenVK push descriptors break storage buffers | ordinary descriptor sets on every Apple title | `a3302568` |
 | My bug: compute pass got no push constants | `eCompute` added to the shared push-constant range | `a3302568` |
+| MoltenVK null descriptor set on depth-only emulated mesh draws (descriptor route) | always commit graphics bindings on the descriptor route | `8ea17d3d` |
 | **Rosetta abort on split 256-bit AVX stores to protected pages** (root cause in `ROSETTA_AVX_PAGE_PROTECTION.md`) | upstream KytyPS5 PR #984 by Bartlomiej Wolynczyk, cherry-picked: rewrites every 256-bit guest store into two 128-bit halves at load time (178,772 sites in `eboot.bin`, 822 in `libc.prx`) | `240ba3d1`..`068bc695` |
 
 Tests: `macos_wide_store` passes on this Mac. Animal Well 3 of 3 clean before the PR #984
@@ -80,16 +81,21 @@ cherry-pick; **not yet re-checked after it.**
 
 ## Open problems, most likely first
 
-1. **Post-Continue guest fault.** The descriptor-backed route reaches the warning screen and
-   accepts the scripted Cross path, then one 46-second probe stops on a null guest access
-   (`address=0x10`, `runtimeLinker.cpp:756`). It is separate from the removed Metal device loss
-   and needs a guest backtrace/module mapping before changing emulation behavior.
+1. **Unreal out-of-memory after Continue (first blocker).** With the null descriptor set fixed
+   (`8ea17d3d`), the descriptor route runs about 86 seconds and then Unreal aborts:
+   "Ran out of memory allocating 262144 bytes with alignment 65536", `UsedPhysical: 13107068928`
+   of its 12.5 GiB pool (run `shtsm-nullset-fix-1`). Suspects: deferred frees waiting on GPU
+   fences/labels, and the 64 KB batch-map page moves. Being instrumented.
 2. **Gameplay stability and visual correctness are unverified.** The current evidence is stage 2;
    no 10-minute gameplay soak or reference comparison has passed.
 3. **Performance:** descriptor-backed host scratch is about 26 FPS warm, with multi-second
    streaming stalls during the Continue transition.
 4. The stale-data issue from GPU-driven indirect register tables only appears with
    `KYTY_NO_PAGE_PROTECT=1`; do not use that flag for this game.
+
+Fixed 2026-10-11: the post-Continue "guest null access" at `runtimeLinker.cpp:756` was a host fault
+in MoltenVK (`bindMetalResources`, null `_descriptorSets[set]`) because depth-only emulated mesh
+draws skipped committing graphics bindings on the descriptor route (`8ea17d3d`).
 
 ## How to run
 

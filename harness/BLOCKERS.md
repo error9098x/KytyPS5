@@ -84,7 +84,7 @@ PPSA22520/Apple-gated and use fixed-point gameplay screenshots for the remaining
 visual correctness gate. Do not revisit S_LOAD/component-offset lowering based
 on the historical black-frame evidence.
 
-## Silent Hill: The Short Message (PPSA10112) — current blockers (2026-10-10)
+## Silent Hill: The Short Message (PPSA10112) — current blockers (2026-10-11)
 
 The title reaches and renders the warning/Continue screen on the descriptor-backed route. Cleared
 since the first report:
@@ -102,11 +102,16 @@ since the first report:
   storage buffers unusable; first found with Animal Well). `KYTY_ENABLE_PUSH_DESCRIPTORS=1`
   restores push descriptors.
 
-Remaining, in order of how soon each stops a run:
+Remaining, in order of how soon each stops a run (updated 2026-10-11):
 
-1. **Post-Continue guest null access.** A scripted Cross probe on the descriptor route ends after
-   about 46 seconds with `address=0x10` in `runtimeLinker.cpp:756`. Capture a guest module/function
-   mapping before changing the memory or mesh path.
+1. **Unreal out-of-memory after Continue (current first blocker).** On the descriptor route the
+   run now goes past the old 43-second crash point and ends at about 86 seconds with Unreal's
+   `LowLevelFatalError`: "Ran out of memory allocating 262144 bytes with alignment 65536",
+   `AvailablePhysical: 65536`, `UsedPhysical: 13107068928` (run `shtsm-nullset-fix-1`). Unreal
+   reserves the whole 12.5 GiB direct-memory pool at boot by halving its requests, so this is the
+   game's own sub-allocator running dry. Suspects: deferred frees gated on GPU fences/labels that
+   signal late or never, and the steady 64 KB batch-map page moves before the abort. Instrument
+   first; also A/B the 64 MB and 128 MB scratch sizes.
 2. **Gameplay acceptance is not proven.** The descriptor route has stage 2 evidence only; it needs
    a repeatable Continue transition, gameplay, a 10-minute soak, and reference screenshots.
 3. **Physical-BDA route remains unstable.** Without the opt-in descriptor route, MoltenVK can still
@@ -116,5 +121,8 @@ Remaining, in order of how soon each stops a run:
 4. **GPU-driven rendering needs GPU to CPU coherence.** The title builds `SET_SH_REG_INDIRECT`
    tables with compute shaders; with tracking disabled the PM4 parser reads zeros
    (`unknown sh reg at 00100`). Page tracking cannot simply be turned off for this title.
+
+Fixed: the post-Continue "guest null access" (`address=0x10`, `runtimeLinker.cpp:756`) was a null
+MoltenVK descriptor set on depth-only emulated mesh draws, not guest code (`8ea17d3d`).
 
 Animal Well is unaffected (3 of 3 regression runs clean, title content visible, about 60 FPS).
