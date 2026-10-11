@@ -55,6 +55,68 @@ bool FaultWaitOnCallerEnabled() {
 	return enabled;
 }
 
+// KYTY_BUFFER_GROWTH=1: when CreateBuffer re-creates a buffer because the request runs past the
+// buffers it overlaps (a join), give the new buffer headroom in the direction(s) the request grew:
+// the joined extent again (2x), at least 64 KiB, at most 2 MiB, aligned to 64 KiB. Headroom only
+// covers free pages (clipped at the neighbouring buffers, so it never absorbs another buffer) and
+// mapped guest memory. A buffer that grows by one 16 KiB page per draw is then re-created
+// O(log n) times instead of once per page until the 16-join stream leap kicks in.
+bool BufferGrowthEnabled() {
+	static const bool enabled = EnvFlag("KYTY_BUFFER_GROWTH");
+	return enabled;
+}
+
+constexpr uint64_t BufferGrowthAlign = 64 * 1024;
+constexpr uint64_t BufferGrowthMin   = 64 * 1024;
+constexpr uint64_t BufferGrowthMax   = 2 * MiB;
+
+// KYTY_BUFFER_CACHE_STATS=1: counts buffer creations and re-creations (joins), printed every 2 s
+// from CreateBuffer: "BufferCacheStats: dt_ms creates fresh recreates joined copy_bytes leaps
+// grown grown_bytes bda_pages unregisters". Counters only; no behaviour change.
+bool BufferCacheStatsEnabled() {
+	static const bool enabled = EnvFlag("KYTY_BUFFER_CACHE_STATS");
+	return enabled;
+}
+
+struct BufferCacheCounters {
+	uint64_t creates      = 0; // CreateBuffer calls
+	uint64_t fresh        = 0; // creations that joined no existing buffer
+	uint64_t recreates    = 0; // creations that joined >= 1 existing buffer
+	uint64_t joined       = 0; // existing buffers destroyed by joins
+	uint64_t copy_bytes   = 0; // bytes copied GPU-side by JoinOverlap
+	uint64_t leaps        = 0; // stream leaps (ResolveOverlaps has_stream_leap)
+	uint64_t grown        = 0; // KYTY_BUFFER_GROWTH applied headroom
+	uint64_t grown_bytes  = 0; // headroom bytes added
+	uint64_t bda_pages    = 0; // BDA page-table entries written by Register
+	uint64_t unregisters  = 0; // Unregister calls (joins + GC + deletes)
+	int64_t  last_us      = 0;
+};
+// Only touched on the GPU thread (CreateBuffer / ChangeRegister run there).
+BufferCacheCounters g_buffer_stats;
+
+void MaybePrintBufferCacheStats() {
+	auto&      c      = g_buffer_stats;
+	const auto now_us = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                                             std::chrono::steady_clock::now().time_since_epoch())
+	                                             .count());
+	if (c.last_us == 0) {
+		c.last_us = now_us;
+		return;
+	}
+	if (now_us - c.last_us < 2000000) {
+		return;
+	}
+	LOGF("BufferCacheStats: dt_ms=%" PRId64 " creates=%" PRIu64 " fresh=%" PRIu64
+	     " recreates=%" PRIu64 " joined=%" PRIu64 " copy_bytes=%" PRIu64 " leaps=%" PRIu64
+	     " grown=%" PRIu64 " grown_bytes=%" PRIu64 " bda_pages=%" PRIu64 " unregisters=%" PRIu64
+	     " growth=%d\n",
+	     (now_us - c.last_us) / 1000, c.creates, c.fresh, c.recreates, c.joined, c.copy_bytes,
+	     c.leaps, c.grown, c.grown_bytes, c.bda_pages, c.unregisters,
+	     BufferGrowthEnabled() ? 1 : 0);
+	c         = {};
+	c.last_us = now_us;
+}
+
 struct ReadbackCounters {
 	std::atomic<uint64_t> count {0};
 	std::atomic<uint64_t> bytes {0};
@@ -285,6 +347,9 @@ void BufferCache::ChangeRegister(BufferId id) {
 		const auto [it, inserted] = m_buffers.emplace(buffer.CpuAddress(), id);
 		(void)it;
 		EXIT_IF(!inserted);
+		if (BufferCacheStatsEnabled()) {
+			g_buffer_stats.bda_pages += size_pages;
+		}
 		m_total_used_memory += buffer.Size();
 		buffer.lru_id = m_lru_cache.Insert(id, m_gc_tick);
 		std::vector<vk::DeviceAddress> addresses;
@@ -297,6 +362,9 @@ void BufferCache::ChangeRegister(BufferId id) {
 	} else {
 		const auto found = m_buffers.find(buffer.CpuAddress());
 		EXIT_IF(found == m_buffers.end() || found->second != id);
+		if (BufferCacheStatsEnabled()) {
+			g_buffer_stats.unregisters++;
+		}
 		m_buffers.erase(found);
 		EXIT_IF(buffer.Size() > m_total_used_memory);
 		m_total_used_memory -= buffer.Size();
@@ -699,7 +767,26 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 	const auto end = Common::AlignUp(vaddr + size, CACHING_PAGESIZE);
 	vaddr = Common::AlignDown(vaddr, CACHING_PAGESIZE);
 	size               = end - vaddr;
-	const auto overlap = ResolveOverlaps(vaddr, size);
+	auto overlap       = ResolveOverlaps(vaddr, size);
+
+	const bool stats = BufferCacheStatsEnabled();
+	if (overlap.first != overlap.last && !overlap.has_stream_leap && BufferGrowthEnabled()) {
+		GrowJoinedBuffer(overlap, vaddr, vaddr + size, stats);
+	}
+	if (stats) {
+		auto& c = g_buffer_stats;
+		c.creates++;
+		if (overlap.first == overlap.last) {
+			c.fresh++;
+		} else {
+			c.recreates++;
+		}
+		c.leaps += overlap.has_stream_leap ? 1 : 0;
+		for (auto it = overlap.first; it != overlap.last; ++it) {
+			c.joined++;
+			c.copy_bytes += m_slot_buffers[it->second].Size();
+		}
+	}
 
 	const auto id = m_slot_buffers.insert(
 	    m_graphics, m_scheduler, MemoryUsage::DeviceLocal, overlap.begin,
@@ -713,7 +800,61 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 		JoinOverlap(id, old_id, !overlap.has_stream_leap);
 	}
 	Register(id);
+	if (stats) {
+		MaybePrintBufferCacheStats();
+	}
 	return id;
+}
+
+void BufferCache::GrowJoinedBuffer(OverlapResult& overlap, uint64_t request_begin,
+                                   uint64_t request_end, bool stats) {
+	// Extent of the buffers being joined (without the request).
+	uint64_t joined_begin = UINT64_MAX;
+	uint64_t joined_end   = 0;
+	for (auto it = overlap.first; it != overlap.last; ++it) {
+		const auto& old = m_slot_buffers[it->second];
+		joined_begin    = std::min(joined_begin, old.CpuAddress());
+		joined_end      = std::max(joined_end, old.CpuAddress() + old.Size());
+	}
+	const bool grows_right = request_end > joined_end;
+	const bool grows_left  = request_begin < joined_begin;
+	if (!grows_right && !grows_left) {
+		return; // The request bridges existing buffers; no growth direction to predict.
+	}
+	// Free space around the union: up to the next buffer on the right, and down to the end of
+	// the previous buffer on the left. Cached buffers never overlap, so headroom inside these
+	// limits cannot absorb another buffer.
+	const uint64_t right_limit = overlap.last != m_buffers.end() ? overlap.last->first : UINT64_MAX;
+	uint64_t       left_limit  = 0;
+	if (overlap.first != m_buffers.begin()) {
+		const auto& previous = m_slot_buffers[std::prev(overlap.first)->second];
+		left_limit           = previous.CpuAddress() + previous.Size();
+	}
+	const uint64_t extent = overlap.end - overlap.begin;
+	uint64_t       pad    = std::clamp<uint64_t>(extent, BufferGrowthMin, BufferGrowthMax);
+	for (; pad >= BufferGrowthMin; pad /= 2) {
+		uint64_t begin = overlap.begin;
+		uint64_t end   = overlap.end;
+		if (grows_right && end <= UINT64_MAX - pad - BufferGrowthAlign) {
+			end = std::min(Common::AlignUp(end + pad, BufferGrowthAlign), right_limit);
+		}
+		if (grows_left && begin >= pad) {
+			begin = std::max(Common::AlignDown(begin - pad, BufferGrowthAlign), left_limit);
+		}
+		if (begin == overlap.begin && end == overlap.end) {
+			return;
+		}
+		// Only grow into mapped guest memory (also keeps the range inside one guest region).
+		if (m_scheduler.Context().IsMapped(begin, end - begin)) {
+			if (stats) {
+				g_buffer_stats.grown++;
+				g_buffer_stats.grown_bytes += (end - begin) - extent;
+			}
+			overlap.begin = begin;
+			overlap.end   = end;
+			return;
+		}
+	}
 }
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_written,

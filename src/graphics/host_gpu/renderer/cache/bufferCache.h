@@ -130,6 +130,8 @@ private:
 	void WriteDataBuffer(Buffer& buffer, uint64_t address, const void* source, uint64_t size);
 	void TouchBuffer(const Buffer& buffer);
 	[[nodiscard]] OverlapResult ResolveOverlaps(uint64_t vaddr, uint64_t size);
+	void GrowJoinedBuffer(OverlapResult& overlap, uint64_t request_begin, uint64_t request_end,
+	                      bool stats);
 	void JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumulate_stream_score);
 	[[nodiscard]] BufferId CreateBuffer(uint64_t vaddr, uint64_t size);
 	void                   Register(BufferId id);
