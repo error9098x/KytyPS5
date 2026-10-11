@@ -874,6 +874,36 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 			const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[resource]);
 			const auto address = descriptor.Base48();
 			auto size = descriptor.GetSize();
+			// KYTY_DEBUG_BUFFER_POKE=<hash>:<resource>:<dword>:<match>:<value> (debug only): before the bind,
+			// overwrite guest dword <dword> of buffer <resource> with <value> when it currently equals <match>.
+			// Used to prove causality of a uniform value (e.g. disable a prefilter threshold).
+			{
+				struct Poke {
+					uint64_t hash = 0;
+					uint32_t resource = 0, dword = 0, match = 0, value = 0;
+				};
+				static const Poke poke = [] {
+					Poke p {};
+					if (const char* v = std::getenv("KYTY_DEBUG_BUFFER_POKE"); v != nullptr) {
+						unsigned long long h = 0;
+						unsigned r = 0, d = 0, m = 0, val = 0;
+						if (std::sscanf(v, "%llx:%u:%u:%x:%x", &h, &r, &d, &m, &val) == 5) {
+							p = {h, r, d, m, val};
+						}
+					}
+					return p;
+				}();
+				if (poke.hash != 0 && program.shader_hash == poke.hash && resource == poke.resource && address != 0 &&
+				    size >= (poke.dword + 1u) * 4u) {
+					uint32_t current = 0;
+					if (Libs::LibKernel::Memory::TryReadBacking(address + poke.dword * 4u, &current, 4) &&
+					    current == poke.match) {
+						Libs::LibKernel::Memory::TryWriteBacking(address + poke.dword * 4u, &poke.value, 4);
+						// The backing write bypasses CPU-write tracking: invalidate so the cache re-uploads it.
+						m_context.GetBufferCache().InvalidateMemory(address + poke.dword * 4u, 4);
+					}
+				}
+			}
 			// KYTY_RESOURCE_DUMP_HASH=<shader hash>: dump the first 160 dwords of every buffer the
 			// shader binds (first 4 binds), to check uniform/embedded-table contents at draw time.
 			static const uint64_t dump_hash = [] {
