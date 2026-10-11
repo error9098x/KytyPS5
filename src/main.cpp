@@ -467,6 +467,9 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 }
 
 static int Main(int argc, char* argv[]) {
+	// Line-buffer stdout: when it is a file (harness kyty.log) the default full buffering loses the
+	// tail on SIGTERM/fatal exit. Lines are short and infrequent, so the cost is negligible.
+	std::setvbuf(stdout, nullptr, _IOLBF, 0);
 	VirtualMemory::Init();
 	InitializeThreads();
 
@@ -523,3 +526,4 @@ int main(int argc, char* argv[]) {
 }
 
 #endif
+
