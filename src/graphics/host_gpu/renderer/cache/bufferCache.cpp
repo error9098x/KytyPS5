@@ -185,6 +185,11 @@ void BufferCache::Unregister(BufferId id) {
 
 template <bool insert>
 void BufferCache::ChangeRegister(BufferId id) {
+	if constexpr (insert) {
+		// A new buffer can cover pages that were CPU-dirty before the last full BDA sync but
+		// were not owned by any buffer then; force the next PrepareBda to scan.
+		g_cpu_dirty_generation.fetch_add(1, std::memory_order_acq_rel);
+	}
 	auto& buffer = m_slot_buffers[id];
 	PageTable::PageRange pages {};
 	EXIT_IF(!(GuestRange {buffer.CpuAddress(), buffer.Size()}.Valid()) ||

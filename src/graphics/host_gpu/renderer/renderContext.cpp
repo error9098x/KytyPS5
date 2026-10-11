@@ -3,6 +3,7 @@
 #include <cinttypes>
 
 #include <cstdlib>
+#include <cstring>
 
 #include <cstdio>
 
@@ -153,6 +154,7 @@ bool RenderContext::IsMapped(uint64_t vaddr, uint64_t size) const noexcept {
 void RenderContext::MapMemory(uint64_t vaddr, uint64_t size) {
 	std::lock_guard lock(m_mapped_ranges_mutex);
 	m_mapped_ranges.Add(vaddr, size);
+	g_cpu_dirty_generation.fetch_add(1, std::memory_order_acq_rel);
 }
 
 UnmapCounters& GetUnmapCounters() {
@@ -239,10 +241,24 @@ void RenderContext::PrepareBda() {
 		Log::WriteToConsoleAndLog("GPU: using buffer device address (BDA) shader memory access.\n");
 		m_bda_logged = true;
 	}
+	// KYTY_BDA_SYNC_SKIP=1: the full scan below only uploads CPU-modified pages of cached buffers.
+	// When no page became CPU-modified, no buffer was registered and no range was mapped since
+	// the previous complete scan (g_cpu_dirty_generation unchanged), it finds nothing; skip it.
+	static const bool skip_enabled = [] {
+		const char* value = std::getenv("KYTY_BDA_SYNC_SKIP");
+		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+	}();
+	const uint64_t generation = g_cpu_dirty_generation.load(std::memory_order_acquire);
+	if (skip_enabled && m_bda_synced_valid && generation == m_bda_synced_generation) {
+		m_fault_process_pending = true;
+		return;
+	}
 	std::shared_lock lock(m_mapped_ranges_mutex);
 	m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
 		m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
 	});
+	m_bda_synced_generation = generation;
+	m_bda_synced_valid      = true;
 	m_fault_process_pending = true;
 }
 

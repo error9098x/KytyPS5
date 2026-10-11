@@ -77,6 +77,11 @@ private:
 
 static_assert(std::atomic_uint32_t::is_always_lock_free);
 
+// Bumped after any page becomes CPU-modified (region creation starts all CPU-dirty). A reader
+// that loads it before scanning for CPU-dirty pages and sees the same value later knows no page
+// has become CPU-modified since that scan began.
+inline std::atomic<uint64_t> g_cpu_dirty_generation {0};
+
 class RegionManager final {
 public:
 	RegionManager(PageManager& page_manager, uint64_t cpu_addr)
@@ -87,6 +92,7 @@ public:
 		m_cpu_dirty.Fill();
 		m_writable.Fill();
 		m_readable.Fill();
+		g_cpu_dirty_generation.fetch_add(1, std::memory_order_acq_rel);
 	}
 
 	KYTY_CLASS_NO_COPY(RegionManager);
@@ -114,6 +120,9 @@ public:
 		auto& bits = GetBits<source>();
 		if constexpr (enable) {
 			bits.SetRange(start, end);
+			if constexpr (source == DirtySource::Cpu) {
+				g_cpu_dirty_generation.fetch_add(1, std::memory_order_acq_rel);
+			}
 		} else {
 			bits.UnsetRange(start, end);
 		}
