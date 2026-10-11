@@ -758,3 +758,16 @@ Causal proof (opt-in debug poke, commit 2de0bc80):
 - Result: FFT bloom output lum median went from 49 to 463, and the TITLE MENU BACKGROUND IS LIT (rooftop scene with the girl holding her phone): harness/runs/shtsm-prefilter-off-3/frames/frame_000780.png. Baseline, still black: harness/runs/shtsm-ldssync-3/frames/frame_000780.png.
 - This is a proof only, NOT a fix. The real fix is to make the scene colour arrive in the units the pre-filter expects, most likely by making Unreal's View.PreExposure correct (the CPU eye-adaptation readback).
 - Commits: 51945a2b (rows_clamped + KYTY_INTERNAL_FRAME_RAW_DIR), 2de0bc80 (KYTY_DEBUG_BUFFER_POKE). Both are opt-in; default paths unchanged.
+
+## 2026-10-11 ~19:20 IST — FIXED: black title-menu background (aeddbf04, linear-image readback for PPSA10112)
+
+- Root cause confirmed. Silent Hill reads its GPU-written (linear) eye-adaptation result back on the CPU to set Unreal View.PreExposure. Kyty's linear-image readback (`--readback-linear-images`) was off by default, so the CPU never saw the value, PreExposure stayed 1, and the FFT-bloom pre-filter (0.6/50/150) clamped the scene to lum 50, which rendered black.
+- Evidence:
+  - With `--readback-linear-images true` and no other forcing: shtsm-rbli-1 frame_000780.png and shtsm-rbli-2 frame_000720.png show the lit rooftop menu scene (girl with phone).
+  - With the new per-title default (aeddbf04, no flags): shtsm-rbdef-1 frame_000780.png is lit. guest-printf logs "linear-image readback enabled by default for PPSA10112".
+  - Baseline (black): shtsm-ldssync-3 frame_000780.png.
+- No measurable slowdown: frame-dump timing matched the black baseline (frames 360→780 in ~78 s vs ~87 s).
+- aeddbf04: title-gated (PPSA10112 only). KYTY_READBACK_LINEAR_IMAGES=0|1 overrides it; `--readback-linear-images true` still forces it.
+- Animal Well 3/3 after aeddbf04 (aw-regress-{1,2,3}-rblinear: stage 2, 32-33/42-43 content frames, the same 10 black boot frames as the 33/43 baseline). Readback is not enabled for PPSA22520.
+- Supporting commits: def6fafe (harness KYTY_EXTRA_ARGS), 2de0bc80 (KYTY_DEBUG_BUFFER_POKE), 51945a2b (frame-stats rows_clamped / raw dumps).
+- Still stage 2. No gameplay soak or reference-image check has passed. The menu still presents at ~1 fps.
