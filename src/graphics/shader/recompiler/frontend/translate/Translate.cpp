@@ -3,6 +3,8 @@
 #include "graphics/shader/shader.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <array>
 #include <bit>
 #include <unordered_map>
@@ -967,6 +969,56 @@ void ValidateTranslateOptions(const TranslateOptions& options) {
 
 } // namespace
 
+// Diagnostics: KYTY_DEBUG_EXPORT_VGPR=<hash hex>:<pc hex>:<vgpr> captures vN right after the
+// instruction at <pc> in that pixel shader and replaces its compressed MRT0 export with
+// (|vN|, |vN|/1024, 1, 1). Used to bisect where a shader's result turns zero or NaN.
+struct DebugExportVgpr {
+	uint64_t hash    = 0;
+	uint32_t pc      = 0;
+	uint32_t vgpr    = 0;
+	bool     enabled = false;
+};
+static const DebugExportVgpr& GetDebugExportVgpr() {
+	static const DebugExportVgpr value = [] {
+		DebugExportVgpr result;
+		if (const char* text = std::getenv("KYTY_DEBUG_EXPORT_VGPR")) {
+			unsigned long long hash = 0;
+			unsigned           pc = 0, vgpr = 0;
+			if (std::sscanf(text, "%llx:%x:%u", &hash, &pc, &vgpr) == 3) {
+				result = {hash, pc, vgpr, true};
+			}
+		}
+		return result;
+	}();
+	return value;
+}
+static Decoder::Operand DebugVgpr(uint32_t reg, bool absolute = false) {
+	Decoder::Operand operand;
+	operand.kind     = Decoder::OperandKind::Vgpr;
+	operand.reg      = reg;
+	operand.absolute = absolute;
+	return operand;
+}
+static Decoder::Operand DebugLiteral(uint32_t bits) {
+	Decoder::Operand operand;
+	operand.kind  = Decoder::OperandKind::LiteralConstant;
+	operand.value = bits;
+	return operand;
+}
+static Decoder::Instruction DebugVop3(uint32_t pc, Decoder::Opcode opcode, Decoder::Operand dst,
+                                      Decoder::Operand src0, Decoder::Operand src1,
+                                      uint32_t src_count) {
+	Decoder::Instruction inst;
+	inst.pc        = pc;
+	inst.family    = Decoder::Family::VOP3;
+	inst.opcode    = opcode;
+	inst.dst       = dst;
+	inst.src0      = src0;
+	inst.src1      = src1;
+	inst.src_count = src_count;
+	return inst;
+}
+
 IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& cfg,
                              const TranslateOptions& options) {
 	ValidateTranslateOptions(options);
@@ -1356,9 +1408,29 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 	                              (options.input_info.compute->float_mode & 0x10u) == 0;
 	for (const auto& cfg_block: cfg.blocks) {
 		auto*      block = blocks_by_id.at(cfg_block.id);
-		Translator translator(result, block, vector_limit, flush_f32_inputs);
+		const auto& debug_export = GetDebugExportVgpr();
+		const bool  debug_on     = debug_export.enabled && options.stage == ShaderType::Pixel &&
+		                      options.shader_hash == debug_export.hash;
+		Translator translator(result, block, debug_on ? std::max(vector_limit, 252u) : vector_limit,
+		                      flush_f32_inputs);
+		if (debug_on && &cfg_block == &cfg.blocks.front()) {
+			translator.TranslateInstruction(DebugVop3(0, Decoder::Opcode::V_MOV_B32, DebugVgpr(250),
+			                                          DebugLiteral(0x7fc00000u), {}, 1));
+		}
 		for (uint32_t index = cfg_block.inst_begin; index < cfg_block.inst_end; index++) {
 			const auto& instruction = decoded.instructions[index];
+			if (debug_on && instruction.opcode == Decoder::Opcode::EXP && instruction.exp.compr &&
+			    instruction.exp.target == 0 && instruction.src_count >= 2) {
+				const auto pc = instruction.pc;
+				translator.TranslateInstruction(DebugVop3(pc, Decoder::Opcode::V_MUL_F32, DebugVgpr(251),
+				                                          DebugVgpr(250, true), DebugLiteral(0x3a800000u), 2));
+				translator.TranslateInstruction(DebugVop3(pc, Decoder::Opcode::V_CVT_PKRTZ_F16_F32,
+				                                          DebugVgpr(instruction.src0.reg),
+				                                          DebugVgpr(250, true), DebugVgpr(251), 2));
+				translator.TranslateInstruction(DebugVop3(pc, Decoder::Opcode::V_CVT_PKRTZ_F16_F32,
+				                                          DebugVgpr(instruction.src1.reg),
+				                                          DebugLiteral(0x3f800000u), DebugLiteral(0x3f800000u), 2));
+			}
 			if (IsCodeTableLoad(cfg, instruction.pc)) {
 				continue;
 			}
@@ -1378,6 +1450,10 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 				continue;
 			}
 			translator.TranslateInstruction(instruction);
+			if (debug_on && instruction.pc == debug_export.pc) {
+				translator.TranslateInstruction(DebugVop3(instruction.pc, Decoder::Opcode::V_MOV_B32,
+				                                          DebugVgpr(250), DebugVgpr(debug_export.vgpr), {}, 1));
+			}
 		}
 		translator.AddBranchCondition(cfg, cfg_block, *block);
 	}
