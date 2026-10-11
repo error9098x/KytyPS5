@@ -13,6 +13,11 @@
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
+#include <atomic>
+#include <chrono>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -226,8 +231,39 @@ void WriteAtEndOfPipeOnlyFlip(uint64_t submit_id, CommandBuffer& buffer, int han
 	    [&renderer, request_id] { renderer.GetVideoOut().CompleteFlip(request_id); });
 }
 
+bool EopTraceEnabled() {
+	static const bool enabled = [] {
+		const char* v = std::getenv("KYTY_EOP_TRACE");
+		return v != nullptr && v[0] == '1';
+	}();
+	return enabled;
+}
+
+void EopTraceNote(EopTraceKind kind) {
+	static std::atomic<uint64_t> counts[static_cast<int>(EopTraceKind::Count)] {};
+	static std::atomic<int64_t>  last_print_ms {0};
+	static const auto            start = std::chrono::steady_clock::now();
+	counts[static_cast<int>(kind)].fetch_add(1, std::memory_order_relaxed);
+	const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                        std::chrono::steady_clock::now() - start)
+	                        .count();
+	auto last = last_print_ms.load(std::memory_order_relaxed);
+	if (now_ms - last >= 2000 &&
+	    last_print_ms.compare_exchange_strong(last, now_ms, std::memory_order_relaxed)) {
+		printf("[eoptrace] t=%.1fs requested=%" PRIu64 " executed=%" PRIu64 " delivered=%" PRIu64
+		       " no_registration=%" PRIu64 " release_mem=%" PRIu64 " release_mem_interrupt=%" PRIu64
+		       "\n",
+		       static_cast<double>(now_ms) / 1000.0, counts[0].load(), counts[1].load(),
+		       counts[2].load(), counts[3].load(), counts[4].load(), counts[5].load());
+		fflush(stdout);
+	}
+}
+
 void TriggerEopEventAtEndOfPipe(CommandBuffer& buffer, int event_id, uint32_t context_id) {
 	(void)buffer.Handle();
+	if (EopTraceEnabled()) {
+		EopTraceNote(EopTraceKind::Requested);
+	}
 	auto& renderer  = buffer.GetContext();
 	auto& scheduler = renderer.GetCommandScheduler();
 	EXIT_IF(!scheduler.Active() || &buffer != &scheduler.Current());

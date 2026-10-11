@@ -9,6 +9,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/renderer/sync.h"
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
 
@@ -242,6 +243,10 @@ void RenderContext::TriggerInterrupt(int event_id, uint32_t context_id) {
 			}
 		}
 	}
+	if (Sync::EopTraceEnabled()) {
+		Sync::EopTraceNote(registrations.empty() ? Sync::EopTraceKind::NoRegistration
+		                                         : Sync::EopTraceKind::Executed);
+	}
 
 	for (const auto& registration: registrations) {
 		const auto result = LibKernel::EventQueue::KernelTriggerEvent(
@@ -253,6 +258,9 @@ void RenderContext::TriggerInterrupt(int event_id, uint32_t context_id) {
 			continue;
 		}
 		EXIT_NOT_IMPLEMENTED(result != OK);
+		if (Sync::EopTraceEnabled()) {
+			Sync::EopTraceNote(Sync::EopTraceKind::Delivered);
+		}
 	}
 }
 

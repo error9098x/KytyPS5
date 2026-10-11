@@ -18,6 +18,10 @@ namespace Sync {
 [[nodiscard]] uint64_t ReadReferenceClock();
 
 void TriggerEopEventAtEndOfPipe(CommandBuffer& buffer, int event_id, uint32_t context_id);
+// Opt-in end-of-pipe interrupt accounting (KYTY_EOP_TRACE=1).
+enum class EopTraceKind { Requested, Executed, Delivered, NoRegistration, ReleaseMem, ReleaseMemInterrupt, Count };
+bool EopTraceEnabled();
+void EopTraceNote(EopTraceKind kind);
 
 void WriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer& buffer, uint32_t* dst_gpu_addr,
                         uint32_t value);

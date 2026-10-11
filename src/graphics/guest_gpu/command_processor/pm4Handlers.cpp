@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/sync.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
@@ -2269,6 +2270,12 @@ KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 	                     data_sel != 5);
 
 	LogUnknownReleaseMemGcr(gcr_cntl);
+
+	if (Sync::EopTraceEnabled()) {
+		Sync::EopTraceNote(interrupt_selector != 0 && interrupt_selector != 3
+		                       ? Sync::EopTraceKind::ReleaseMemInterrupt
+		                       : Sync::EopTraceKind::ReleaseMem);
+	}
 
 	const bool gl2_writeback = ((gcr_cntl & GcrGl2Writeback) != 0);
 
