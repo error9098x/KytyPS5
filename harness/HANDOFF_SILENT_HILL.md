@@ -6,9 +6,10 @@ Written 2026-10-10 for continuing in Codex. Branch: `codex/animal-well-compat`.
 
 - Animal Well (PPSA22520) runs: stable gameplay, audio, ~60 FPS. Input lag fixed (`56852717`,
   see `harness/INPUT_LAG_FIX.md`). Re-verified after every change below (3 of 3 clean runs).
-- Silent Hill: The Short Message (PPSA10112) now renders real warning/Continue screens when
-  launched with the opt-in `KYTY_MESH_SCRATCH_HOST=1` workaround; the default device-local
-  scratch path still reaches the Metal `InvalidResource` failure.
+- Silent Hill: The Short Message (PPSA10112) now renders the real warning/Continue screen on the
+  opt-in descriptor-backed route: `KYTY_MESH_SCRATCH_HOST=1 KYTY_MESH_SCRATCH_DESCRIPTOR=1` with
+  `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0`. The default device-local/physical-BDA scratch path
+  still reaches Metal `InvalidResource`.
   Fixed on the way: aliased buffer bindings (`5f8b23d4`), vertex subgroup builtins (`652d4247`),
   **mesh shaders** (now emulated through compute), **vertex ballot/shuffle** (one-lane subgroup
   mode), **MoltenVK push descriptors** (ordinary sets on every Apple title).
@@ -19,9 +20,9 @@ Written 2026-10-10 for continuing in Codex. Branch: `codex/animal-well-compat`.
  3. GPU-driven rendering needs GPU to CPU coherence, so tracking cannot just be disabled.
 
 The host-visible scratch A/B passed three 35-second timeout runs with content frames and no
-device-loss error. A 64 MB host-visible scratch run also survived 60 seconds after an automated
-Continue press with no GPU loss or Unreal OOM. Use `KYTY_MESH_SCRATCH_MB=64` for interactive
-testing; 256 MB later reached a 13 GB physical-memory OOM.
+device-loss error. The descriptor-backed 256 MB route passed a 45-second gated run and a 90-second
+timeout run with zero GPU validation/device-loss errors. Use the descriptor route for interactive
+testing; the scripted Continue probe still ends later on a guest null access.
 The 128 MB host-visible variant survived a delayed Continue run without GPU loss or OOM and
 exited cleanly after about 51 seconds; it remains an opt-in experiment pending longer stability.
 
@@ -43,6 +44,9 @@ permanent shader-black frame.
   turns it off, `KYTY_MESH_SCRATCH_MB` sizes the scratch (default 256).
 - One-lane subgroup mode: `spirvEmitterHelpers.cpp` (`EmitSubgroupBallot/FindLsb/Shuffle`), applied
   only to Apple vertex programs that use ballot, shuffle or subgroup barriers.
+- Opt-in descriptor-backed scratch: `KYTY_MESH_SCRATCH_DESCRIPTOR=1` adds a shared storage-buffer
+  binding for the emulated compute and generated vertex stages, avoiding the physical-BDA scratch
+  resource that MoltenVK reports as invalid on Metal. It is gated off by default.
 
 ### Debug switches added
 
@@ -60,9 +64,9 @@ permanent shader-black frame.
 
 1. Replace page-protection coherence (option 1 in `ROSETTA_AVX_PAGE_PROTECTION.md`), or stop
    running guest code under Rosetta. Nothing else removes the abort.
-2. Bisect the GPU error further: it needs a per-encoder status from Metal (command buffer
-   `errorOptions` with encoder execution status) to name the failing command.
-3. Only then judge the emulated mesh draw visually.
+2. Map the post-Continue null guest access at `runtimeLinker.cpp:756`; the descriptor route removes
+   the previous GPU device-loss blocker.
+3. Run the descriptor route through gameplay and then judge the emulated mesh draw visually.
 
 ## Game data
 

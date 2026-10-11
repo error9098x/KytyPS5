@@ -2,11 +2,10 @@
 
 ## Where it is now
 
-- The game **boots and shows real screens**. The user reached the grey screen and the
-  brightness-adjustment screen. After a few screens it goes **black**, then usually ends with a
-  GPU error.
-- Harness, 90 s runs: 4 to 10 frames with content per run, about 17–22 FPS, 2 of 4 runs reached
-  the 90 s timeout with no fatal error. The other runs ended in a GPU "device lost" error.
+- The game **boots and shows real screens**. The harness now captures the full warning/Continue
+  screen, including its background and prompt.
+- The default physical-BDA scratch path still reaches Metal `InvalidResource`. A new opt-in
+  descriptor-backed scratch path avoids that GPU fault.
 - No Rosetta aborts any more.
 - A new opt-in `KYTY_MESH_SCRATCH_HOST=1` path places the mesh-emulation scratch buffer in
   host-visible memory. Three 35-second runs reached the timeout with content frames and no
@@ -30,6 +29,31 @@ use but remains experimental.
   or a fatal error and exited cleanly after about 51 seconds. It is the current memory/stability
   experiment; it has not yet passed the 10-minute gate.
 
+### Descriptor-backed mesh scratch (new A/B)
+
+The first emulated mesh draw used a physical buffer-device address for its scratch output. On
+MoltenVK/Metal that resource was intermittently reported as `InvalidResource` even when the
+scratch allocation was host-visible. The opt-in route binds scratch as an ordinary storage-buffer
+descriptor shared by the compute and generated vertex stages:
+
+```bash
+export KYTY_MESH_SCRATCH_HOST=1
+export KYTY_MESH_SCRATCH_MB=256
+export KYTY_MESH_SCRATCH_DESCRIPTOR=1
+export MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0
+```
+
+The 45-second gated run `harness/runs/shtsm-descriptor-gated-1` timed out normally, produced 13
+content frames including the warning/Continue screen, and reported **zero GPU validation/device
+loss errors**. A 90-second run also reached the timeout with no GPU loss. The Metal argument-buffer
+switch is required because MoltenVK 1.4.2 cannot convert this extra descriptor in its Metal3
+argument-buffer mode. The legacy BDA path remains the default for other titles.
+
+The scripted Cross probe delivered the button to guest polls (19.88 ms median in the short probe),
+but the captured image remained on the Continue screen; a longer held/repeated probe later stopped
+on a guest null access at `runtimeLinker.cpp:756`. Whether the title accepts this synthetic Cross
+path still needs confirmation with a real controller event.
+
 ## What fixed what
 
 | Problem | Fix | Commit |
@@ -47,19 +71,14 @@ cherry-pick; **not yet re-checked after it.**
 
 ## Open problems, most likely first
 
-1. **Black screen after the brightness screen, then GPU device lost.**
-   - Error: `kIOGPUCommandBufferCallbackErrorInvalidResource` (code 9), sometimes `...Hang`.
-   - It starts after the first buffer-device-address draw, which is the first emulated mesh draw.
-     `KYTY_MESH_EMU_SKIP=all` removes the error; skipping only the compute half or only the draw
-     half does not.
-   - The black screen is probably the same problem: the screen after brightness is likely the
-     first one using the emulated mesh (geometry shader) path, and its output or the GPU fault
-     leaves nothing visible.
-   - Next step: enable Metal per-encoder error status (command buffer `errorOptions` with
-     encoder execution status) to name the failing encoder; dump the scratch buffer after one
-     emulated draw and check triangle counts and positions.
-2. **Mesh emulation output is unverified.** Never confirmed on screen.
-3. **Performance:** host-visible scratch runs are about 23–26 FPS warm, with 2.3 s stalls.
+1. **Post-Continue guest fault.** The descriptor-backed route reaches the warning screen and
+   accepts the scripted Cross path, then one 46-second probe stops on a null guest access
+   (`address=0x10`, `runtimeLinker.cpp:756`). It is separate from the removed Metal device loss
+   and needs a guest backtrace/module mapping before changing emulation behavior.
+2. **Gameplay stability and visual correctness are unverified.** The current evidence is stage 2;
+   no 10-minute gameplay soak or reference comparison has passed.
+3. **Performance:** descriptor-backed host scratch is about 26 FPS warm, with multi-second
+   streaming stalls during the Continue transition.
 4. The stale-data issue from GPU-driven indirect register tables only appears with
    `KYTY_NO_PAGE_PROTECT=1`; do not use that flag for this game.
 
@@ -69,6 +88,8 @@ cherry-pick; **not yet re-checked after it.**
 cd /Users/aviral/Documents/ChatGPT/PS5/KytyPS5
 cmake --build _Build/macos-x86_64 --target kyty_emulator -j8
 KYTY_GAME_DIR=/Users/aviral/Documents/ChatGPT/PS5/SilentHill.ShortMessage-extracted/PPSA10112-app \
+KYTY_MESH_SCRATCH_HOST=1 KYTY_MESH_SCRATCH_MB=256 KYTY_MESH_SCRATCH_DESCRIPTOR=1 \
+MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 \
 KYTY_FRAME_STATS=1 KYTY_FRAME_DUMP=1 KYTY_PRINTF_DIRECTION=File KYTY_TIMEOUT_SECONDS=90 \
 ./harness/run.sh shtsm-NAME
 ```

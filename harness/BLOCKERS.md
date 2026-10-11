@@ -86,7 +86,8 @@ on the historical black-frame evidence.
 
 ## Silent Hill: The Short Message (PPSA10112) — current blockers (2026-10-10)
 
-The title still does not reach rendered frames on this Mac. Cleared since the first report:
+The title reaches and renders the warning/Continue screen on the descriptor-backed route. Cleared
+since the first report:
 
 - Aliased storage-buffer views (`5f8b23d4`) and the vertex subgroup fallback (`652d4247`).
 - **Mesh shaders are no longer a hard limit.** Without `VK_EXT_mesh_shader` (MoltenVK) the guest
@@ -103,16 +104,16 @@ The title still does not reach rendered frames on this Mac. Cleared since the fi
 
 Remaining, in order of how soon each stops a run:
 
-1. **Rosetta abort on 256-bit AVX accesses to tracked pages** (about 5 of 6 runs, 4 to 10 s in).
-   Platform-level; reproduction and options in `ROSETTA_AVX_PAGE_PROTECTION.md`. BDA mode makes
-   page tracking about 20 times busier, which is what makes it fatal here.
-2. **GPU errors after the first BDA draw:** `kIOGPUCommandBufferCallbackErrorInvalidResource`
-   (code 9), or with push descriptors off `...ErrorHang` (code 2). Bisected with
-   `KYTY_MESH_EMU_SKIP=compute|draw|all`: no error when both halves of the emulated mesh draw are
-   skipped, an error when either half runs. Not caused by scratch size (16/64/256 MB) or by the
-   newer MoltenVK build. Cause not found; a GPU hang in the guest mesh program or a BDA lifetime
-   problem are the leading suspects.
-3. **GPU-driven rendering needs GPU to CPU coherence.** The title builds `SET_SH_REG_INDIRECT`
+1. **Post-Continue guest null access.** A scripted Cross probe on the descriptor route ends after
+   about 46 seconds with `address=0x10` in `runtimeLinker.cpp:756`. Capture a guest module/function
+   mapping before changing the memory or mesh path.
+2. **Gameplay acceptance is not proven.** The descriptor route has stage 2 evidence only; it needs
+   a repeatable Continue transition, gameplay, a 10-minute soak, and reference screenshots.
+3. **Physical-BDA route remains unstable.** Without the opt-in descriptor route, MoltenVK can still
+   report `kIOGPUCommandBufferCallbackErrorInvalidResource` on the first emulated mesh draw. The
+   descriptor route is intentionally opt-in because it also requires disabling Metal3 argument
+   buffers in MoltenVK 1.4.2.
+4. **GPU-driven rendering needs GPU to CPU coherence.** The title builds `SET_SH_REG_INDIRECT`
    tables with compute shaders; with tracking disabled the PM4 parser reads zeros
    (`unknown sh reg at 00100`). Page tracking cannot simply be turned off for this title.
 
