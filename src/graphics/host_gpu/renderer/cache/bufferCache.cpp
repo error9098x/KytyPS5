@@ -786,7 +786,23 @@ void BufferCache::RunGarbageCollector() {
 
 	const bool     aggressive = m_total_used_memory >= m_critical_gc_memory;
 	const uint64_t age        = std::min<uint64_t>(aggressive ? 80 : 160, tick);
-	const size_t   limit      = aggressive ? 64 : 32;
+	// KYTY_GC_DRAIN_INTERVAL=<n> (opt-in, default 1): under critical pressure, retiring GPU-dirty
+	// buffers needs a full GPU drain (download + wait). With n > 1 that drain runs only on every
+	// n-th collection, with a proportionally larger batch (up to 8x), so a 16 GB unified-memory
+	// Mac that sits above the critical threshold does not stall the GPU thread every frame.
+	// Clean buffers are still retired on every collection.
+	static const uint64_t drain_interval = [] {
+		const char* value = std::getenv("KYTY_GC_DRAIN_INTERVAL");
+		if (value == nullptr) {
+			return uint64_t {1};
+		}
+		const auto n = std::strtoull(value, nullptr, 10);
+		return n == 0 ? uint64_t {1} : std::min<uint64_t>(n, 1024);
+	}();
+	const bool   drain_dirty = aggressive && (drain_interval == 1 || tick % drain_interval == 0);
+	const size_t limit       = !aggressive ? 32
+	                           : drain_dirty ? 64 * static_cast<size_t>(std::min<uint64_t>(drain_interval, 8))
+	                                         : 64;
 
 	std::vector<BufferId> dirty_buffers;
 	size_t                retire_count = 0;
@@ -796,7 +812,7 @@ void BufferCache::RunGarbageCollector() {
 		m_memory_tracker.ValidateGpuDirtyOwnership(m_gpu_modified_ranges, buffer.CpuAddress(),
 		                                           buffer.Size(), "garbage collection");
 		const bool dirty = m_memory_tracker.IsRegionGpuModified(buffer.CpuAddress(), buffer.Size());
-		if (dirty && !aggressive) {
+		if (dirty && !drain_dirty) {
 			return false;
 		}
 		if (dirty) {
