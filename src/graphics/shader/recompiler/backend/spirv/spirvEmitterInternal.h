@@ -93,6 +93,9 @@ struct EmitterState {
 	bool                                              vertex_subgroup_fallback = false;
 	bool                                              mesh_compute             = false;
 	bool                                              mesh_scratch_descriptor  = false;
+	// KYTY_MESH_PSB_TRIM: descriptor-scratch mesh compute without guest DMA declares no
+	// PhysicalStorageBuffer capability, types or addressing model.
+	bool                                              mesh_psb_trim            = false;
 	// Vertex programs on hosts whose vertex stage cannot use subgroup operations (Metal) run as
 	// one-lane subgroups: ballot is a single bit, the first lane is 0 and shuffles return the
 	// invocation's own value.

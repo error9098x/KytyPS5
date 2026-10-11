@@ -1,5 +1,6 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 #include "graphics/shader/meshEmulation.h"
+#include "common/assert.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
@@ -158,9 +159,12 @@ struct ScratchWriter {
 		    {{spv::OpMemberDecorate, {0u, spv::DecorationOffset, 0u}},
 		     {spv::OpDecorate, {spv::DecorationBlock}}},
 		    runtime_array);
-		array_pointer_type   = TypePointer(state, spv::StorageClassPhysicalStorageBuffer, block);
-		physical_element_pointer_type =
-		    TypePointer(state, spv::StorageClassPhysicalStorageBuffer, u32);
+		if (!state.mesh_psb_trim) {
+			array_pointer_type = TypePointer(state, spv::StorageClassPhysicalStorageBuffer, block);
+			physical_element_pointer_type =
+			    TypePointer(state, spv::StorageClassPhysicalStorageBuffer, u32);
+		}
+		EXIT_IF(state.mesh_psb_trim && state.mesh_scratch_variable == 0);
 		element_pointer_type = state.mesh_scratch_variable != 0
 		                           ? TypePointer(state, spv::StorageClassStorageBuffer, u32)
 		                           : physical_element_pointer_type;

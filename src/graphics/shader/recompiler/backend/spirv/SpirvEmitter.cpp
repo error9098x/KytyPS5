@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
 
@@ -223,6 +224,13 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	state.mesh_compute = mesh_compute_emulation && program.stage == ShaderType::Mesh;
 	state.mesh_scratch_descriptor =
 	    state.mesh_compute && Config::MeshScratchDescriptorEnabled();
+	state.mesh_psb_trim = state.mesh_scratch_descriptor && !program.info.uses_dma &&
+	                      Config::MeshPsbTrimEnabled();
+	if (state.mesh_compute && Config::MeshPsbTrimEnabled()) {
+		std::printf("MeshPsbTrim: hash=0x%016" PRIx64 " descriptor_scratch=%d uses_dma=%d trimmed=%d\n",
+		            program.shader_hash, state.mesh_scratch_descriptor ? 1 : 0,
+		            program.info.uses_dma ? 1 : 0, state.mesh_psb_trim ? 1 : 0);
+	}
 	state.single_lane_subgroup =
 	    vertex_subgroup_fallback && program.stage == ShaderType::Vertex &&
 	    (program.info.subgroup_ballot || program.info.subgroup_shuffle ||

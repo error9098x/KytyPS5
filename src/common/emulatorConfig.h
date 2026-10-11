@@ -138,6 +138,16 @@ inline bool MeshScratchDescriptorEnabled() {
 	}();
 	return enabled;
 }
+// KYTY_MESH_PSB_TRIM=1|true (only with KYTY_MESH_SCRATCH_DESCRIPTOR=1): an emulated mesh compute
+// module whose guest program does not use DMA no longer declares PhysicalStorageBufferAddresses.
+// MoltenVK keys "useResource every BDA buffer on this encoder" on that capability.
+inline bool MeshPsbTrimEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_MESH_PSB_TRIM");
+		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+	}();
+	return enabled;
+}
 bool SyncRawImageBuffersEnabled();
 bool TessellationEnabled();
 bool TrophyEnabled();

@@ -733,8 +733,10 @@ void DefineModule(EmitterState& state) {
 	if (state.program.stage == ShaderType::Mesh && state.mesh_compute) {
 		state.mesh_guest_func = state.builder.AllocateId();
 		state.builder.RequireCapability(spv::CapabilityInt64);
-		state.builder.RequireCapability(spv::CapabilityPhysicalStorageBufferAddresses);
-		state.builder.RequireExtension("SPV_KHR_physical_storage_buffer");
+		if (!state.mesh_psb_trim) {
+			state.builder.RequireCapability(spv::CapabilityPhysicalStorageBufferAddresses);
+			state.builder.RequireExtension("SPV_KHR_physical_storage_buffer");
+		}
 	} else if (state.program.stage == ShaderType::Mesh) {
 		state.mesh_guest_func = state.builder.AllocateId();
 		state.builder.RequireCapability(spv::CapabilityMeshShadingEXT); // MeshShadingEXT
@@ -823,7 +825,8 @@ void DefineModule(EmitterState& state) {
 		state.builder.RequireExtension("SPV_KHR_fragment_shader_barycentric");
 	}
 	state.builder.RequireExtension("SPV_KHR_float_controls");
-	state.builder.AddMemoryModel(state.program.info.uses_dma || state.mesh_compute
+	state.builder.AddMemoryModel(state.program.info.uses_dma ||
+	                                     (state.mesh_compute && !state.mesh_psb_trim)
 	                                 ? spv::AddressingModelPhysicalStorageBuffer64
 	                                 : spv::AddressingModelLogical,
 	                             spv::MemoryModelGLSL450);
