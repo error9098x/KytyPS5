@@ -44,6 +44,10 @@ void CommandBuffer::Begin() {
 	auto result = buffer.begin(&begin_info);
 
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (StateCache::Enabled()) {
+		// A new recording session starts with no known graphics state.
+		m_state_shadow.Invalidate();
+	}
 }
 
 void CommandBuffer::End() const {

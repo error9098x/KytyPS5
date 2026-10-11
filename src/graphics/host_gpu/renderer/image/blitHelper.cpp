@@ -180,6 +180,11 @@ void BlitHelper::ReinterpretColorAsMsDepth(Image& source, Image& destination) {
 	                             &descriptor_write);
 	command.bindPipeline(vk::PipelineBindPoint::eGraphics,
 	                     GetPipeline({destination_info.samples, destination_info.pixel_format}));
+	if (StateCache::Enabled()) {
+		// This pipeline has its own (static) depth/stencil/blend state and binds a different
+		// graphics pipeline: everything the draw path shadowed is no longer known.
+		command_buffer.StateShadow().Invalidate();
+	}
 
 	const vk::Viewport viewport {0.0f,
 	                             0.0f,

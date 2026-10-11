@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/meshBatchPolicy.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/stateCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
@@ -171,6 +172,10 @@ public:
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
 	[[nodiscard]] HW::UserConfig&   GetUserConfig() const noexcept { return *m_user_config; }
 	[[nodiscard]] HW::Shader&       GetShaders() const noexcept { return *m_shaders; }
+	// KYTY_STATE_CACHE: graphics state already recorded into the current recording session.
+	[[nodiscard]] StateCache::GraphicsStateShadow& StateShadow() const noexcept {
+		return m_state_shadow;
+	}
 
 private:
 	explicit CommandBuffer(CommandScheduler& scheduler);
@@ -200,6 +205,7 @@ private:
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
 	HW::Shader*         m_shaders     = nullptr;
+	mutable StateCache::GraphicsStateShadow m_state_shadow;
 
 	friend class CommandScheduler;
 };
@@ -430,6 +436,7 @@ private:
 	MeshBatch::ScratchRing                m_mesh_ring;
 	MeshBatch::Stats                      m_mesh_stats;
 	bool                                  m_mesh_flushing = false;
+	StateCache::WrittenRanges             m_written_ranges;
 
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;

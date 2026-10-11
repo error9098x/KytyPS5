@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/host_gpu/renderer/pipeline/stateCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -1148,6 +1149,8 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		        (pipeline_bind_point == vk::PipelineBindPoint::eCompute &&
 		         shader_stage != vk::ShaderStageFlagBits::eCompute));
 	}
+	const bool spec_read_hoist = StateCache::SpecReadHoistEnabled();
+	bool       written_ranges_ready = false;
 	for (const auto* reader: prepared_bindings) {
 		const auto& reads = reader->runtime->resources->specialization_reads;
 		if (reads.empty()) continue;
@@ -1155,6 +1158,48 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			if (writer->runtime->program->has_address_writes) {
 				EXIT("scalar resource reads cannot be proven disjoint from shader address writes\n");
 			}
+		}
+		if (spec_read_hoist) {
+			// KYTY_SPEC_READ_HOIST: same checks, same order, written ranges collected once.
+			auto& ranges = m_written_ranges;
+			if (!written_ranges_ready) {
+				written_ranges_ready = true;
+				ranges.Clear();
+				for (const auto id: m_bound_images) {
+					const auto* image = m_context.GetTextureCache().m_slot_images.try_get(id);
+					if (image == nullptr ||
+					    (!image->binding.shader_write && !image->binding.is_target)) continue;
+					for (const auto written: {image->info.data, image->info.stencil,
+					                          image->info.metadata.range}) {
+						if (written.size != 0) ranges.images.push_back({written.address, written.size});
+					}
+				}
+				for (const auto* writer: prepared_bindings) {
+					const auto& program = *writer->runtime->program;
+					for (const auto& resource: program.info.buffers) {
+						if (!resource.written || resource.descriptor_index == UINT32_MAX) continue;
+						const auto& written = writer->buffer_sources[resource.descriptor_index];
+						if (written.size != 0) ranges.buffers.push_back({written.address, written.size});
+					}
+				}
+			}
+			auto& stats = StateCache::GetStats();
+			stats.spec_reads += reads.size();
+			stats.spec_bound += reads.size() * m_bound_images.size();
+			stats.spec_ranges += reads.size() * (ranges.images.size() + ranges.buffers.size());
+			for (const auto [address, size]: reads) {
+				for (const auto& written: ranges.images) {
+					if (ImageRangeOverlaps(address, size, written.address, written.size)) {
+						EXIT("scalar resource reads overlap an image or attachment write\n");
+					}
+				}
+				for (const auto& written: ranges.buffers) {
+					if (ImageRangeOverlaps(address, size, written.address, written.size)) {
+						EXIT("scalar resource reads overlap a shader buffer write\n");
+					}
+				}
+			}
+			continue;
 		}
 		for (const auto [address, size]: reads) {
 			for (const auto id: m_bound_images) {

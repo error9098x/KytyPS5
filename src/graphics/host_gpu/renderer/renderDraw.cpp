@@ -350,6 +350,22 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
 	}
 }
 
+// KYTY_STATE_CACHE=1 or KYTY_SPEC_READ_HOIST=1: one summary line per 32768 draws (same sink as
+// FrameTiming). Shadow counters stay 0 unless KYTY_STATE_CACHE=1; spec_* stay 0 unless the hoist is on.
+static void NoteStateCacheDraw(StateCache::GraphicsStateShadow& shadow) {
+	auto& s = StateCache::GetStats();
+	if ((++s.draws & 0x7fffu) != 0) {
+		return;
+	}
+	shadow.Flush();
+	LOGF("StateCache: draws=%" PRIu64 " emitted=%" PRIu64 " skipped=%" PRIu64
+	     " pipeline_binds=%" PRIu64 " pipeline_skips=%" PRIu64 " vertex_skips=%" PRIu64
+	     " index_skips=%" PRIu64 " invalidations=%" PRIu64 " spec_reads=%" PRIu64
+	     " spec_bound_pairs=%" PRIu64 " spec_range_pairs=%" PRIu64 "\n",
+	     s.draws, s.emitted, s.skipped, s.pipeline_binds, s.pipeline_skips, s.vertex_skips,
+	     s.index_skips, s.invalidations, s.spec_reads, s.spec_bound, s.spec_ranges);
+}
+
 // Cmd is vk::CommandBuffer (record now) or MeshDynamicState (KYTY_MESH_BATCH capture).
 template <typename Cmd>
 static void SetGraphicsDynamicParams(const CommandBuffer& buffer, Cmd& vk_buffer,
@@ -358,6 +374,9 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, Cmd& vk_buffer
 	KYTY_PROFILER_FUNCTION();
 
 	const auto& ctx = buffer.GetRegisters();
+	// KYTY_STATE_CACHE: skip a command only when the shadow proves the value is already recorded.
+	const bool  cache  = StateCache::Enabled();
+	auto&       shadow = buffer.StateShadow();
 	const auto&        vp  = ctx.GetScreenViewport();
 	const vk::Extent2D framebuffer_extent {rendering.width, rendering.height};
 	const auto& outputs = vs_input_info.stage.program->info.outputs;
@@ -419,8 +438,12 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, Cmd& vk_buffer
 			scissor.extent = {0, 0};
 		}
 	}
-	vk_buffer.setViewportWithCount(viewport_count, viewports.data());
-	vk_buffer.setScissorWithCount(viewport_count, scissors.data());
+	if (!cache || shadow.ViewportWithCount(viewport_count, viewports.data())) {
+		vk_buffer.setViewportWithCount(viewport_count, viewports.data());
+	}
+	if (!cache || shadow.ScissorWithCount(viewport_count, scissors.data())) {
+		vk_buffer.setScissorWithCount(viewport_count, scissors.data());
+	}
 
 	float line_width = ctx.GetLineWidth();
 	if (line_width != 1.0f) {
@@ -433,17 +456,34 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, Cmd& vk_buffer
 		}
 		line_width = 1.0f;
 	}
-	vk_buffer.setLineWidth(line_width);
+	if (!cache || shadow.LineWidth(line_width)) {
+		vk_buffer.setLineWidth(line_width);
+	}
 	const auto&      blend = ctx.GetBlendColor();
 	const std::array blend_constants {blend.red, blend.green, blend.blue, blend.alpha};
-	vk_buffer.setBlendConstants(blend_constants.data());
-	vk_buffer.setDepthTestEnable(depth.depth_test_enable ? VK_TRUE : VK_FALSE);
-	vk_buffer.setDepthWriteEnable(depth.depth_write_enable ? VK_TRUE : VK_FALSE);
-	vk_buffer.setDepthCompareOp(depth.depth_compare_op);
+	if (!cache || shadow.BlendConstants(blend_constants.data())) {
+		vk_buffer.setBlendConstants(blend_constants.data());
+	}
+	const vk::Bool32 depth_test_enable  = depth.depth_test_enable ? VK_TRUE : VK_FALSE;
+	const vk::Bool32 depth_write_enable = depth.depth_write_enable ? VK_TRUE : VK_FALSE;
+	if (!cache || shadow.DepthTestEnable(depth_test_enable)) {
+		vk_buffer.setDepthTestEnable(depth_test_enable);
+	}
+	if (!cache || shadow.DepthWriteEnable(depth_write_enable)) {
+		vk_buffer.setDepthWriteEnable(depth_write_enable);
+	}
+	if (!cache || shadow.DepthCompareOp(depth.depth_compare_op)) {
+		vk_buffer.setDepthCompareOp(depth.depth_compare_op);
+	}
 #if !defined(__APPLE__)
-	vk_buffer.setDepthBoundsTestEnable(depth.depth_bounds_test_enable ? VK_TRUE : VK_FALSE);
+	const vk::Bool32 depth_bounds_test_enable = depth.depth_bounds_test_enable ? VK_TRUE : VK_FALSE;
+	if (!cache || shadow.DepthBoundsTestEnable(depth_bounds_test_enable)) {
+		vk_buffer.setDepthBoundsTestEnable(depth_bounds_test_enable);
+	}
 	if (depth.depth_bounds_test_enable) {
-		vk_buffer.setDepthBounds(ctx.GetDepthBoundsMin(), ctx.GetDepthBoundsMax());
+		if (!cache || shadow.DepthBounds(ctx.GetDepthBoundsMin(), ctx.GetDepthBoundsMax())) {
+			vk_buffer.setDepthBounds(ctx.GetDepthBoundsMin(), ctx.GetDepthBoundsMax());
+		}
 	}
 #endif
 
@@ -452,7 +492,9 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, Cmd& vk_buffer
 	const bool  use_front         = mode.poly_offset_front_enable && !mode.cull_front;
 	const bool  use_back          = mode.poly_offset_back_enable && !mode.cull_back;
 	const bool  depth_bias_enable = use_front || use_back;
-	vk_buffer.setDepthBiasEnable(depth_bias_enable ? VK_TRUE : VK_FALSE);
+	if (!cache || shadow.DepthBiasEnable(depth_bias_enable ? VK_TRUE : VK_FALSE)) {
+		vk_buffer.setDepthBiasEnable(depth_bias_enable ? VK_TRUE : VK_FALSE);
+	}
 	if (depth_bias_enable) {
 		// Vulkan has one bias for both faces. Prefer a visible front face when both are enabled.
 		const float guest_constant_factor =
@@ -461,16 +503,30 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, Cmd& vk_buffer
 		    guest_constant_factor, poly_offset, depth.desc.view_info.format);
 		const float slope_factor =
 		    (use_front ? poly_offset.front_scale : poly_offset.back_scale) / 16.0f;
-		vk_buffer.setDepthBias(constant_factor, poly_offset.clamp, slope_factor);
+		if (!cache || shadow.DepthBias(constant_factor, poly_offset.clamp, slope_factor)) {
+			vk_buffer.setDepthBias(constant_factor, poly_offset.clamp, slope_factor);
+		}
 	}
 
-	vk_buffer.setStencilTestEnable(depth.stencil_test_enable ? VK_TRUE : VK_FALSE);
+	if (!cache || shadow.StencilTestEnable(depth.stencil_test_enable ? VK_TRUE : VK_FALSE)) {
+		vk_buffer.setStencilTestEnable(depth.stencil_test_enable ? VK_TRUE : VK_FALSE);
+	}
 	if (depth.stencil_test_enable) {
 		const auto set_stencil = [&](vk::StencilFaceFlagBits face, const vk::StencilOpState& state) {
-			vk_buffer.setStencilOp(face, state.failOp, state.passOp, state.depthFailOp, state.compareOp);
-			vk_buffer.setStencilCompareMask(face, state.compareMask);
-			vk_buffer.setStencilWriteMask(face, state.writeMask);
-			vk_buffer.setStencilReference(face, state.reference);
+			if (!cache ||
+			    shadow.StencilOp(face, state.failOp, state.passOp, state.depthFailOp, state.compareOp)) {
+				vk_buffer.setStencilOp(face, state.failOp, state.passOp, state.depthFailOp,
+				                       state.compareOp);
+			}
+			if (!cache || shadow.StencilCompareMask(face, state.compareMask)) {
+				vk_buffer.setStencilCompareMask(face, state.compareMask);
+			}
+			if (!cache || shadow.StencilWriteMask(face, state.writeMask)) {
+				vk_buffer.setStencilWriteMask(face, state.writeMask);
+			}
+			if (!cache || shadow.StencilReference(face, state.reference)) {
+				vk_buffer.setStencilReference(face, state.reference);
+			}
 		};
 		set_stencil(vk::StencilFaceFlagBits::eFront, depth.stencil_front);
 		set_stencil(vk::StencilFaceFlagBits::eBack, depth.stencil_back);
@@ -484,7 +540,8 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, Cmd& vk_buffer
 	for (uint32_t slot = 0; slot < rendering.num_color_attachments; slot++) {
 		enable[slot] = rendering.color_attachments[slot].image_view != nullptr;
 	}
-	if (rendering.num_color_attachments != 0) {
+	if (rendering.num_color_attachments != 0 &&
+	    (!cache || shadow.ColorWriteEnable(rendering.num_color_attachments, enable))) {
 		vk_buffer.setColorWriteEnableEXT(rendering.num_color_attachments, enable);
 	}
 #endif
@@ -1054,22 +1111,30 @@ static PreparedIndexBuffer PrepareIndexBuffer(CommandBuffer&               buffe
 }
 
 static void CommitVertexBuffers(vk::CommandBuffer            vk_buffer,
-                                const PreparedVertexBuffers& prepared) {
+                                const PreparedVertexBuffers& prepared,
+                                StateCache::GraphicsStateShadow& shadow) {
 	for (uint32_t i = 0; i < prepared.count; i++) {
 		EXIT_IF(prepared.buffers[i] == nullptr);
 	}
-	if (prepared.count != 0) {
+	if (prepared.count != 0 &&
+	    (!StateCache::Enabled() ||
+	     shadow.VertexBuffers(prepared.count, prepared.buffers.data(), prepared.offsets.data(),
+	                          prepared.sizes.data()))) {
 		// Guest descriptor bounds must survive allocation merging in the cache.
 		vk_buffer.bindVertexBuffers2(0, prepared.count, prepared.buffers.data(),
 		                             prepared.offsets.data(), prepared.sizes.data(), nullptr);
 	}
 }
 
-static void CommitIndexBuffer(vk::CommandBuffer vk_buffer, const PreparedIndexBuffer& prepared) {
+static void CommitIndexBuffer(vk::CommandBuffer vk_buffer, const PreparedIndexBuffer& prepared,
+                              StateCache::GraphicsStateShadow& shadow) {
 	if (prepared.buffer == nullptr) {
 		return;
 	}
-	vk_buffer.bindIndexBuffer(prepared.buffer, prepared.offset, prepared.type);
+	if (!StateCache::Enabled() ||
+	    shadow.IndexBuffer(prepared.buffer, prepared.offset, prepared.type)) {
+		vk_buffer.bindIndexBuffer(prepared.buffer, prepared.offset, prepared.type);
+	}
 }
 
 static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo& draw,
@@ -1233,7 +1298,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	auto vk_buffer = buffer.RawHandle();
 	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u);
 	if (!mesh_active) {
-		CommitVertexBuffers(vk_buffer, vertex_bindings);
+		CommitVertexBuffers(vk_buffer, vertex_bindings, buffer.StateShadow());
 	}
 	if (state.ps_active && !draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
@@ -1268,11 +1333,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                            vk::ShaderStageFlagBits::eFragment,
 		                        0, sizeof(draw_data), draw_data);
 	} else {
-		CommitIndexBuffer(vk_buffer, index_binding);
+		CommitIndexBuffer(vk_buffer, index_binding, buffer.StateShadow());
 	}
 
 	SetGraphicsDynamicParams(buffer, vk_buffer, vertex_stages.back(), state.depth_info, rendering);
-	if (m_context.GetGraphics().attachment_feedback_loop_enabled) {
+	if (m_context.GetGraphics().attachment_feedback_loop_enabled &&
+	    (!StateCache::Enabled() || buffer.StateShadow().FeedbackLoop(feedback_aspects))) {
 		vk_buffer.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
 	}
 
@@ -1281,7 +1347,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u);
 	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
-	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	if (!StateCache::Enabled() || buffer.StateShadow().Pipeline(pipeline.pipeline)) {
+		vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	}
+	if (StateCache::Enabled() || StateCache::SpecReadHoistEnabled()) {
+		NoteStateCacheDraw(buffer.StateShadow());
+	}
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}
@@ -1881,11 +1952,17 @@ void RenderExecutor::ExecuteEmulatedMeshDraw(CommandBuffer& buffer, const DrawCa
 		                        draw_data.data());
 		SetGraphicsDynamicParams(buffer, vk_buffer, state.vertex_info[0], state.depth_info,
 		                         rendering);
-		if (m_context.GetGraphics().attachment_feedback_loop_enabled) {
+		if (m_context.GetGraphics().attachment_feedback_loop_enabled &&
+		    (!StateCache::Enabled() || buffer.StateShadow().FeedbackLoop(feedback_aspects))) {
 			vk_buffer.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
 		}
 		scheduler.BeginRendering(rendering);
-		vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+		if (!StateCache::Enabled() || buffer.StateShadow().Pipeline(pipeline.pipeline)) {
+			vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+		}
+		if (StateCache::Enabled() || StateCache::SpecReadHoistEnabled()) {
+			NoteStateCacheDraw(buffer.StateShadow());
+		}
 		const uint64_t vertex_count =
 		    uint64_t {groups} * instances * mesh.max_primitives * 3u;
 		EXIT_IF(vertex_count > UINT32_MAX);
