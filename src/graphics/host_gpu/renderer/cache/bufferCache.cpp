@@ -463,6 +463,11 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 }
 
 BufferCache::~BufferCache() {
+	// Caller-side readbacks still pending at teardown: nobody waits for their bytes any more.
+	for (const auto& entry: m_caller_readbacks) {
+		m_memory_tracker.UnmarkRegionAsGpuModified(entry->start, entry->size);
+	}
+	m_caller_readbacks.clear();
 	if (!m_gpu_modified_ranges.Empty()) {
 		EXIT("BufferCache: destroyed with pending GPU-modified ranges\n");
 	}
@@ -994,6 +999,11 @@ void BufferCache::RunGarbageCollector() {
 	m_lru_cache.ForEachItemBelow(tick - age, [&](BufferId id) {
 		auto& buffer = m_slot_buffers[id];
 		EXIT_IF(buffer.is_deleted);
+		if (!m_caller_readbacks.empty()) {
+			// Finish caller-side readbacks first: their pages are still GPU-dirty in the tracker
+			// but already left m_gpu_modified_ranges, so a download here would find nothing.
+			CompleteCallerReadbacks(buffer.CpuAddress(), buffer.Size());
+		}
 		m_memory_tracker.ValidateGpuDirtyOwnership(m_gpu_modified_ranges, buffer.CpuAddress(),
 		                                           buffer.Size(), "garbage collection");
 		const bool dirty = m_memory_tracker.IsRegionGpuModified(buffer.CpuAddress(), buffer.Size());
