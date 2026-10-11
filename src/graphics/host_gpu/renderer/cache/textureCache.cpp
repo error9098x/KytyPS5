@@ -1971,7 +1971,9 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 	}
 	const uint32_t width = std::max(backing.extent.width >> mip, 1u);
 	const uint32_t height = std::max(backing.extent.height >> mip, 1u);
-	const uint64_t pixels = static_cast<uint64_t>(width) * height;
+	// 3D (generic formats): read back the whole volume and report per-slice coverage.
+	const uint32_t depth3d = is_3d ? std::max(backing.extent.depth >> mip, 1u) : 1u;
+	const uint64_t pixels = static_cast<uint64_t>(width) * height * depth3d;
 	if (pixels == 0 || pixels > (64u * 1024u * 1024u) / bpp) {
 		LOGF("InternalFrameStats: sample=%u skip oversized extent=%ux%u\n", sample, width, height);
 		return;
@@ -1987,10 +1989,7 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 	vk::BufferImageCopy copy {};
 	copy.bufferOffset = offset;
 	copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, mip, is_3d ? 0u : layer, 1};
-	copy.imageExtent = {width, height, 1};
-	if (is_3d) {
-		copy.imageOffset.z = static_cast<int32_t>(std::max(backing.extent.depth >> mip, 1u) / 2);
-	}
+	copy.imageExtent = {width, height, depth3d};
 	image.Download(std::span {&copy, 1}, download.Handle(), offset, size);
 	vk::BufferMemoryBarrier barrier {};
 	barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
@@ -2015,6 +2014,8 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 		std::array<float, 4>  mx {};
 		uint64_t              nonzero = 0;
 		const auto*           base    = static_cast<const uint8_t*>(mapped);
+		std::vector<uint32_t> slice_nonzero(depth3d, 0u);
+		const uint64_t        slice_pixels = static_cast<uint64_t>(width) * height;
 		for (uint64_t i = 0; i < pixels; ++i) {
 			std::array<float, 4> v {};
 			if (rgba32f) {
@@ -2043,12 +2044,21 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 				any |= (k < 3 || !b10g11r11) && v[k] != 0.0f;
 			}
 			nonzero += any;
+			slice_nonzero[i / slice_pixels] += any ? 1u : 0u;
+		}
+		std::string slices;
+		if (is_3d) {
+			uint32_t lit = 0;
+			for (uint32_t z = 0; z < depth3d; z++) lit += slice_nonzero[z] != 0 ? 1u : 0u;
+			slices = " slices_nonzero=" + std::to_string(lit) + "/" + std::to_string(depth3d) +
+			         " slice0=" + std::to_string(slice_nonzero[0]) +
+			         " slice_last=" + std::to_string(slice_nonzero[depth3d - 1]);
 		}
 		LOGF("InternalFrameStats: sample=%u role=%s address=0x%016" PRIx64 " format=%s%s extent=%ux%u "
-		     "mip=%u layer=%u nonzero=%.4f%% avg=(%.4f,%.4f,%.4f,%.4f) max=(%.4f,%.4f,%.4f,%.4f) "
+		     "mip=%u layer=%u nonzero=%.4f%%%s avg=(%.4f,%.4f,%.4f,%.4f) max=(%.4f,%.4f,%.4f,%.4f) "
 		     "vs=0x%016" PRIx64 " ps=0x%016" PRIx64 "\n", sample, role, image.info.data.address,
-		     vk::to_string(backing.format).c_str(), is_3d ? "(3d-mid-slice)" : "", width, height,
-		     mip, layer, 100.0 * nonzero / pixels, sum[0] / pixels, sum[1] / pixels,
+		     vk::to_string(backing.format).c_str(), is_3d ? "(3d)" : "", width, height,
+		     mip, layer, 100.0 * nonzero / pixels, slices.c_str(), sum[0] / pixels, sum[1] / pixels,
 		     sum[2] / pixels, sum[3] / pixels, mx[0], mx[1], mx[2], mx[3], vertex_hash, pixel_hash);
 		return;
 	}
