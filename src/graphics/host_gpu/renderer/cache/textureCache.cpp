@@ -25,6 +25,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
@@ -176,6 +177,30 @@ static bool TitleDefaultReadbackLinearImages() {
 	return enabled;
 }
 
+// Opt-in texture eviction flags, parsed once, strictly =1|true.
+static bool EvictEnvFlag(const char* name) {
+	const char* value = std::getenv(name);
+	return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+}
+// KYTY_EVICT_SMART=1: byte-targeted LRU reclaim with hysteresis above the critical threshold
+// (see RunSmartReclaim); below it the default collector is unchanged.
+static bool EvictSmartEnabled() {
+	static const bool enabled = EvictEnvFlag("KYTY_EVICT_SMART");
+	return enabled;
+}
+// KYTY_EVICT_ALIAS=1 (only with KYTY_EVICT_SMART=1): also reclaim idle GPU-written tiled images
+// whose whole guest range was GPU-written later by another cached image (stale aliases).
+static bool EvictAliasEnabled() {
+	static const bool enabled = EvictSmartEnabled() && EvictEnvFlag("KYTY_EVICT_ALIAS");
+	return enabled;
+}
+// KYTY_EVICT_STATS=1: measure-only. Logs an EvictStats line every 2 s (cache census by eviction
+// class, LRU head blocking, frees, thrash re-creations). Works with either policy.
+static bool EvictStatsEnabled() {
+	static const bool enabled = EvictEnvFlag("KYTY_EVICT_STATS");
+	return enabled;
+}
+
 TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler,
                            PageManager& page_manager, BufferCache& buffer_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_page_manager(page_manager),
@@ -281,6 +306,9 @@ void TextureCache::RegisterImage(ImageId id) {
 	image.registered = true;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
 	m_total_used_memory += image.AccountedSize();
+	if (EvictSmartEnabled() || EvictStatsEnabled()) {
+		NoteImageRegistered(image);
+	}
 }
 
 void TextureCache::UnregisterImage(ImageId id) {
@@ -2458,9 +2486,17 @@ static bool GcTuningEnabled() {
 
 void TextureCache::RunGarbageCollector() {
 	std::scoped_lock lock {m_lock};
+	const bool       stats = EvictStatsEnabled();
 	const uint64_t   tick = m_gc_tick++;
+	if (stats) {
+		m_evict_stats.gc_calls++;
+		MaybeLogEvictStats();
+	}
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
+	}
+	if (EvictSmartEnabled() && RunSmartReclaim(tick)) {
+		return;
 	}
 	if (m_total_used_memory < m_trigger_gc_memory) {
 		return;
@@ -2482,6 +2518,9 @@ void TextureCache::RunGarbageCollector() {
 			candidates.push_back(id);
 			return candidates.size() == deletions;
 		});
+		if (stats) {
+			m_evict_stats.scanned += candidates.size();
+		}
 		for (const auto id: candidates) {
 			if (deletions == 0) {
 				break;
@@ -2489,19 +2528,41 @@ void TextureCache::RunGarbageCollector() {
 			--deletions;
 			auto owner = m_slot_images.try_get(id);
 			if (owner == nullptr || !owner->registered || owner->depth_id) {
+				if (stats) {
+					m_evict_stats.budget_burned++;
+					m_evict_stats.skipped_other++;
+				}
 				continue;
 			}
 			if (owner->IsGpuModified()) {
 				const bool safe = owner->SafeToDownload();
 				if (safe && owner->info.IsTiled()) {
+					if (stats) {
+						m_evict_stats.budget_burned++;
+						m_evict_stats.skipped_tiled++;
+					}
 					continue;
 				}
 				if (safe && !pressured) {
+					if (stats) {
+						m_evict_stats.budget_burned++;
+						m_evict_stats.skipped_other++;
+					}
 					continue;
 				}
 				if (safe && !DownloadImageMemory(id)) {
+					if (stats) {
+						m_evict_stats.budget_burned++;
+						m_evict_stats.skipped_other++;
+					}
 					continue;
 				}
+				if (stats && safe) {
+					m_evict_stats.dl_evict++;
+				}
+			}
+			if (stats) {
+				NoteGcFree(owner->info.data.address, owner->AccountedSize(), false);
 			}
 			FreeImage(id);
 			if (tuning && m_graphics.CanReportMemoryUsage() && (++freed % 8) == 0) {
@@ -2521,6 +2582,289 @@ void TextureCache::RunGarbageCollector() {
 	if (m_total_used_memory >= m_critical_gc_memory) {
 		collect(true);
 	}
+}
+
+TextureCache::EvictClass TextureCache::ClassifyForEviction(const Image& image) const {
+	if (!image.registered) {
+		return EvictClass::Unregistered;
+	}
+	if (image.depth_id) {
+		return EvictClass::StencilAssoc;
+	}
+	if (!image.IsGpuModified()) {
+		return EvictClass::Clean;
+	}
+	if (!image.SafeToDownload()) {
+		return EvictClass::UnsafeGpu;
+	}
+	return image.info.IsTiled() ? EvictClass::TiledGpuSafe : EvictClass::LinearGpuSafe;
+}
+
+// A GPU-written image A is a stale alias when another registered, GPU-written, non-association
+// image B covers A's whole guest range and was GPU-written after A's last GPU write. A's
+// contents are then older than what the guest last produced in that memory, so A can never be
+// correctly downloaded (it would overwrite B's newer bytes) and freeing it without a download
+// loses nothing the emulator could ever publish. Any image covering A's range has A's first page
+// in its page list, so only that page's owners are inspected (O(owners on one page)).
+bool TextureCache::IsStaleAlias(ImageId id, const Image& image) const {
+	if (image.gpu_write_seq == 0 || image.info.data.Empty()) {
+		return false;
+	}
+	const auto* owners =
+	    m_image_page_table.Find(image.info.data.address >> ImagePageTable::kPageBits);
+	if (owners == nullptr) {
+		return false;
+	}
+	const uint64_t begin = image.info.data.address;
+	const uint64_t end   = image.info.data.End();
+	bool           stale = false;
+	owners->ForEach([&](ImageId other_id) {
+		if (stale || other_id == id) {
+			return;
+		}
+		const auto* other = m_slot_images.try_get(other_id);
+		if (other == nullptr || !other->registered || other->depth_id ||
+		    other->backing.image == nullptr || !other->IsGpuModified()) {
+			return;
+		}
+		if (other->gpu_write_seq > image.gpu_write_seq && other->info.data.address <= begin &&
+		    other->info.data.End() >= end) {
+			stale = true;
+		}
+	});
+	return stale;
+}
+
+void TextureCache::NoteGcFree(uint64_t address, uint64_t bytes, bool track_pending) {
+	m_evict_stats.freed++;
+	m_evict_stats.freed_bytes += bytes;
+	if (m_evict_recent.size() >= 16384) {
+		m_evict_recent.clear();
+	}
+	m_evict_recent[address] = m_gc_tick;
+	if (track_pending && bytes != 0 && m_scheduler.Active()) {
+		// DeleteImage deferred the native destroy to this tick; this operation is queued after it
+		// on the same tick (FIFO), so the pending count drops exactly when the memory is released.
+		m_evict_pending_bytes.fetch_add(bytes, std::memory_order_relaxed);
+		m_scheduler.DeferOperation([this, bytes] {
+			m_evict_pending_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+		});
+	}
+}
+
+void TextureCache::NoteImageRegistered(const Image& image) {
+	const auto found = m_evict_recent.find(image.info.data.address);
+	if (found == m_evict_recent.end()) {
+		return;
+	}
+	// Re-created within 1024 GC ticks of being evicted: the eviction cost a re-upload.
+	if (m_gc_tick - found->second <= 1024) {
+		m_evict_stats.thrash++;
+		m_evict_stats.thrash_bytes += image.AccountedSize();
+		m_evict_window_thrash++;
+	}
+	m_evict_recent.erase(found);
+}
+
+void TextureCache::MaybeLogEvictStats() {
+	if (!EvictStatsEnabled()) {
+		return;
+	}
+	const auto now_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                                              std::chrono::steady_clock::now().time_since_epoch())
+	                                              .count());
+	if (m_evict_stats_last_us == 0) {
+		m_evict_stats_last_us = now_us;
+		return;
+	}
+	if (now_us - m_evict_stats_last_us < 2'000'000) {
+		return;
+	}
+	const uint64_t dt_ms = (now_us - m_evict_stats_last_us) / 1000;
+	m_evict_stats_last_us = now_us;
+	constexpr int kClasses = 6;
+	std::array<uint64_t, kClasses> count {};
+	std::array<uint64_t, kClasses> bytes {};
+	uint64_t idle_tiled = 0, idle_tiled_bytes = 0, alias = 0, alias_bytes = 0;
+	const uint64_t idle_tick = m_gc_tick > 160 ? m_gc_tick - 160 : 0;
+	m_slot_images.ForEach([&](ImageId id, const Image& image) {
+		const auto cls = static_cast<int>(ClassifyForEviction(image));
+		count[cls]++;
+		bytes[cls] += image.AccountedSize();
+		if (ClassifyForEviction(image) == EvictClass::TiledGpuSafe) {
+			if (IsStaleAlias(id, image)) {
+				alias++;
+				alias_bytes += image.AccountedSize();
+			}
+		}
+	});
+	// How many of the 40 oldest entries idle >= 160 GC ticks the default policy can never free
+	// (it spends its per-call deletion budget on them, then stops).
+	uint64_t head = 0, head_blocked = 0;
+	m_lru_cache.ForEachItemBelow(idle_tick, [&](ImageId id) {
+		const auto* image = m_slot_images.try_get(id);
+		if (image != nullptr) {
+			const auto cls = ClassifyForEviction(*image);
+			if (cls == EvictClass::TiledGpuSafe) {
+				idle_tiled++;
+				idle_tiled_bytes += image->AccountedSize();
+			}
+			if (head < 40) {
+				head_blocked += (cls == EvictClass::TiledGpuSafe || cls == EvictClass::StencilAssoc)
+				                    ? 1
+				                    : 0;
+				head++;
+			}
+		}
+		return false;
+	});
+	constexpr uint64_t MiB = 1024 * 1024;
+	const auto&        st  = m_evict_stats;
+	LOGF("EvictStats: dt_ms=%" PRIu64 " policy=%s gc_calls=%" PRIu64 " usage_mib=%" PRIu64
+	     " pending_mib=%" PRIu64 " reclaim=%d age=%" PRIu64 " clean=%" PRIu64 "/%" PRIu64
+	     " unsafe=%" PRIu64 "/%" PRIu64 " linear_gpu=%" PRIu64 "/%" PRIu64 " tiled_gpu=%" PRIu64
+	     "/%" PRIu64 " stencil_assoc=%" PRIu64 " idle160_tiled_gpu=%" PRIu64 "/%" PRIu64
+	     " stale_alias=%" PRIu64 "/%" PRIu64 " head40_blocked=%" PRIu64 "/%" PRIu64
+	     " scanned=%" PRIu64 " freed=%" PRIu64 "/%" PRIu64 " dl_evict=%" PRIu64
+	     " alias_free=%" PRIu64 "/%" PRIu64 " skip_tiled=%" PRIu64 " skip_other=%" PRIu64
+	     " budget_burned=%" PRIu64 " thrash=%" PRIu64 "/%" PRIu64 "\n",
+	     dt_ms, EvictSmartEnabled() ? (EvictAliasEnabled() ? "smart+alias" : "smart") : "default",
+	     st.gc_calls, m_total_used_memory / MiB,
+	     m_evict_pending_bytes.load(std::memory_order_relaxed) / MiB, m_evict_reclaiming ? 1 : 0,
+	     EvictSmartEnabled() ? m_evict_age : uint64_t {0}, count[0], bytes[0] / MiB, count[1],
+	     bytes[1] / MiB, count[2], bytes[2] / MiB, count[3], bytes[3] / MiB, count[4], idle_tiled,
+	     idle_tiled_bytes / MiB, alias, alias_bytes / MiB, head_blocked, head, st.scanned, st.freed,
+	     st.freed_bytes / MiB, st.dl_evict, st.alias_free, st.alias_free_bytes / MiB,
+	     st.skipped_tiled, st.skipped_other, st.budget_burned, st.thrash, st.thrash_bytes / MiB);
+	m_evict_stats = {};
+}
+
+// KYTY_EVICT_SMART=1 (opt-in). Below the critical threshold the default collector runs unchanged.
+// From the critical threshold until usage is back at a low watermark it is replaced by a reclaim
+// pass with the same per-image rules as the default (which images may be freed, download of linear
+// GPU images, no download of tiled ones), but a different victim selection:
+//  1. Skip, don't spend: entries the rules will not free (GPU-written tiled images, stencil
+//     associations) are skipped without consuming the per-call budget. The default collects the
+//     N oldest entries (N = 20, then 40) first and spends one unit of budget per entry, so once N
+//     never-touched unevictable images sit at the LRU head it frees nothing, call after call.
+//  2. Bytes, not counts: free the oldest evictable images until the planned bytes reach
+//     (effective usage - low watermark), capped at 512 MiB and 128 images per call.
+//  3. Hysteresis: reclaim starts at the critical threshold and continues until the effective
+//     usage falls to low = critical - min(512 MiB, (critical - pressure) / 2). Effective usage
+//     subtracts bytes already freed whose native destroy is still deferred to their tick, so
+//     collections before the GPU retires them do not over-evict.
+//  4. Adaptive age: starts at the default's 160 GC ticks; halves (floor 32) when more than half
+//     of a 256-tick window's reclaim passes fall short of their byte goal; doubles back (cap 160)
+//     when GC-evicted addresses are re-created within 1024 ticks more than 4 times in a window.
+// Returns false (default collector runs) when not reclaiming.
+bool TextureCache::RunSmartReclaim(uint64_t tick) {
+	static constexpr uint64_t MiB                   = 1024 * 1024;
+	static constexpr uint64_t kMaxEvictBytesPerCall = 512 * MiB;
+	static constexpr size_t   kMaxEvictCount        = 128;
+	static constexpr size_t   kMaxEvictScan         = 1024;
+	static constexpr size_t   kMaxDownloadsPerCall  = 4; // bounds download-ring use per pass
+	static constexpr uint64_t kAgeMin = 32, kAgeMax = 160, kAgeWindow = 256;
+
+	const uint64_t pending =
+	    std::min(m_evict_pending_bytes.load(std::memory_order_relaxed), m_total_used_memory);
+	const uint64_t effective = m_total_used_memory - pending;
+	const uint64_t band      = m_critical_gc_memory > m_pressure_gc_memory
+	                               ? (m_critical_gc_memory - m_pressure_gc_memory) / 2
+	                               : 0;
+	const uint64_t low       = m_critical_gc_memory - std::min<uint64_t>(512 * MiB, band);
+	if (effective >= m_critical_gc_memory) {
+		m_evict_reclaiming = true;
+	} else if (effective <= low) {
+		m_evict_reclaiming = false;
+	}
+	if (tick - m_evict_window_start >= kAgeWindow) {
+		if (m_evict_window_thrash > 4) {
+			m_evict_age = std::min(m_evict_age * 2, kAgeMax);
+		} else if (m_evict_window_short * 2 > m_evict_window_calls) {
+			m_evict_age = std::max(m_evict_age / 2, kAgeMin);
+		}
+		m_evict_window_thrash = 0;
+		m_evict_window_short  = 0;
+		m_evict_window_calls  = 0;
+		m_evict_window_start  = tick;
+	}
+	if (!m_evict_reclaiming) {
+		return false;
+	}
+	const uint64_t byte_goal = std::min(effective > low ? effective - low : 0, kMaxEvictBytesPerCall);
+	const uint64_t age       = std::min(m_evict_age, tick);
+	const bool     alias     = EvictAliasEnabled();
+
+	std::vector<ImageId> victims;
+	victims.reserve(kMaxEvictCount);
+	uint64_t planned   = 0;
+	size_t   scanned   = 0;
+	size_t   downloads = 0;
+	// Deleting depth recursively deletes its stencil association, so finish the traversal first.
+	m_lru_cache.ForEachItemBelow(tick - age, [&](ImageId id) {
+		if (++scanned > kMaxEvictScan) {
+			return true;
+		}
+		const auto* image = m_slot_images.try_get(id);
+		if (image == nullptr) {
+			return false;
+		}
+		switch (ClassifyForEviction(*image)) {
+			case EvictClass::Clean:
+			case EvictClass::UnsafeGpu: break;
+			case EvictClass::LinearGpuSafe:
+				if (downloads == kMaxDownloadsPerCall) {
+					m_evict_stats.skipped_other++;
+					return false;
+				}
+				downloads++;
+				break;
+			case EvictClass::TiledGpuSafe:
+				if (!alias || !IsStaleAlias(id, *image)) {
+					m_evict_stats.skipped_tiled++;
+					return false;
+				}
+				break;
+			default: m_evict_stats.skipped_other++; return false;
+		}
+		victims.push_back(id);
+		planned += image->AccountedSize();
+		return victims.size() >= kMaxEvictCount || planned >= byte_goal;
+	});
+	m_evict_stats.scanned += std::min(scanned, kMaxEvictScan);
+	m_evict_window_calls++;
+	m_evict_window_short += planned < byte_goal ? 1 : 0;
+
+	for (const auto id: victims) {
+		auto* owner = m_slot_images.try_get(id);
+		if (owner == nullptr || !owner->registered || owner->depth_id) {
+			continue;
+		}
+		const auto     cls     = ClassifyForEviction(*owner);
+		const uint64_t bytes   = owner->AccountedSize();
+		const uint64_t address = owner->info.data.address;
+		if (cls == EvictClass::LinearGpuSafe) {
+			// Same as the default under pressure (reclaim implies usage >= pressure threshold).
+			if (!DownloadImageMemory(id)) {
+				m_evict_stats.skipped_other++;
+				continue;
+			}
+			m_evict_stats.dl_evict++;
+		} else if (cls == EvictClass::TiledGpuSafe) {
+			// Re-check: an earlier victim in this batch may have been the newer covering image.
+			if (!alias || !IsStaleAlias(id, *owner)) {
+				m_evict_stats.skipped_tiled++;
+				continue;
+			}
+			m_evict_stats.alias_free++;
+			m_evict_stats.alias_free_bytes += bytes;
+		} else if (cls != EvictClass::Clean && cls != EvictClass::UnsafeGpu) {
+			continue;
+		}
+		FreeImage(id);
+		NoteGcFree(address, bytes, true);
+	}
+	return true;
 }
 
 void TextureCache::ProcessDownloadImages() {

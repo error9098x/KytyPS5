@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 
+#include <atomic>
 #include <compare>
 #include <limits>
 #include <optional>
@@ -118,7 +119,11 @@ public:
 	}
 
 	[[nodiscard]] bool IsGpuModified() const noexcept { return m_gpu_modified; }
-	void               MarkGpuModified() noexcept { m_gpu_modified = true; }
+	void               MarkGpuModified() noexcept {
+		m_gpu_modified = true;
+		// Global GPU-write order, read only by the opt-in KYTY_EVICT_ALIAS reclaim (inert otherwise).
+		gpu_write_seq = s_gpu_write_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+	}
 	void               ClearGpuModified() noexcept { m_gpu_modified = false; }
 
 	[[nodiscard]] bool IsBufferModified() const noexcept { return m_buffer_modified; }
@@ -158,6 +163,7 @@ public:
 	// view that is not recorded yet. A retired image is destroyed only once this tick is free.
 	static constexpr uint64_t PinnedTick    = ~uint64_t {0};
 	uint64_t                  last_use_tick = 0;
+	uint64_t         gpu_write_seq      = 0;
 
 private:
 	friend struct ImageTestAccess;
@@ -167,6 +173,8 @@ private:
 	                                                   uint64_t capacity) noexcept;
 	[[nodiscard]] static std::pair<uint32_t, uint32_t>
 	SanitizeCopyLayers(const Image& source, const Image& destination, uint32_t depth);
+
+	static inline std::atomic<uint64_t> s_gpu_write_counter {0};
 
 	GraphicContext&   m_graphics;
 	CommandScheduler& m_scheduler;

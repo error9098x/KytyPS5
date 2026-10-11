@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
+#include <atomic>
 #include <map>
 #include <type_traits>
 #include <unordered_map>
@@ -171,6 +172,40 @@ private:
 
 	void               InvalidateCpuAliases(uint64_t address, uint64_t size);
 	[[nodiscard]] bool DownloadImageMemory(ImageId id);
+
+	// KYTY_EVICT_SMART / KYTY_EVICT_ALIAS / KYTY_EVICT_STATS (all opt-in, see textureCache.cpp).
+	enum class EvictClass : uint8_t {
+		Clean,         // not GPU-modified: freed as-is
+		UnsafeGpu,     // GPU-modified but guest memory is newer: freed as-is (default policy too)
+		LinearGpuSafe, // GPU-modified, linear: download, then free (only when pressured)
+		TiledGpuSafe,  // GPU-modified, tiled: never evicted by the default policy
+		StencilAssoc,  // stencil association: freed with its depth image
+		Unregistered,
+	};
+	[[nodiscard]] EvictClass ClassifyForEviction(const Image& image) const;
+	[[nodiscard]] bool       IsStaleAlias(ImageId id, const Image& image) const;
+	// Returns false when not reclaiming; the caller then runs the default collector unchanged.
+	[[nodiscard]] bool       RunSmartReclaim(uint64_t tick);
+	void                     NoteGcFree(uint64_t address, uint64_t bytes, bool track_pending);
+	void                     NoteImageRegistered(const Image& image);
+	void                     MaybeLogEvictStats();
+
+	struct EvictStats {
+		uint64_t gc_calls = 0, scanned = 0, freed = 0, freed_bytes = 0, dl_evict = 0;
+		uint64_t alias_free = 0, alias_free_bytes = 0, skipped_tiled = 0, skipped_other = 0;
+		uint64_t thrash = 0, thrash_bytes = 0, budget_burned = 0;
+	};
+	// Bytes of GC-freed images whose native memory is released only when their tick completes.
+	std::atomic<uint64_t>                  m_evict_pending_bytes {0};
+	bool                                   m_evict_reclaiming    = false;
+	uint64_t                               m_evict_age           = 160;
+	uint64_t                               m_evict_window_thrash = 0;
+	uint64_t                               m_evict_window_short  = 0;
+	uint64_t                               m_evict_window_calls  = 0;
+	uint64_t                               m_evict_window_start  = 0;
+	std::unordered_map<uint64_t, uint64_t> m_evict_recent; // guest address -> GC tick of eviction
+	EvictStats                             m_evict_stats;
+	uint64_t                               m_evict_stats_last_us = 0;
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
