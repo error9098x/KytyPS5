@@ -244,7 +244,7 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 	    sc.bottom);
 
 	LogMrtState(draw_name, buffer, ps_input_info);
-	if (std::getenv("KYTY_DRAW_RESOURCE_STATS") != nullptr &&
+	if (([] { static const bool kyty_env_set = std::getenv("KYTY_DRAW_RESOURCE_STATS") != nullptr; return kyty_env_set; }()) &&
 	    ps_input_info.stage.resources != nullptr) {
 		const auto& resources = *ps_input_info.stage.resources;
 		for (size_t i = 0; i < resources.images.size(); ++i) {
@@ -378,7 +378,7 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 			viewport.y      = guest.yoffset - guest.yscale;
 		viewport.width  = guest.xscale * 2.0f;
 		viewport.height = guest.yscale * 2.0f;
-		if (std::getenv("KYTY_FORCE_POSITIVE_VIEWPORT") != nullptr && viewport.height < 0.0f) {
+		if (([] { static const bool kyty_env_set = std::getenv("KYTY_FORCE_POSITIVE_VIEWPORT") != nullptr; return kyty_env_set; }()) && viewport.height < 0.0f) {
 			viewport.y      = 0.0f;
 			viewport.height = -viewport.height;
 		}
@@ -1041,7 +1041,7 @@ static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo
 	}
 
 	if (!draw.IsIndexed() && !Prospero::IsRectList(buffer.GetUserConfig().GetPrimType()) &&
-	    std::getenv("KYTY_DRAW_INPUT_STATS") == nullptr) {
+	    !([] { static const bool kyty_env_set = std::getenv("KYTY_DRAW_INPUT_STATS") != nullptr; return kyty_env_set; }())) {
 		return;
 	}
 
@@ -1675,7 +1675,7 @@ void RenderExecutor::ExecuteEmulatedMeshDraw(CommandBuffer& buffer, const DrawCa
 
 	// Diagnostics: KYTY_MESH_EMU_SKIP=compute|draw|all bisects which half of the emulated mesh
 	// draw is responsible for a GPU fault.
-	const char* skip_env     = std::getenv("KYTY_MESH_EMU_SKIP");
+	static const char* skip_env = std::getenv("KYTY_MESH_EMU_SKIP");
 	const bool  skip_compute = skip_env != nullptr && (std::strcmp(skip_env, "compute") == 0 ||
 	                                                    std::strcmp(skip_env, "all") == 0);
 	const bool  skip_draw    = skip_env != nullptr && (std::strcmp(skip_env, "draw") == 0 ||

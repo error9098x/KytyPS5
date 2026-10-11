@@ -727,7 +727,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
 		result.vertex[i] = m_program_cache->Get(vertex_params[i], vertex_info[i], push_data_cursor);
 	}
-	if (std::getenv("KYTY_PIPELINE_TIMING") != nullptr) {
+	if (([] { static const bool kyty_env_set = std::getenv("KYTY_PIPELINE_TIMING") != nullptr; return kyty_env_set; }())) {
 		const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
 		                         std::chrono::steady_clock::now() - program_start)
 		                         .count();
@@ -747,7 +747,7 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 	uint32_t          push_data_cursor = 0;
 	const auto        program_start = std::chrono::steady_clock::now();
 	auto              result = m_program_cache->Get(params, input_info, push_data_cursor);
-	if (std::getenv("KYTY_PIPELINE_TIMING") != nullptr) {
+	if (([] { static const bool kyty_env_set = std::getenv("KYTY_PIPELINE_TIMING") != nullptr; return kyty_env_set; }())) {
 		const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
 		                         std::chrono::steady_clock::now() - program_start)
 		                         .count();
@@ -950,7 +950,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	CreatePipelineInternal(m_graphics, *cached, rendering, key.vertex_input, vertex_info,
 	                       ps_input_info, programs, static_params, m_driver_cache);
 	LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
-	if (std::getenv("KYTY_PIPELINE_TIMING") != nullptr) {
+	if (([] { static const bool kyty_env_set = std::getenv("KYTY_PIPELINE_TIMING") != nullptr; return kyty_env_set; }())) {
 		const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
 		                         std::chrono::steady_clock::now() - pipeline_start)
 		                         .count();
@@ -986,7 +986,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	auto cached = std::make_unique<Pipeline>();
 	const auto pipeline_start = std::chrono::steady_clock::now();
 	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache);
-	if (std::getenv("KYTY_PIPELINE_TIMING") != nullptr) {
+	if (([] { static const bool kyty_env_set = std::getenv("KYTY_PIPELINE_TIMING") != nullptr; return kyty_env_set; }())) {
 		const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
 		                         std::chrono::steady_clock::now() - pipeline_start)
 		                         .count();

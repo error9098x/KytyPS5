@@ -425,7 +425,7 @@ void HostInputShutdown() {
 }
 
 void HostInputKey(int key_code, bool down) {
-	if (std::getenv("KYTY_INPUT_STATS") != nullptr) {
+	if (([] { static const bool kyty_env_set = std::getenv("KYTY_INPUT_STATS") != nullptr; return kyty_env_set; }())) {
 		static uint64_t sequence = 0;
 		const auto now = std::chrono::steady_clock::now().time_since_epoch();
 		const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
@@ -441,7 +441,7 @@ void HostInputKey(int key_code, bool down) {
 }
 
 void HostInputMouseButton(uint8_t mouse_button, bool down) {
-	if (std::getenv("KYTY_INPUT_STATS") != nullptr) {
+	if (([] { static const bool kyty_env_set = std::getenv("KYTY_INPUT_STATS") != nullptr; return kyty_env_set; }())) {
 		static uint64_t sequence = 0;
 		const auto now = std::chrono::steady_clock::now().time_since_epoch();
 		const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();

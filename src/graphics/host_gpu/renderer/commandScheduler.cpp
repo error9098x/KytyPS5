@@ -350,7 +350,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(graphics.queue == nullptr);
 
 	vk::Result result;
-	const bool timing = std::getenv("KYTY_GPU_SUBMIT_TIMING") != nullptr;
+	const bool timing = ([] { static const bool kyty_env_set = std::getenv("KYTY_GPU_SUBMIT_TIMING") != nullptr; return kyty_env_set; }());
 	const auto submit_start = timing ? std::chrono::steady_clock::now()
 	                                : std::chrono::steady_clock::time_point {};
 	uint64_t   tick;

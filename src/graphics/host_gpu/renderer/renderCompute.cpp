@@ -512,7 +512,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 	// KYTY_INTERNAL_FRAME_STATS: also read back storage images written by compute dispatches.
-	if (std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr && InternalFrameStatsFrameReached(buffer)) {
+	if (([] { static const bool kyty_env_set = std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr; return kyty_env_set; }()) && InternalFrameStatsFrameReached(buffer)) {
 		for (uint32_t i = 0; i < program.info.images.size() && i < bindings.images.size(); i++) {
 			if (program.info.images[i].written) {
 				const auto& texture = bindings.images[i];
@@ -592,7 +592,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 	// KYTY_INTERNAL_FRAME_STATS: also read back storage images written by compute dispatches.
-	if (std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr && InternalFrameStatsFrameReached(buffer)) {
+	if (([] { static const bool kyty_env_set = std::getenv("KYTY_INTERNAL_FRAME_STATS") != nullptr; return kyty_env_set; }()) && InternalFrameStatsFrameReached(buffer)) {
 		for (uint32_t i = 0; i < program.info.images.size() && i < bindings.images.size(); i++) {
 			if (program.info.images[i].written) {
 				const auto& texture = bindings.images[i];

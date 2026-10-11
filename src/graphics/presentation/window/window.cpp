@@ -324,7 +324,7 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 	}
 
 	if (f.down || f.up) {
-		if (std::getenv("KYTY_INPUT_STATS") != nullptr) {
+		if (([] { static const bool kyty_env_set = std::getenv("KYTY_INPUT_STATS") != nullptr; return kyty_env_set; }())) {
 			static uint64_t sequence = 0;
 			const auto now = std::chrono::steady_clock::now().time_since_epoch();
 			const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
@@ -338,7 +338,7 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 	}
 
 	if (f.axis) {
-		if (std::getenv("KYTY_INPUT_STATS") != nullptr) {
+		if (([] { static const bool kyty_env_set = std::getenv("KYTY_INPUT_STATS") != nullptr; return kyty_env_set; }())) {
 			static uint64_t sequence = 0;
 			const auto now = std::chrono::steady_clock::now().time_since_epoch();
 			const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();

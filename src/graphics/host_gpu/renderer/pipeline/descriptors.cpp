@@ -857,7 +857,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 		const auto& program  = *prepared.runtime->program;
 		const auto& snapshot = *prepared.runtime->resources;
 		const auto& layout = program.bindings;
-		const bool log_resources = std::getenv("KYTY_DRAW_RESOURCE_STATS") != nullptr;
+		const bool log_resources = ([] { static const bool kyty_env_set = std::getenv("KYTY_DRAW_RESOURCE_STATS") != nullptr; return kyty_env_set; }());
 		if (log_resources) {
 			LOGF("ShaderBufferLayout: hash=0x%016" PRIx64 " buffers=%zu descriptors=%u\n",
 			     program.shader_hash, program.info.buffers.size(),

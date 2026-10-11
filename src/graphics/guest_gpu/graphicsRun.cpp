@@ -190,7 +190,7 @@ void GuestGpu::SuspendPoint() {
 	EXIT_IF(IsGpuThread() || CommandScheduler::InDeferredOperation());
 	// Do not hold a queue lock while waiting: asynchronous work may be needed to
 	// finish the preceding graphics frame. The first point returns immediately.
-	const bool timing = std::getenv("KYTY_SUSPEND_TIMING") != nullptr;
+	const bool timing = ([] { static const bool kyty_env_set = std::getenv("KYTY_SUSPEND_TIMING") != nullptr; return kyty_env_set; }());
 	const auto wait_start = timing ? std::chrono::steady_clock::now()
 	                              : std::chrono::steady_clock::time_point {};
 	m_suspend_point_ready->acquire();
@@ -546,7 +546,7 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 
 		EXIT_IF(!has_submission);
-		const bool process_timing = std::getenv("KYTY_GPU_PROCESS_TIMING") != nullptr;
+		const bool process_timing = ([] { static const bool kyty_env_set = std::getenv("KYTY_GPU_PROCESS_TIMING") != nullptr; return kyty_env_set; }());
 		const auto process_start = process_timing ? std::chrono::steady_clock::now()
 		                                         : std::chrono::steady_clock::time_point {};
 		const bool complete = gpu->Process(submission);
