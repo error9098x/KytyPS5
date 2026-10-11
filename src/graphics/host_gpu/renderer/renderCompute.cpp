@@ -217,6 +217,10 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 		    cache.IsRegionRegistered(address, size)) {
 			return false;
 		}
+		// Lift write tracking for the whole range first (pages are not GPU-dirty, so this only
+		// marks them CPU-modified): filling through the guest mapping would otherwise take one
+		// write fault per 4 KiB page of metadata every time it is re-cleared.
+		context.GetBufferCache().InvalidateMemory(address, size);
 		context.GetBufferCache().FillBuffer(address, size, packed_clear, false);
 		if (ReadbackStats::Enabled()) {
 			ReadbackStats::NoteCpuFill(size);
