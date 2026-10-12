@@ -48,7 +48,15 @@ bool FaultCoalesceEnabled() {
 	return enabled;
 }
 
-constexpr uint64_t FaultCoalesceMaxBytes = 1 * MiB;
+// KYTY_FAULT_COALESCE_MAX_KB=<n> (default 1024, 64..16384): cap of one coalesced fault download.
+uint64_t FaultCoalesceMaxBytes() {
+	static const uint64_t bytes = [] {
+		const char* v  = std::getenv("KYTY_FAULT_COALESCE_MAX_KB");
+		const long  kb = v != nullptr ? std::strtol(v, nullptr, 10) : 1024;
+		return static_cast<uint64_t>(std::clamp<long>(kb, 64, 16384)) * 1024;
+	}();
+	return bytes;
+}
 
 bool FaultWaitOnCallerEnabled() {
 	static const bool enabled = EnvFlag("KYTY_FAULT_WAIT_ON_CALLER");
@@ -796,11 +804,11 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			const uint64_t hi = buffer.CpuAddress() + buffer.Size();
 			start             = std::max(lo, vaddr & ~(TRACKER_PAGE_SIZE - 1));
 			end               = std::min(hi, Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE));
-			while (end - start < FaultCoalesceMaxBytes && end < hi &&
+			while (end - start < FaultCoalesceMaxBytes() && end < hi &&
 			       m_memory_tracker.IsRegionGpuModified(end, std::min(TRACKER_PAGE_SIZE, hi - end))) {
 				end = std::min(hi, end + TRACKER_PAGE_SIZE);
 			}
-			while (end - start < FaultCoalesceMaxBytes && start > lo &&
+			while (end - start < FaultCoalesceMaxBytes() && start > lo &&
 			       m_memory_tracker.IsRegionGpuModified(
 			           std::max(lo, start - TRACKER_PAGE_SIZE),
 			           start - std::max(lo, start - TRACKER_PAGE_SIZE))) {
