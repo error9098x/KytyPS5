@@ -14,6 +14,7 @@ static_assert(Libs::Graphics::GpuThreadStats::kDrainSites == static_cast<int>(Li
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 
 namespace Libs::Graphics {
@@ -418,15 +419,6 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(m_command.IsInvalid());
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
-	if (SubmitThreadEnabled()) {
-		// Binary semaphores (swapchain) keep the inline path: a present must never wait on a
-		// semaphore whose signal has not been submitted yet. Inline submits drain the FIFO first.
-		if (submit.num_wait_semaphores == 0 && submit.num_signal_semaphores == 0) {
-			return SubmitAsync(submit);
-		}
-		DrainSubmitQueue();
-	}
-
 	// KYTY_GUEST_IMPORT: GPU writes to imported guest memory become host-visible at this
 	// submission's signal (Vulkan needs an explicit availability operation to the host domain).
 	if (GuestImport::g_submit_hook != nullptr) {
@@ -442,6 +434,15 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		                                   vk::PipelineStageFlagBits::eHost, {}, 1, &host_barrier,
 		                                   0, nullptr, 0, nullptr);
 	}
+	if (SubmitThreadEnabled()) {
+		// Binary semaphores (swapchain) keep the inline path: a present must never wait on a
+		// semaphore whose signal has not been submitted yet. Inline submits drain the FIFO first.
+		if (submit.num_wait_semaphores == 0 && submit.num_signal_semaphores == 0) {
+			return SubmitAsync(submit);
+		}
+		DrainSubmitQueue();
+	}
+
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;
@@ -517,13 +518,26 @@ bool CommandScheduler::SubmitThreadEnabled() noexcept {
 				}
 			}
 		};
-		const bool on = v != nullptr && (is("1") || is("true"));
+		const bool on = v != nullptr && (is("1") || is("true") || is("2"));
 		if (on) {
-			LOGF("SubmitThread: enabled (vkEndCommandBuffer + vkQueueSubmit off the recording thread)\n");
+			LOGF("SubmitThread: enabled (%s off the recording thread)\n",
+			     is("2") ? "vkQueueSubmit" : "vkEndCommandBuffer + vkQueueSubmit");
 		}
 		return on;
 	}();
 	return enabled;
+}
+
+// KYTY_SUBMIT_THREAD=2: vkEndCommandBuffer stays on the recording thread and only vkQueueSubmit
+// moves to the FIFO thread. Mode 1's end() on another thread races with the recording thread's
+// MoltenVK object/descriptor mutations (the 0x20 crash at ~33 s); with PREFILL=0 MoltenVK encodes
+// at vkQueueSubmit, so mode 2 still moves the encoding off the recording thread.
+bool CommandScheduler::SubmitThreadEndsOnRecorder() noexcept {
+	static const bool ends = [] {
+		const char* v = std::getenv("KYTY_SUBMIT_THREAD");
+		return v != nullptr && std::strcmp(v, "2") == 0;
+	}();
+	return ends;
 }
 
 // Recording thread. The tick is taken here, synchronously, so CurrentTick(), DeferOperation and
@@ -532,8 +546,13 @@ bool CommandScheduler::SubmitThreadEnabled() noexcept {
 // legal (wait-before-signal) and already happen today on the priority thread.
 uint64_t CommandScheduler::SubmitAsync(SubmitInfo& submit) {
 	const auto start = std::chrono::steady_clock::now();
-	m_command.EndRendering(); // a recorded command: stays on the recording thread
 	SubmitJob job;
+	if (SubmitThreadEndsOnRecorder()) {
+		m_command.End(); // EndRendering + vkEndCommandBuffer
+		job.ended = true;
+	} else {
+		m_command.EndRendering(); // a recorded command: stays on the recording thread
+	}
 	job.buffer       = m_command.m_buffer;
 	job.submit       = submit;
 	job.debug_op     = m_command.m_debug_op;
@@ -603,7 +622,7 @@ void CommandScheduler::SubmitThread(std::stop_token stop) {
 
 void CommandScheduler::ExecuteSubmitJob(SubmitJob& job) {
 	auto&      graphics = m_graphics;
-	vk::Result result   = job.buffer.end();
+	vk::Result result   = job.ended ? vk::Result::eSuccess : job.buffer.end();
 	if (result == vk::Result::eSuccess) {
 		Common::LockGuard lock(graphics.queue_mutex);
 		job.submit.AddSignal(m_master.Handle(), job.tick);

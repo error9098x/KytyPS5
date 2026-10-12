@@ -70,6 +70,7 @@ public:
 	[[nodiscard]] GraphicContext&  Graphics() const noexcept { return m_graphics; }
 	// KYTY_SUBMIT_THREAD=1: vkEndCommandBuffer + vkQueueSubmit run on a FIFO thread.
 	[[nodiscard]] static bool SubmitThreadEnabled() noexcept;
+	[[nodiscard]] static bool SubmitThreadEndsOnRecorder() noexcept;
 
 private:
 	void WaitImpl(uint64_t tick);
@@ -125,6 +126,7 @@ private:
 		uint64_t          debug_submit = 0;
 		uint32_t          debug_arg[4] {};
 		uint64_t          debug_arg4 = 0;
+		bool              ended      = false; // KYTY_SUBMIT_THREAD=2: ended on the recording thread
 	};
 	uint64_t                  SubmitAsync(SubmitInfo& submit);
 	void                      DrainSubmitQueue();
