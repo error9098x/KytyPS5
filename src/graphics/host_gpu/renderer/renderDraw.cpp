@@ -33,6 +33,7 @@
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
+#include "graphics/host_gpu/renderer/gpuThreadStats.h"
 
 #include <chrono>
 #include <algorithm>
@@ -583,6 +584,7 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
                                                  uint32_t color_count, RenderDepthInfo& depth,
                                                  vk::ImageAspectFlags& feedback_aspects,
                                                  std::span<PreparedBindings* const> stages) {
+	GpuThreadStats::Scope gts_scope(GpuThreadStats::Cat::Rt);
 	EXIT_IF(colors == nullptr || color_count > RENDER_COLOR_ATTACHMENTS_MAX);
 	feedback_aspects = {};
 	auto&       cache = m_context.GetTextureCache();
@@ -1250,6 +1252,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		    GuestImport::Class::Index);
 	}
 	LogDrawPhase(draw.Name(), "PrepareBindings");
+	GpuThreadStats::NoteDraw();
+	std::optional<GpuThreadStats::Scope> gts_prep;
+	gts_prep.emplace(GpuThreadStats::Cat::Prep);
 	auto&                            bindings = m_graphics_bindings;
 	std::array<PreparedBindings*, 4> descriptor_stages {};
 	uint32_t                         stage_count = 0;
@@ -1274,6 +1279,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");
 	}
+	gts_prep.reset();
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
 	    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
 	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
@@ -1290,6 +1296,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// KYTY_MESH_BATCH: a pending batch of captured mesh draws is replayed here unless this draw
 	// joins it; everything recorded before this point went through EndRendering/Handle, which
 	// replay it first.
+	std::optional<GpuThreadStats::Scope> gts_enc;
+	gts_enc.emplace(GpuThreadStats::Cat::Encode);
 	const bool mesh_emulated = mesh_active && pipeline.mesh_compute != nullptr;
 	uint64_t   mesh_batch_bytes = 0;
 	const bool mesh_batched =
@@ -1365,6 +1373,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
 	} // !mesh_emulated
+	gts_enc.reset();
 
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u);

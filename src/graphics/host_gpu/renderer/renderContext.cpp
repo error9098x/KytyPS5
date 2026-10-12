@@ -16,6 +16,7 @@
 #include "graphics/host_gpu/renderer/sync.h"
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
+#include "graphics/host_gpu/renderer/gpuThreadStats.h"
 
 #include <algorithm>
 
@@ -274,6 +275,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 }
 
 void RenderContext::PrepareBda() {
+	GpuThreadStats::Scope gts_scope(GpuThreadStats::Cat::Bda);
 	m_buffer_cache.NoteBdaUse(); // KYTY_GUEST_IMPORT only; also when the scan below is skipped
 	if (!m_bda_logged) {
 		Log::WriteToConsoleAndLog("GPU: using buffer device address (BDA) shader memory access.\n");

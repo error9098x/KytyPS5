@@ -30,6 +30,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
 #include "kernel/memory.h"
+#include "graphics/host_gpu/renderer/gpuThreadStats.h"
 
 #include <algorithm>
 #include <atomic>
@@ -790,6 +791,7 @@ void RenderExecutor::ResetBindings() {
 
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
+	GpuThreadStats::Scope gts_scope(GpuThreadStats::Cat::Prep);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(!runtime);
 	const auto& program  = *runtime.program;
@@ -1077,6 +1079,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 
 void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
                                              std::span<RenderColorInfo> colors) {
+	GpuThreadStats::Scope gts_scope(GpuThreadStats::Cat::Prep);
 	bool uses_dma = false;
 	FindBuffers(stages);
 	for (auto* stage: stages) {
@@ -1115,6 +1118,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     const PipelineCache::Pipeline&     pipeline,
                                     std::span<PreparedBindings* const> prepared_bindings,
                                     MeshGraphicsCapture*               capture) {
+	GpuThreadStats::Scope gts_scope(GpuThreadStats::Cat::Commit);
 	KYTY_PROFILER_FUNCTION();
 	// Every caller either flushed a pending KYTY_MESH_BATCH batch already (graphics draws,
 	// compute dispatches) or is that batch's own recording; out-of-pass commands below go

@@ -22,6 +22,7 @@
 #include "kernel/memory.h"
 #include "libs/agc.h"
 #include "libs/errno.h"
+#include "graphics/host_gpu/renderer/gpuThreadStats.h"
 
 #include <algorithm>
 #include <array>
@@ -494,6 +495,7 @@ void GuestGpu::ThreadRun(void* data) {
 	EXIT_IF(gpu == nullptr);
 	KYTY_PROFILER_THREAD("Thread_Gpu");
 	ApplyCriticalThreadQos("gpu");
+	GpuThreadStats::Attach();
 	g_gpu_thread = true;
 	g_gpu_state  = gpu;
 
@@ -501,6 +503,7 @@ void GuestGpu::ThreadRun(void* data) {
 	uint32_t   blocked_poll_us = GPU_BLOCKED_POLL_MIN_MICROS;
 
 	for (;;) {
+		GpuThreadStats::MaybePrint();
 		Submission                   submission;
 		Common::UniqueFunction<void> command;
 		bool                         has_submission = false;
@@ -513,6 +516,7 @@ void GuestGpu::ThreadRun(void* data) {
 			       gpu->m_inline_active) {
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
+				GpuThreadStats::Scope gts_idle(GpuThreadStats::Cat::Idle);
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
 			}
 			if (gpu->m_stopping && gpu->m_commands.empty() && gpu->m_submission_count == 0) {
@@ -540,7 +544,10 @@ void GuestGpu::ThreadRun(void* data) {
 						poll_us         = blocked_poll_us;
 						blocked_poll_us = std::min(blocked_poll_us * 2, GPU_BLOCKED_POLL_MICROS);
 					}
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, poll_us);
+					{
+						GpuThreadStats::Scope gts_idle(GpuThreadStats::Cat::Idle);
+						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, poll_us);
+					}
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
 							queue.front().blocked = false;
@@ -566,7 +573,10 @@ void GuestGpu::ThreadRun(void* data) {
 
 		if (command) {
 			EXIT_IF(g_current_processor != nullptr);
-			command();
+			{
+				GpuThreadStats::Scope gts_cmd(GpuThreadStats::Cat::Cmd);
+				command();
+			}
 			blocked_poll_us = GPU_BLOCKED_POLL_MIN_MICROS;
 
 			Common::LockGuard lock(gpu->m_queue_mutex);

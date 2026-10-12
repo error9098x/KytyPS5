@@ -6,6 +6,9 @@
 #include "graphics/host_gpu/renderer/syncAudit.h"
 #include "graphics/host_gpu/renderer/threadQos.h"
 #include "graphics/host_gpu/renderer/cache/guestImport.h"
+#include "graphics/host_gpu/renderer/gpuThreadStats.h"
+
+static_assert(Libs::Graphics::GpuThreadStats::kDrainSites == static_cast<int>(Libs::Graphics::SyncAudit::Site::Count));
 
 #include <algorithm>
 #include <chrono>
@@ -200,6 +203,7 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 }
 
 void CommandScheduler::FlushAndWait() {
+	GpuThreadStats::Scope gts_drain(GpuThreadStats::Cat::Drain, static_cast<int>(SyncAudit::g_site));
 	const bool audit = SyncAudit::Enabled();
 	const auto start = audit ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	const auto tick = Submit();
@@ -212,6 +216,7 @@ void CommandScheduler::FlushAndWait() {
 }
 
 void CommandScheduler::Finish() {
+	GpuThreadStats::Scope gts_drain(GpuThreadStats::Cat::Drain, static_cast<int>(SyncAudit::g_site));
 	CheckActive();
 	const bool audit = SyncAudit::Enabled();
 	const auto start = audit ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
@@ -229,6 +234,7 @@ void CommandScheduler::Finish() {
 }
 
 void CommandScheduler::Wait(uint64_t tick) {
+	GpuThreadStats::Scope gts_drain(GpuThreadStats::Cat::Drain, static_cast<int>(SyncAudit::g_site));
 	EXIT_IF(tick > CurrentTick());
 	if (SyncAudit::Enabled()) {
 		const auto start   = std::chrono::steady_clock::now();
@@ -356,6 +362,7 @@ void CommandScheduler::DrainPriorityOperations() {
 }
 
 void CommandScheduler::WaitPriorityOperations(uint64_t tick) {
+	GpuThreadStats::Scope gts_drain(GpuThreadStats::Cat::Drain, static_cast<int>(SyncAudit::g_site));
 	EXIT_IF(g_deferred_callback_scheduler == this);
 	std::unique_lock lock(m_operation_mutex);
 	const auto ready = [this, tick] {
@@ -407,6 +414,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 }
 
 uint64_t CommandScheduler::Submit(SubmitInfo submit) {
+	GpuThreadStats::Scope gts_submit(GpuThreadStats::Cat::Submit);
 	EXIT_IF(m_command.IsInvalid());
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);

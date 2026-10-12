@@ -24,6 +24,7 @@
 #include "kernel/eventQueue.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
+#include "graphics/host_gpu/renderer/gpuThreadStats.h"
 
 #include <chrono>
 #include <algorithm>
@@ -33,6 +34,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -395,10 +397,13 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 
+	GpuThreadStats::NoteDispatch();
 	buffer.EndRendering();
 	auto& pipeline =
 	    m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	auto& bindings = m_compute_bindings;
+	std::optional<GpuThreadStats::Scope> gts_prep;
+	gts_prep.emplace(GpuThreadStats::Cat::Prep);
 	PrepareBindings(input_info.stage, bindings);
 	if (program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
 		std::copy(std::begin(input_info.dispatch_threads_num), std::end(input_info.dispatch_threads_num),
@@ -413,6 +418,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	BindSharedMemory(m_context, input_info, bindings);
 	RebindBuffers(bindings);
 
+	gts_prep.reset();
+	GpuThreadStats::Scope gts_enc(GpuThreadStats::Cat::Encode);
 	auto              vk_buffer        = buffer.Handle();
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
@@ -542,8 +549,11 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	const auto compute_program = m_context.GetPipelineCache().GetComputeProgram(
 	    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info);
 	buffer.EndRendering();
+	GpuThreadStats::NoteDispatch();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	auto& bindings = m_compute_bindings;
+	std::optional<GpuThreadStats::Scope> gts_prep;
+	gts_prep.emplace(GpuThreadStats::Cat::Prep);
 	PrepareBindings(input_info.stage, bindings);
 	PreparedBindings* descriptor_stage = &bindings;
 	FindBuffers(std::span {&descriptor_stage, 1u});
@@ -559,6 +569,9 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	    GuestImport::Class::Indirect);
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
 	RebindBuffers(bindings);
+	gts_prep.reset();
+	std::optional<GpuThreadStats::Scope> gts_enc;
+	gts_enc.emplace(GpuThreadStats::Cat::Encode);
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
 	const auto vk_buffer = buffer.Handle();
@@ -604,6 +617,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 	ResetBindings();
+	gts_enc.reset();
 	// Runs last: FlushAndWait retires vk_buffer.
 	if (DispatchTraceEnabled(buffer)) {
 		auto& scheduler = m_context.GetCommandScheduler();
