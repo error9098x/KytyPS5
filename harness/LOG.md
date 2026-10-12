@@ -1011,3 +1011,38 @@ PROOF §8 runs (480 s, shtsm-ab-base-1 route F10 + J×12, PREFILL=2, SCRATCH_DES
 - Intro fps is roughly halved (40–120 s) in all three. In game, gi-b2 is −15 % vs ab-all-2; gi-1 is +6 % vs ab-base-1, but the baselines are from an older session.
 - Animal Well with GUEST_IMPORT: 32/42, 33/43, 33/43 content/sampled, stage 2, 3/3. live_mib 12, created 0, no exception.
 - **Verdict: kill criteria met** (war_wait > 20 per 2 s sustained past 120 s, also with CLASSES=storage; live_mib ≪ 1000; no memory gain). Entry 34 is a null result for SH → revert c9401c87, or leave it opt-in and never default; that is Alan's call.
+
+## 2026-10-12 — memory study, arm A only (shtsm-mem-A; B/C not run, stopped at ~340 s on request)
+
+Route/flags = best480-4 (/tmp/r7c.sh) + KYTY_EVICT_STATS=1 KYTY_BUFFER_CACHE_STATS=1; 5 s sampler of kyty footprint, swap, vm_stat swapins/pageins (harness/runs/shtsm-mem-A/mem.csv; scripts memrun.sh, memsamp.sh, memcorr.py copied into the run dir). Last frame 2191: in-engine room, phone in hand.
+
+| window | fps | footprint GB | swap GB | free% | swapin/s | swapout/s |
+|---|---|---|---|---|---|---|
+| 0-40 | 21.7 | 4.5 | 2.0 | 56 | 0 | 0 |
+| 40-80 | 15.3 | 12 | 2.0 | 19 | 0 | 0 |
+| 80-120 | 4.1 | 18 | 5.2 | 14 | 391 | 6459 |
+| 120-160 | 1.68 | 20 | 6.2 | 12 | 1978 | 4064 |
+| 160-200 | 1.30 | 21 | 7.0 | 11 | 2584 | 3865 |
+| 200-240 | 1.85 | 23 | 7.7 | 12 | 2440 | 4236 |
+| 240-280 | 1.70 | 24 | 8.1 | 10 | 1371 | 1790 |
+| 280-320 | 1.40 | 24 | 8.5 | 10 | 1010 | 1530 |
+
+- The fps collapse (15 → 4 → 1.7, 40-160 s) coincides with swap-out starting; r(fps, footprint) = −0.97 over the run. Confounded with the intro → in-game scene change in the same window.
+- In game (≥160 s) fps is flat at 1.3-1.85 while swap-in varies 125-2584 pages/s; no relation (r −0.2 to +0.7 depending on window size). **Swap is not proven to be the in-game limiter.** The decisive test (arm C, KYTY_GPU_BUDGET_MB=4096) is still to run.
+- **Texture GC is stuck (LRU-head blocking confirmed on the Mac):** in game every EvictStats line shows head40_blocked=40/40, freed=0/0, budget_burned = scanned (5-10 k per 2 s, all skip_tiled). GPU usage 8.8 GiB vs 8192 budget, never reduced. Census at the end: clean 1618 images / 3.1 GiB (droppable with no download, never reached), tiled_gpu 130 / 3.2 GiB, idle160_tiled_gpu 1.57 GiB. KYTY_EVICT_SMART (skip-don't-spend) targets exactly this; expected ~2-3 GiB back.
+- Rough split at peak: ~8.8 GiB GPU caches, ~14 GiB host (guest memory + emulator).
+
+## 2026-10-12 — memory study arms B/C (300 s; shtsm-mem-B300 EVICT_SMART+ALIAS, shtsm-mem-C300 + KYTY_GPU_BUDGET_MB=4096)
+
+| window | A fps / fp GB | B fps / fp GB | C fps / fp GB |
+|---|---|---|---|
+| 0-40 | 21.7 / 4.5 | 13.9 / 12 | 18.6 / 4.5 |
+| 40-80 | 15.3 / 12 | 6.0 / 15 | 5.2 / 14 |
+| 80-120 | 4.1 / 18 | 2.2 / 18 | 4.3 / 18 |
+| 120-160 | 1.68 / 20 | 0.88 / 20 | 1.70 / 18 |
+| 160-280 | 1.3-1.85 / 21-24 | 0.8-1.3 / 20-22 | 0.7-1.0 / 20-21 |
+
+- **Smart eviction frees ~nothing in game.** B: freed=0/0 on almost every line, head40_blocked=40/40, everything scanned is skip_tiled; GPU usage 8.3-8.4 GiB. C: GPU usage 7.8 GiB **against a 4096 MiB budget**, freed ≤ 3 images per 2 s. The clean images (2.1-2.5 GiB) are all younger than the 160-tick age, i.e. in the working set; the only idle bulk is idle160_tiled_gpu (1.4-1.6 GiB, GPU-written tiled, unevictable under the current rules without download + retile). The GPU budget is not enforceable with today's eviction rules, so arm C did **not** test the memory → fps causality.
+- B/C fps is lower than A even in the intro (0-40 s, before any memory pressure: 13.9 / 18.6 vs 21.7) and they progressed less (last frames 1200 / 1463 vs A 2191 at 340 s). Machine was in interactive use; cross-run fps differences here are noise, not an eviction effect.
+- Footprint at 250 s in C (`footprint`, harness/runs/shtsm-mem-C300/footprint-250s.txt): 20 GB = **10 GB SYSTEM_MANAGED (guest memory backing)** + **7.9 GB owned graphics (Metal resources)** + 1.2 GB IOAccelerator + ~0.9 GB everything else (malloc 0.6, Rosetta 0.15). Emulator-side overhead is small; it is guest memory + GPU copies.
+- No exception, stage 2, timed out cleanly in both.
