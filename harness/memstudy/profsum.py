@@ -5,7 +5,7 @@ import sys, re
 f = sys.argv[1]; top = int(sys.argv[2]) if len(sys.argv) > 2 else 25; filt = sys.argv[3:]
 thr = re.compile(r'^    (\d+) (Thread_\d+.*)$')
 node = re.compile(r'^[ +!:|]*?(\d+) (.+?)(?:  \(in [^)]*\))?(?: \+ \d+)?(?:  \[0x[0-9a-f]+\])?\s*$')
-IDLE = ('mach_msg', '__psynch_cvwait', '__semwait_signal', 'kevent', '__workq_kernreturn', '__select', 'nanosleep', '__ulock_wait', 'semaphore_wait', '__psynch_mutexwait', 'poll', 'mach_msg2_internal', 'mach_msg_overwrite', '_pthread_cond_wait', 'std::condition_variable::wait', 'std::this_thread::sleep_for', 'MVKSemaphoreImpl::wait', 'usleep')
+IDLE = ('mach_msg', '__psynch_cvwait', '__semwait_signal', 'kevent', '__workq_kernreturn', '__select', 'nanosleep', '__ulock_wait', 'semaphore_wait', '__psynch_mutexwait', 'poll', 'mach_msg2_internal', 'mach_msg_overwrite', '_pthread_cond_wait', 'std::condition_variable::wait', 'std::this_thread::sleep_for', 'MVKSemaphoreImpl::wait', 'usleep', 'Libs::LibKernel::PthreadCondWait', 'Libs::Posix::pthread_cond_wait', 'caulk::semaphore', '_pthread_wqthread', 'start_wqthread', 'Rosetta Runtime Routines', 'Libs::LibKernel::EventQueue::KernelWaitEqueue', 'sceKernelUsleep', 'Libs::LibKernel::KernelUsleep')
 threads = []; cur = None
 lines = open(f, errors='replace').read().split('\n')
 start = next((i for i, l in enumerate(lines) if l.startswith('Call graph:')), 0)
@@ -27,7 +27,7 @@ for t in threads:
         if not any(s[1] == n for s in stack): inc[n] = inc.get(n, 0) + c
         stack.append((d, n))
         nxt = t['nodes'][i + 1][0] if i + 1 < len(t['nodes']) else -1
-        if nxt <= d and any(any(sn.startswith(x) for x in IDLE) for _, sn in stack[-4:]): idle += c
+        if nxt <= d and any(any(sn.startswith(x) or (' '+x) in sn for x in IDLE) for _, sn in stack): idle += c
     t['inc'] = inc; t['idle'] = idle; t['busy'] = t['total'] - idle
 sel = [t for t in threads if (not filt or any(x in t['name'] or any(x in k for k in list(t['inc'])[:12]) for x in filt))]
 sel.sort(key=lambda t: -t['busy'])
