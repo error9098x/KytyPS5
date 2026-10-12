@@ -247,7 +247,7 @@ static void ClearDebugTextureFolder() {
 	}
 }
 
-// KYTY_PRESET=compat|fast|extreme: performance presets, like per-game settings in PC/Android
+// KYTY_PRESET=none|compat|fast|extreme (PPSA10112 defaults to extreme): performance presets, like per-game settings in PC/Android
 // emulator front ends. A preset only fills env vars that are unset (anything you set yourself
 // wins, including =0) and logs each value. Applied after the SFO loads (per-title entries) and
 // before any subsystem reads its flags (all are read lazily, once).
@@ -264,19 +264,28 @@ struct PresetVar {
 };
 
 static void ApplyPreset() {
-	const char* preset = std::getenv("KYTY_PRESET");
-	if (preset == nullptr || preset[0] == '\0') {
-		return;
-	}
-	const std::string_view mode = preset;
-	const bool             extreme = mode == "extreme";
-	const bool             fast    = extreme || mode == "fast";
-	if (!fast && mode != "compat") {
-		Log::WriteToConsoleAndLog(fmt::format("KYTY_PRESET={} ignored (expected compat, fast or extreme)\n", mode));
-		return;
-	}
 	std::string title_id;
 	Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id);
+	const char* preset = std::getenv("KYTY_PRESET");
+	if (preset == nullptr || preset[0] == '\0') {
+		// Per-title default: Silent Hill: The Short Message runs on extreme unless KYTY_PRESET is
+		// set (KYTY_PRESET=none restores the plain defaults).
+		if (title_id != "PPSA10112") {
+			return;
+		}
+		preset = "extreme";
+		Log::WriteToConsoleAndLog("KYTY_PRESET=extreme by default for PPSA10112 (KYTY_PRESET=none disables)\n");
+	}
+	const std::string_view mode = preset;
+	if (mode == "none" || mode == "off") {
+		return;
+	}
+	const bool extreme = mode == "extreme";
+	const bool fast    = extreme || mode == "fast";
+	if (!fast && mode != "compat") {
+		Log::WriteToConsoleAndLog(fmt::format("KYTY_PRESET={} ignored (expected none, compat, fast or extreme)\n", mode));
+		return;
+	}
 
 	// Earlier entries win (setenv without overwrite), so the more aggressive layers come first.
 	static constexpr PresetVar extreme_vars[] = {
