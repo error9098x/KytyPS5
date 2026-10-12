@@ -1046,3 +1046,33 @@ Route/flags = best480-4 (/tmp/r7c.sh) + KYTY_EVICT_STATS=1 KYTY_BUFFER_CACHE_STA
 - B/C fps is lower than A even in the intro (0-40 s, before any memory pressure: 13.9 / 18.6 vs 21.7) and they progressed less (last frames 1200 / 1463 vs A 2191 at 340 s). Machine was in interactive use; cross-run fps differences here are noise, not an eviction effect.
 - Footprint at 250 s in C (`footprint`, harness/runs/shtsm-mem-C300/footprint-250s.txt): 20 GB = **10 GB SYSTEM_MANAGED (guest memory backing)** + **7.9 GB owned graphics (Metal resources)** + 1.2 GB IOAccelerator + ~0.9 GB everything else (malloc 0.6, Rosetta 0.15). Emulator-side overhead is small; it is guest memory + GPU copies.
 - No exception, stage 2, timed out cleanly in both.
+
+## 2026-10-12 ~14:30 IST — P1.1 pressure test: **memory matters** (runner r8; PLAN_MEMORY_FPS.md §4)
+
+Both arms: `harness/memstudy/p1.sh` → `run_arm.sh <name> 280` (best480-4 flags + route, EVICT/BUFFER_CACHE stats), binary 5f1ed019 (HEAD before r8, no code change), laptop idle (no other kyty/cmake; df 163 GB), memmon 24 GB / 12 GB swap / 6 % free. hog arm: `MEMHOG_GIB=3` (memhog.py holds 3 GiB resident). No exception, stage 2, timed out cleanly at 280 s in both. No controller connected (DS4 paired but "Not Connected") → **P2.0 skipped**.
+
+| window | ctl-1 fps | hog3-1 fps | ctl fp GB / swap GB / swapin/s | hog fp GB / swap GB / swapin/s |
+|---|---|---|---|---|
+| 0-40 | 22.7 | 23.8 | 4.5 / 2.1 / 6 | 4.5 / 2.5 / 146 |
+| 40-80 | 15.1 | 15.8 | 12 / 2.1 / 0 | 11 / 3.6 / 1129 |
+| 80-120 | 4.08 | 7.50 | 18 / 4.6 / 346 | 17 / 6.9 / 4601 |
+| 120-160 | 1.65 | 1.75 | 19 / 5.6 / 2036 | 18 / 7.7 / 4039 |
+| 160-200 | 0.97 | 0.85 | 21 / 6.3 / 1956 | 19 / 8.3 / 7159 |
+| 200-240 | 1.38 | 0.72 | 22 / 6.8 / 1306 | 20 / 8.2 / 10508 |
+| 240-280 | 1.62 | 0.85 | 23 / 7.3 / 1694 | 20 / 8.4 / 10740 |
+| **180-280** | **1.40** (140 presents) | **0.72** (72 presents) | swap-in ≈ 1.6 k pages/s | swap-in ≈ 10 k pages/s (≈ 6×) |
+
+- Intro FPS equal (22.7 vs 23.8) → machine idle, runs comparable.
+- Last frames differ: ctl frame 2100 = phone message (Maya "can you come to the villa?"); hog frame 2040 = the in-engine cinematic before it (hog got 48 fewer presents). So the time-window number compares slightly different content. **Scene-matched comparison by present index** (new `harness/memstudy/pidx.py`, deterministic route): p1960→p2033: ctl 73 presents in 64.0 s = **1.14 fps**, hog 73 in 101.1 s = **0.72 fps (−37 %)**. Before p1960 the hog arm was not slower (p1900→1960: 1.78 vs 1.48).
+- **Verdict (§4 rule): hog FPS −49 % (180-280 s) / −37 % (scene-matched) and swap-in ~6× higher → memory matters → Phase 1b (M1) before Phase 3.**
+- Mechanism (P1.2 profiles, `sample` 10 s at ~220 s, GPU thread = GuestGpu::ThreadRun, % of samples): `GuestBackingStore::TryReadSparseBacking` under `TextureCache::InitializeImage` (CPU reads guest texture memory to upload it) **8.9 % ctl → 24.0 % hog**: the GPU thread page-faults swapped-out guest texture pages. That is the direct memory → FPS path.
+
+### P1.2 clean profile (ctl-1, GPU thread, inclusive)
+Process 95 % (idle in the work-wait ~4 %). CommandScheduler::Wait 25.3 %, of which **MaterializeColorClear → BufferCache::ReadMemory → DownloadBufferMemory 22.6 %** (clear-metadata readback drain; KYTY_CLEAR_META_NOSYNC is not in the best480-4 set because of its intro regression). MVKCommandBuffer::addCommand 16.5 % (PREFILL=2 inline encoding), vkCmdBeginRendering 7.0 %. InitializeImage 9.3 % (TryReadSparseBacking 8.9 %). GetGraphicsPrograms 8.3 %, GetComputePipeline 4.9 %, GetGraphicsPipeline 1.9 %, GetComputeProgram 1.6 %. RebindBuffers 4.7 %, PrepareBda 2.8 %, PrepareBindings 2.4 %, CommitBindings 1.6 %, FindBuffers 1.5 %, WaitPriorityOperations 1.3 %, Submit 0.7 %. ExecuteEmulatedMeshDraw 6.2 %.
+RenderThread 1: `_sigtramp` 16.1 % (NOTRAP not in this flag set), HandleFault 10 %.
+Profiles: harness/runs/shtsm-p1-{ctl,hog3}-1/samp.sym.txt + profsum.txt (new `memstudy/symb.py` regenerates `nm | c++filt` symbols when the binary is newer; `memstudy/profsum.py` = per-thread inclusive shares).
+
+### P1.3 host growth in game (ctl-1, `footprint` at ~180 s vs ~220 s)
+19 GB → 22 GB: SYSTEM_MANAGED (guest memory) 9646 MB → 11 GB (≈ +1.4 GB), owned graphics 7820 → 8657 MB (+837 MB), IOAccelerator 1062 → 1118 MB, MALLOC_* flat (+10 MB). → growth is the guest pool + GPU cache, **no emulator malloc leak**.
+
+Peak memory: ctl footprint 23.0 GB / swap 7.3 GB; hog 20.0 GB (+3 GiB memhog) / swap 8.6 GB. No memkill.
