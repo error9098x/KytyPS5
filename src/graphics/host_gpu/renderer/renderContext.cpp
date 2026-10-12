@@ -5,6 +5,7 @@
 #include <cinttypes>
 
 #include <cstdlib>
+#include <atomic>
 #include <cstring>
 
 #include <cstdio>
@@ -97,10 +98,32 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr,
 		// stopping at the first page that is unmapped, GPU-modified (that would need a
 		// readback) or owned by a cached image (that would force a texture re-upload). The
 		// extra pages only become CPU-modified, i.e. they are re-uploaded at the next sync.
-		static const uint64_t write_span_pages = [] {
+		// KYTY_WRITE_FAULT_SPAN=auto: the span adapts to the writer. A fault on the page right after
+		// the previous span's end (a sequential stream) doubles the span (2, 4, ... 256 pages); any
+		// other fault restarts at 1. A long stream then costs ~log2(n) faults instead of n, while
+		// scattered writes keep 4 KiB tracking. Plain atomics (no thread_local: this runs in the
+		// signal handler); a cross-thread race only mis-sizes one span, and every span keeps the
+		// same stop rules, so correctness does not depend on the guess.
+		static const bool span_auto = [] {
+			const char* v = std::getenv("KYTY_WRITE_FAULT_SPAN");
+			return v != nullptr && std::strcmp(v, "auto") == 0;
+		}();
+		static const uint64_t write_span_fixed = [] {
 			const char* v = std::getenv("KYTY_WRITE_FAULT_SPAN");
 			return v == nullptr ? uint64_t {0} : std::min<uint64_t>(std::strtoull(v, nullptr, 10), 256);
 		}();
+		static std::atomic<uint64_t> auto_next {0};
+		static std::atomic<uint64_t> auto_span {1};
+		uint64_t write_span_pages = write_span_fixed;
+		if (span_auto) {
+			const uint64_t page_size = m_page_manager.GetPageSize();
+			const uint64_t first     = fault_vaddr & ~(page_size - 1u);
+			const uint64_t span      = first == auto_next.load(std::memory_order_relaxed)
+			                               ? std::min<uint64_t>(auto_span.load(std::memory_order_relaxed) * 2, 256)
+			                               : 1;
+			auto_span.store(span, std::memory_order_relaxed);
+			write_span_pages = span;
+		}
 		if (write_span_pages > 1) {
 			const uint64_t page_size = m_page_manager.GetPageSize();
 			const uint64_t first     = fault_vaddr & ~(page_size - 1u);
@@ -111,8 +134,15 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr,
 				end += page_size;
 			}
 			m_buffer_cache.InvalidateMemory(first, end - first);
+			if (span_auto) {
+				auto_next.store(end, std::memory_order_relaxed);
+			}
 		} else {
 			m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
+			if (span_auto) {
+				const uint64_t page_size = m_page_manager.GetPageSize();
+				auto_next.store((fault_vaddr & ~(page_size - 1u)) + page_size, std::memory_order_relaxed);
+			}
 		}
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
