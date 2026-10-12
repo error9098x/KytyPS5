@@ -298,6 +298,13 @@ static void ApplyPreset() {
 	    // render 9x fewer pixels than at 4K (the presenter scales the result to the window).
 	    {"KYTY_VIDEOOUT_RES", "720"},
 	};
+	static constexpr PresetVar extreme_astro_vars[] = {
+	    // Load-only storage buffers can be declared NonWritable in SPIR-V; this helps drivers
+	    // keep buffer addresses in scalar registers (fork-validated on Astro's Playroom).
+	    {"KYTY_READONLY_BUFFERS", "1"},
+	    // Predict repeated GPU-written fast-clear metadata instead of draining to read it back.
+	    {"KYTY_CLEAR_META_PREDICT", "1"},
+	};
 	static constexpr PresetVar extreme_sh_vars[] = {
 	    {"KYTY_UE_STREAMING_POOL_MB", "400"},
 	};
@@ -328,6 +335,9 @@ static void ApplyPreset() {
 		apply(extreme_vars);
 		if (title_id == "PPSA10112") {
 			apply(extreme_sh_vars);
+		}
+		if (title_id == "PPSA01325") {
+			apply(extreme_astro_vars);
 		}
 	}
 	if (fast) {

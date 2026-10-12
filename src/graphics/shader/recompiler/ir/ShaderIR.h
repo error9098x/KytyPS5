@@ -496,6 +496,9 @@ struct ShaderInfo {
 	bool                            function_scratch              = false;
 	bool                            pixel_valid_mask              = false;
 	bool                            buffer_int64_atomics          = false;
+	// All live storage-buffer accesses are reads (no stores or atomics). This is used by the
+	// optional KYTY_READONLY_BUFFERS SPIR-V decoration path.
+	bool                            buffer_writes                 = false;
 	bool                            buffer_u8                     = false;
 	bool                            buffer_u16                    = false;
 	bool                            shared_int64_atomics          = false;

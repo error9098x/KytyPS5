@@ -6,6 +6,16 @@
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
+// KYTY_READONLY_BUFFERS=1: declare load-only storage buffers NonWritable so drivers can keep
+// their addresses in scalar registers. The switch is opt-in because it changes generated SPIR-V.
+static bool ReadonlyBuffersEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_READONLY_BUFFERS");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	return enabled;
+}
+
 uint32_t TypeVoid(EmitterState& state) {
 	if (state.void_type == 0) {
 		state.void_type = state.builder.Type(spv::OpTypeVoid);
@@ -298,6 +308,10 @@ void DefineDescriptors(EmitterState& state) {
 					// must participate in visibility for cache-bypassing polling loads.
 					if (info.coherent_buffers) {
 						state.builder.AddAnnotation(spv::OpDecorate, buffer.variable, spv::DecorationCoherent);
+					}
+					if (ReadonlyBuffersEnabled() && !info.buffer_writes && !info.coherent_buffers) {
+						state.builder.AddAnnotation(spv::OpDecorate, buffer.variable,
+						                            spv::DecorationNonWritable);
 					}
 				}
 				break;
