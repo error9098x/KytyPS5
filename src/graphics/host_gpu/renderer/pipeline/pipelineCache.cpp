@@ -731,12 +731,22 @@ void PipelineCache::InitializeDriverCache() {
 		PipelineCacheLog("Vulkan pipeline cache: disabled (unknown git revision)");
 		return;
 	}
-	if (git_hash.ends_with("-dirty")) {
-		PipelineCacheLog("Vulkan pipeline cache: disabled (dirty build)");
+	// KYTY_PIPELINE_CACHE_DEV=1: also use the driver cache in dirty (development) builds, in a
+	// separate <title>-dev.bin so a clean build's cache is never touched. Safe because the driver
+	// keys entries by pipeline content (stale entries just miss) and the file signature still
+	// carries the git revision. Without it every development run rebuilds every pipeline.
+	static const bool dev_cache = [] {
+		const char* v = std::getenv("KYTY_PIPELINE_CACHE_DEV");
+		return v != nullptr && (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0);
+	}();
+	const bool dirty = git_hash.ends_with("-dirty");
+	if (dirty && !dev_cache) {
+		PipelineCacheLog("Vulkan pipeline cache: disabled (dirty build; KYTY_PIPELINE_CACHE_DEV=1 enables)");
 		return;
 	}
 
-	m_driver_cache_path     = std::filesystem::path("_PipelineCache") / (title_id + ".bin");
+	m_driver_cache_path =
+	    std::filesystem::path("_PipelineCache") / (title_id + (dirty ? "-dev.bin" : ".bin"));
 	const auto path         = Common::PathToString(m_driver_cache_path);
 	const bool cache_exists = Common::File::IsFileExisting(m_driver_cache_path);
 	if (cache_exists) {
