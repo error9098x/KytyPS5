@@ -216,10 +216,39 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 		constexpr uint64_t MaxCpuFill = 16ull * 1024 * 1024;
 		static const bool nosync_ab = AbToggle::Listed("KYTY_CLEAR_META_NOSYNC"); // KYTY_AB_TOGGLE
 		// KYTY_CLEAR_META_NOSYNC=auto: on only while the GPU thread is saturated with clear drains.
-		if (!AbToggle::Gate(nosync_ab, nosync, AbToggle::AutoWanted()) || (address & 3u) != 0 || (size & 3u) != 0 || size > MaxCpuFill ||
-		    !context.IsMapped(address, size) ||
-		    context.GetBufferCache().IsRegionGpuModified(address, size) ||
-		    cache.IsRegionRegistered(address, size)) {
+		const bool nosync_on = AbToggle::Gate(nosync_ab, nosync, AbToggle::AutoWanted());
+		// Why a recognised fill was not CPU-applied (logged every ~2 s while the skip is on):
+		// 0 misaligned, 1 too large, 2 unmapped, 3 range GPU-modified, 4 range owned by a cached image.
+		static std::atomic<uint64_t> reject[5] {};
+		static std::atomic<uint64_t> accepted {0};
+		static std::atomic<int64_t>  last_log_us {0};
+		int reason = -1;
+		if (nosync_on) {
+			if ((address & 3u) != 0 || (size & 3u) != 0) {
+				reason = 0;
+			} else if (size > MaxCpuFill) {
+				reason = 1;
+			} else if (!context.IsMapped(address, size)) {
+				reason = 2;
+			} else if (context.GetBufferCache().IsRegionGpuModified(address, size)) {
+				reason = 3;
+			} else if (cache.IsRegionRegistered(address, size)) {
+				reason = 4;
+			}
+			(reason >= 0 ? reject[reason] : accepted).fetch_add(1, std::memory_order_relaxed);
+			const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+			                           std::chrono::steady_clock::now().time_since_epoch())
+			                           .count();
+			int64_t last = last_log_us.load(std::memory_order_relaxed);
+			if (now_us - last >= 2'000'000 &&
+			    last_log_us.compare_exchange_strong(last, now_us, std::memory_order_relaxed)) {
+				LOGF("ClearMetaNoSync: cpu_fill=%" PRIu64 " reject misaligned=%" PRIu64 " large=%" PRIu64
+				     " unmapped=%" PRIu64 " gpu_modified=%" PRIu64 " image_owned=%" PRIu64 "\n",
+				     accepted.exchange(0), reject[0].exchange(0), reject[1].exchange(0),
+				     reject[2].exchange(0), reject[3].exchange(0), reject[4].exchange(0));
+			}
+		}
+		if (!nosync_on || reason >= 0) {
 			return false;
 		}
 		// Lift write tracking for the whole range first (pages are not GPU-dirty, so this only
