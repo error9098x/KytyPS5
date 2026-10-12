@@ -4,6 +4,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+#include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
@@ -122,6 +123,15 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
                                    vk::AccessFlags2                     destination_access,
                                    vk::PipelineStageFlags2              destination_stage,
                                    std::optional<ImageSubresourceRange> range) {
+	// KYTY_RETIRE_ON_LAST_USE=1 only: every recorded use of the image (Transit from copies, clears,
+	// blits, render targets, uploads, downloads) computes its barriers here, so stamping here
+	// covers the paths the draw/dispatch pins do not (they used to be safe only if no submit fell
+	// between preparation and recording). The tick is the open command buffer's, so a retired
+	// image outlives every command buffer that references it, as MoltenVK's deferred encoding
+	// (PREFILL=0/1) requires.
+	if (TextureCache::RetireOnLastUse() && last_use_tick != PinnedTick) {
+		last_use_tick = std::max(last_use_tick, m_scheduler.CurrentTick());
+	}
 	auto& state              = backing.state;
 	auto& subresource_states = backing.subresource_states;
 	if (range && info.IsVolume()) {
