@@ -268,13 +268,14 @@ static void ApplyPreset() {
 	Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id);
 	const char* preset = std::getenv("KYTY_PRESET");
 	if (preset == nullptr || preset[0] == '\0') {
-		// Per-title default: Silent Hill: The Short Message runs on extreme unless KYTY_PRESET is
+		// Per-title default: Silent Hill (PPSA10112) and Astro's Playroom (PPSA01325) run on extreme unless KYTY_PRESET is
 		// set (KYTY_PRESET=none restores the plain defaults).
-		if (title_id != "PPSA10112") {
+		if (title_id != "PPSA10112" && title_id != "PPSA01325") {
 			return;
 		}
 		preset = "extreme";
-		Log::WriteToConsoleAndLog("KYTY_PRESET=extreme by default for PPSA10112 (KYTY_PRESET=none disables)\n");
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "KYTY_PRESET=extreme by default for {} (KYTY_PRESET=none disables)\n", title_id));
 	}
 	const std::string_view mode = preset;
 	if (mode == "none" || mode == "off") {
@@ -293,6 +294,9 @@ static void ApplyPreset() {
 	    {"KYTY_SPEC_READ_HOIST", "1"},          {"KYTY_DEPTH_READ_UNION", "1"},
 	    {"KYTY_WRITE_FAULT_SPAN", "auto"},      {"KYTY_FAULT_COALESCE_MAX_KB", "4096"},
 	    {"KYTY_EVICT_SMART", "1"},              {"KYTY_EVICT_ALIAS", "1"},
+	    // Report a 720p display: titles that size their render targets from the output status
+	    // render 9x fewer pixels than at 4K (the presenter scales the result to the window).
+	    {"KYTY_VIDEOOUT_RES", "720"},
 	};
 	static constexpr PresetVar extreme_sh_vars[] = {
 	    {"KYTY_UE_STREAMING_POOL_MB", "400"},
