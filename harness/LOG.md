@@ -1085,3 +1085,86 @@ Peak memory: ctl footprint 23.0 GB / swap 7.3 GB; hog 20.0 GB (+3 GiB memhog) / 
 - GPU thread, in game (180-277 s, % of wall): **drain 35.6 %** (rb_clear 12.3, rb_self 12.2, gc 9.8, stream 0.8), **encode 17.6 %**, **prep 16.7 %**, **pipeline 9.9 %**, other 9.9 %, bda 4.1 %, commit 3.6 %, rt 0.7 %, submit 0.5 %, idle 1.4 %; 4.8 k draws/s, 96 dispatches/s. Intro (0-60 s): idle 26.6 %, drain 57.1 % (rb_clear 43.8 %, rb_fault 9.4 %). Consistent with the P1.2 sample profile (Wait 25 %, addCommand 16.5 %, GetGraphicsPrograms 8 %).
 - **In-run A/B of KYTY_CLEAR_META_NOSYNC in game (windows ≥ 160 s)**: rb_clear drain **32.9 % → 1.1 %** of GPU-thread wall (mechanism confirmed), but part of the wait moves: rb_self 5.8 → 17.1 %, gc 5.0 → 13.4 %; total drain 45.1 → 32.5 %, draws/s 4219 → 4727 (+12 %). FPS on 1.35 vs off 0.88 (on/off 1.53), but FPS rises through the run, so pairwise vs both neighbours it is about +17 % to +59 %. In the intro NOSYNC is a clear regression. → candidate for an "in game only" rule later (P3.2 family); not promoted.
 - Animal Well 3/3 with `KYTY_GPU_THREAD_STATS=1 KYTY_AB_TOGGLE=SPEC_READ_HOIST,BDA_SYNC_SKIP,CLEAR_META_NOSYNC KYTY_AB_PERIOD_S=10` (aw-regress-{1,2,3}-p2infra): 33/43, 34/44, 34/44 content/sampled, stage 2, no exception.
+
+## 2026-10-12 ~17:10 IST — M1 (UE config overrides) + M2 (KYTY_EVICT_TILED_DOWNLOAD), engine.ini stall = host CoreAudio (runner r8)
+
+Branch codex/animal-well-compat. HEAD = LOG commit on top of 7faf6d1b (see final reply / git log).
+
+### Commits
+- 4bc9a7bb emulator: opt-in Unreal config overrides for PPSA10112: KYTY_UE_STREAMING_POOL_MB, KYTY_UE_TEXTURE_QUALITY (sg.TextureQuality), KYTY_UE_CVARS ("a=b;c=d"). They are written as a marked [SystemSettings] block in _DownloadData/PPSA10112/shpc/saved/ps5/engine.ini and removed when unset (M1).
+- 5a4b67d3 harness: p1.sh host-audio check before each run (times afplay, logs WARN if slow or failed). It also writes an `INVALID` line to /tmp/r8.log when the run's SDL audio open failed.
+- 98053318 harness: profsum.py idle-frame detection (an uncommitted change left from earlier r8 work).
+- 7faf6d1b gpu: opt-in KYTY_EVICT_TILED_DOWNLOAD=1 (needs KYTY_EVICT_SMART=1) and KYTY_EVICT_TILED_DL_PER_CALL (default 2). EvictStats gains `tiled_dl=<n>/<MiB> tiled_dl_fail=` (M2). Animal Well 3/3 (aw-regress-{1,2,3}-m2tdl: 33/43, 34/44, 33/43 frames with content, stage 2, no exception).
+- The LOG commit (harness/LOG.md entry).
+
+### Task 1: the "engine.ini boot stall" came from host CoreAudio, not from the ini
+- Every M1 run between 14:50 and 15:17 logged `AudioOut: SDL_OpenAudioDeviceStream failed: CoreAudio error (AudioQueueStart): -66681`. Every run before that (including ctl-1 and the Animal Well runs) and every run after 16:14 opened audio fine.
+- The two boot gaps (32.8 s and 20.6 s) sit exactly around the three failed audio opens (guest-printf lines 86857/86863 and 106234 in shtsm-m1-pool1024-1). Each failed open blocks about 15 s inside CoreAudio.
+- With no audio device the game also paces differently: 60 Hz presents and much slower progression. So the pool1024 and inismoke runs cannot be compared with anything.
+- Repro: shtsm-m1-audsmoke-1 had engine.ini present (pool 400) and audio working. It showed no stall: 539 presents in 0-20 s (ctl 549) and no gap longer than 3 s.
+- At 16:13 the first `afplay` of a short sound took 11 s and later ones took 1.4 s. So the speaker device was slow or stuck earlier.
+- Fix: there is no Kyty file-system bug to fix. The harness now warns before a run and marks such runs INVALID. I did not add a Kyty-side fail-fast or null audio sink: the no-device pacing would still change the game's timing, so those runs would stay non-comparable.
+
+### Per-arm table
+All arms: 280 s, run_arm.sh best480-4 route. The FPS window is 180-280 s, measured from FrameTiming.
+
+| arm | flags | peak fp | peak swap (start) | swap-in/s 180-280 | fps 180-280 (presents) | footprint @180 s / @~250 s (SYSTEM_MANAGED + owned graphics) | GPU usage end |
+|---|---|---|---|---|---|---|---|
+| ctl shtsm-p1-ctl-1 | none | 23.0 GB | 7.3 (2.1) GB | 1368 | 1.40 (p1977-2116) | 19 GB: 9.6 + 7.8 / 22 GB: 11 + 8.7 | 8559 MiB |
+| M1 shtsm-m1-p200tq0-1 | POOL=200, TQ=0 | 21.0 GB | 8.2 (2.1) | 2733 | 1.00 (p2035-2134) | 19: 9.8 + 7.7 / 20: 10 + 8.0 | 8109 |
+| M1 shtsm-m1-sp50-1 (*) | POOL=200, TQ=0, CVARS=r.ScreenPercentage=50 | 19.0 | 7.1 (3.5) | 930 | 1.42 (p1517-1658, earlier content) | 18: 8.9 + 7.6 / 18: 9.2 + 7.5 | 7544 |
+| M1 shtsm-m1-pool400-1 (*) | POOL=400 | 17.0 | 6.1 (3.6) | 483 | 1.22 (p1709-1830, earlier content) | 13: 4.7 + 6.2 / 16: 6.9 + 7.3 | 7351 |
+| M2 shtsm-m2-tdl4096-2 (*) | M1(200,TQ0) + EVICT_SMART + ALIAS + TILED_DOWNLOAD, GPU_BUDGET 4096 | 19.0 | 8.3 (2.9) | 885 | 0.94 (p1647-1740) | 16: 9.2 + 5.0 / 17: 9.9 + 5.7 | 6859 |
+| M2 shtsm-m2-tdl6144-1 (*) | same, GPU_BUDGET 6144 | 19.0 | 7.8 (3.7) | 992 | 0.92 (p1785-1876) | 16: 9.4 + 5.0 / 17: 10 + 5.7 | 6793 |
+
+(*) The laptop was not idle for these runs:
+- 1-min load at start rose from 1.2 to 2.0-3.9; the 5-min load reached 6.5 by the last run.
+- Safari/WebKit was active, and swap at start was 2.9-3.7 GB instead of 2.1 GB.
+- Their FPS and progression are therefore confounded. Their intros were already slow before any memory pressure (pool400 p1200→1400: 4.7 fps vs ctl 23.7).
+- Their footprint at a given time is also lower partly because they reached less content.
+
+Scene-matched FPS (pidx.py, between present indices):
+
+| present range | ctl-1 | M1 p200tq0 | M2 tdl6144 | M2 tdl4096 |
+|---|---|---|---|---|
+| p1500→1600 | 8.4 | 25.0 | 6.7 | 4.1 |
+| p1600→1700 | 10.9 | 5.6 | 3.8 | 1.2 |
+| p1700→1800 | 7.9 | 11.9 | 1.8 | – |
+| p1900→2000 | 1.24 | 2.64 | – | – |
+| p2000→2080 | 1.53 | 0.83 | – | – |
+
+M1 p200tq0 is mixed, within noise. Both M2 arms are much slower, but host load confounds them.
+
+Eviction totals:
+- tdl4096: freed 2468 images / 5.3 GB, tiled_dl 194 / 4.1 GB, thrash 515 / 1.6 GB.
+- tdl6144: tiled_dl 288 / 4.2 GB, thrash 488 / 1.7 GB.
+- ctl: thrash 2138 / 3.8 GB (the default GC also re-creates images).
+
+The first M2 attempt (harness/runs/shtsm-m2-tdl4096-1-crash) died at 77 s with `TextureCache: failed to map reusable download buffer`: 4K tiled targets are larger than the 64 MiB download ring. Fixed in 7faf6d1b: images larger than half the ring get a temporary host buffer.
+
+### What worked and what failed
+- **M1 config path works.** UeConfig lines are logged and the values apply at SetBySystemSettingsIni priority, which outranks scalability. That also caps the Cinematic 3000 MiB pool.
+- **M1 alone has a small effect in the clean run:** owned graphics −0.6 GB, peak footprint −2 GB (21.0 vs 23.0), no visible FPS gain, and swap-in went up.
+- **pool400-1 shows a bigger cut** (13 GB at 180 s, 16 GB at ~250 s), but it ran under host load and reached less content. It needs a clean repeat before I'd trust it.
+- **Visual check:** frames render normally with sg.TextureQuality=0 and pool 200, with no black or corrupt frames ((sandbox work/r8/img/) p200tq0-2130.jpg, tdl-1740.jpg, sp50-1650.jpg).
+- **r.ScreenPercentage=50 does not help:** tiled_gpu stays around 3.1 GB, so render targets are not shrinking. Drop it.
+- **M2 mostly makes the GPU budget enforceable:**
+  - Owned graphics drops from 7.7-8.7 GB to 5.0-5.7 GB (−3 GB) at the same wall time.
+  - Usage still overshoots the budget (6.8 GB vs 4096/6144), because the remaining images are younger than the 80-160 tick age.
+  - Cost: re-creation thrash and slower progression, though host load confounds the size of the slowdown.
+  - Not acceptable as-is under the plan's drain/FPS rule without a clean repeat.
+- **Guest memory is now the dominant term.** SYSTEM_MANAGED (9-11 GB) is untouched by M1 and M2.
+
+### Best combined flag set for memory
+- `KYTY_UE_STREAMING_POOL_MB=400`, optionally with `KYTY_UE_TEXTURE_QUALITY=0`.
+- If FPS can be sacrificed, add `KYTY_EVICT_SMART=1 KYTY_EVICT_ALIAS=1 KYTY_EVICT_TILED_DOWNLOAD=1 KYTY_GPU_BUDGET_MB=6144`.
+- Pool 400 combined with M2 was not run.
+
+**Remaining gap:** the clean-run peak is 21 GB (M1); M1+M2 reached 19 GB in confounded runs. The target is 15 GB, so 4-6 GB remain. That is almost all guest memory (about 10 GB SYSTEM_MANAGED) plus about 5.7 GB of GPU copies after M2.
+
+**M3** (dedup/remap of clean textures in guest memory) looks necessary to get under 15 GB. Not started, as instructed.
+
+### Next steps (when the laptop is idle)
+1. Repeat pool400 and run a POOL=400 + TILED_DOWNLOAD at 6144 arm, with load below 1.5 and starting swap around 2 GB. Compare scene-matched against ctl-1.
+2. If M2 stays slow, make tiled download less aggressive (age floor 160, KYTY_EVICT_TILED_DL_PER_CALL=1), or only evict tiled images idle for more than 320 ticks.
+
