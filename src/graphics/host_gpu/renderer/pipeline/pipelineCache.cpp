@@ -107,9 +107,17 @@ std::string PipelineCacheTitleId() {
 // Metal vertex functions expose no subgroup builtins, so any vertex shader that reads the
 // subgroup lane id fails to compile. The titles below only use the lane id in per-lane masks
 // that Kyty resolves from the vertex index; keep the substitution strictly per-title.
+// Metal has no SIMD-group functions in vertex functions, so SPIRV-Cross rejects any vertex shader
+// that uses subgroup builtins/ops ("Subgroup builtins are not available in this type of
+// function"; Astro's Playroom PPSA01325 died on its second vertex shader). The fallback (lane id
+// from the vertex index, single-lane ballot/shuffle) was validated on Animal Well and Silent Hill;
+// it is needed by every title on Apple. KYTY_VERTEX_SUBGROUP_FALLBACK=0 disables it.
 bool PipelineCacheNeedsVertexSubgroupFallback() {
-	const auto title_id = PipelineCacheTitleId();
-	return title_id == "PPSA22520" || title_id == "PPSA10112";
+	static const bool enabled = [] {
+		const char* v = std::getenv("KYTY_VERTEX_SUBGROUP_FALLBACK");
+		return !(v != nullptr && (std::strcmp(v, "0") == 0 || std::strcmp(v, "false") == 0));
+	}();
+	return enabled;
 }
 
 // KYTY_SRT_MEMO=2 (swarm entry 11 design): reuse a program-cache entry's materialized resources when the user data,
