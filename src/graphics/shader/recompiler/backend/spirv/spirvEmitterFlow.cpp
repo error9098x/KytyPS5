@@ -83,7 +83,17 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 	    kind == IR::StageInputKind::BaryCoordNoPerspective) {
 		const auto value   = state.builder.AllocateId();
 		const auto bits    = state.builder.AllocateId();
-		if (centroid || sample) {
+#if defined(__APPLE__)
+		// Metal's [[barycentric_coord]] must be a plain float3: InterpolateAtCentroid/Sample on it
+		// makes SPIRV-Cross declare it as interpolant<float3, ...>, which the Metal compiler rejects
+		// ("not valid for attribute 'barycentric_coord'"; Astro's Playroom PPSA01325 fragment
+		// shader). Read the pixel-center value instead: identical without MSAA, off only at
+		// triangle edges with MSAA/sample shading.
+		const bool pull_interpolation = false;
+#else
+		const bool pull_interpolation = centroid || sample;
+#endif
+		if (pull_interpolation) {
 			const auto coordinates = state.builder.AllocateId();
 			state.builder.RequireCapability(spv::CapabilityInterpolationFunction);
 			if (sample) {
