@@ -201,6 +201,21 @@ private:
 	bool                                   m_evict_reclaiming    = false;
 	uint64_t                               m_evict_age           = 160;
 	uint64_t                               m_evict_window_thrash = 0;
+	// KYTY_CLEAR_META_PREDICT=1 (textureCache.cpp, MaterializeColorClear).
+	struct ClearPredict {
+		int64_t               frame           = -1;
+		uint32_t              events          = 0; // GPU-modified materializations this frame
+		uint32_t              good_frames     = 0; // consecutive frames: 1 event, same decisions
+		uint32_t              since_verify    = 0;
+		bool                  target_logged   = false;
+		bool                  consistent      = false;
+		uint64_t              calls           = 0;
+		uint64_t              skipped         = 0;
+		uint64_t              real_reads      = 0;
+		uint64_t              next_report     = 1;
+		std::vector<int16_t>  codes;               // per slice: clear code, or -1 for no clear
+	};
+	std::unordered_map<uint64_t, ClearPredict> m_clear_predict;
 	uint64_t                               m_evict_window_short  = 0;
 	uint64_t                               m_evict_window_calls  = 0;
 	uint64_t                               m_evict_window_start  = 0;

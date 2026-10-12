@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_format.h"
+#include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
@@ -14,6 +15,7 @@
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/renderer/renderContext.h"
 #include "kernel/memory.h"
 #include "loader/systemContent.h"
 
@@ -222,6 +224,20 @@ static uint64_t EvictTiledMinAge() {
 		return static_cast<uint64_t>(std::clamp<long>(x, 0, 1 << 20));
 	}();
 	return n;
+}
+// KYTY_CLEAR_META_PREDICT=1 (speed hack, in KYTY_PRESET=extreme): MaterializeColorClear must read
+// GPU-written color metadata back (a full GPU drain) to learn whether a render target was fast-
+// cleared and to which colour. Games repeat this per target every frame with the same answer
+// (Astro's Playroom: ~24 drains/s, 50 % of the GPU thread). Once a target has shown, for 4
+// consecutive frames, exactly one such materialization per frame with identical per-slice
+// decisions, the next frames apply the learned decision without the readback; a second
+// GPU-modified materialization of that target in the same frame applies no clear (the real path
+// would see the expanded 0xff keys it wrote back). Every 30th predicted frame takes the real path
+// again to re-verify; any mismatch resets learning. Wrong only if a game changes the clear colour
+// or skips a clear without the pattern breaking first.
+static bool ClearMetaPredictEnabled() {
+	static const bool enabled = EvictEnvFlag("KYTY_CLEAR_META_PREDICT");
+	return enabled;
 }
 // KYTY_EVICT_STATS=1: measure-only. Logs an EvictStats line every 2 s (cache census by eviction
 // class, LRU head blocking, frees, thrash re-creations). Works with either policy.
@@ -1310,13 +1326,90 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 	if (first >= layers || count > layers - first) {
 		EXIT("TextureCache: color view exceeds its native metadata slices\n");
 	}
+	const auto slice_size   = range.size / layers;
+	const bool gpu_modified = m_buffer_cache.IsRegionGpuModified(range.address, range.size);
+	ClearPredict* predict   = nullptr;
+	auto note_predict = [&](bool skipped) {
+		if (predict == nullptr) {
+			return;
+		}
+		predict->calls++;
+		if (skipped) {
+			predict->skipped++;
+		} else {
+			predict->real_reads++;
+		}
+		if (predict->calls >= predict->next_report) {
+			LOGF("ClearMetaPredictCount: guest=0x%016" PRIx64
+			     " calls=%" PRIu64 " skipped=%" PRIu64 " real=%" PRIu64
+			     " good=%u events=%u\n",
+			     range.address, predict->calls, predict->skipped, predict->real_reads,
+			     predict->good_frames, predict->events);
+			predict->next_report = predict->next_report > (UINT64_MAX / 2)
+			                          ? UINT64_MAX
+			                          : predict->next_report * 2;
+		}
+	};
+	if (gpu_modified && ClearMetaPredictEnabled()) {
+		const uint64_t key = range.address ^ (uint64_t {first} << 48u) ^ (uint64_t {count} << 56u);
+		const int64_t  frame = m_scheduler.Context().GetGpu().GetFrameNum();
+		predict              = &m_clear_predict[key];
+		if (!predict->target_logged) {
+			predict->target_logged = true;
+			LOGF("ClearMetaPredictTarget: image=%u/%u guest=0x%016" PRIx64
+			     " meta=0x%016" PRIx64 " first=%u count=%u layers=%u extent=%ux%ux%u format=%s type=%u\n",
+			     id.index, id.generation, range.address, range.size, first, count, layers,
+			     desc.info.extent.width, desc.info.extent.height, desc.info.extent.depth,
+			     vk::to_string(view.format).c_str(), static_cast<unsigned>(desc.type));
+		}
+		if (predict->frame != frame) {
+			predict->good_frames = (predict->events == 1 && predict->consistent) ? predict->good_frames + 1 : 0;
+			predict->events      = 0;
+			predict->frame       = frame;
+		}
+		const bool learned = predict->good_frames >= 4 && predict->codes.size() == count;
+		if (learned && predict->events >= 1) {
+			predict->events++; // a second use this frame: the real path would see 0xff keys
+			note_predict(true);
+			return;
+		}
+		if (learned && predict->since_verify < 30) {
+			predict->since_verify++;
+			predict->events = 1;
+			static std::atomic<uint64_t> predicted {0};
+			const auto n = predicted.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (n == 1 || (n & (n - 1)) == 0) {
+				LOGF("ClearMetaPredict: %" PRIu64 " readbacks skipped (guest=0x%016" PRIx64 ")\n", n,
+				     range.address);
+			}
+			for (uint32_t slice = 0; slice < count; slice++) {
+				if (predict->codes[slice] < 0) {
+					continue;
+				}
+				vk::ClearValue clear {};
+				if (!DecodeColorClear(desc, static_cast<uint8_t>(predict->codes[slice]), clear.color)) {
+					continue;
+				}
+				std::scoped_lock lock {m_lock};
+				ClearImage(m_scheduler.Current(), id, view.format,
+				           {vk::ImageAspectFlagBits::eColor, view.base_level, view.level_count,
+				            image_first + slice, 1}, clear);
+			}
+			note_predict(true);
+			return;
+		}
+		predict->since_verify = 0; // real path: learn or re-verify
+	}
 	// Finish native metadata writes before reading backing bytes. This can submit the scheduler,
 	// so discovery runs before final draw uploads and never holds the texture lock across it.
-	if (m_buffer_cache.IsRegionGpuModified(range.address, range.size)) {
+	if (gpu_modified) {
+		if (predict != nullptr) {
+			note_predict(false);
+		}
 		ReadbackStats::Scope scope(ReadbackStats::Origin::ClearMeta);
 		m_buffer_cache.ReadMemory(range.address, range.size, false);
 	}
-	const auto slice_size = range.size / layers;
+	std::vector<int16_t> decisions(predict != nullptr ? count : 0, int16_t {-1});
 	for (uint32_t slice = 0; slice < count; slice++) {
 		const auto address = range.address + slice_size * (first + slice);
 		uint8_t code = 0;
@@ -1334,6 +1427,9 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		if (!std::all_of(bytes.begin(), bytes.end(), [code](uint8_t byte) { return byte == code; })) {
 			continue;
 		}
+		if (predict != nullptr) {
+			decisions[slice] = code;
+		}
 		{
 			std::scoped_lock lock {m_lock};
 			ClearImage(m_scheduler.Current(), id, view.format,
@@ -1346,6 +1442,14 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			std::fill(bytes.begin(), bytes.end(), uint8_t {0xff});
 			m_buffer_cache.InvalidateMemory(address, slice_size);
 			LibKernel::Memory::WriteBacking(address, bytes.data(), bytes.size());
+		}
+	}
+	if (predict != nullptr) {
+		predict->consistent = predict->codes == decisions;
+		predict->codes      = std::move(decisions);
+		predict->events++;
+		if (!predict->consistent) {
+			predict->good_frames = 0;
 		}
 	}
 }
