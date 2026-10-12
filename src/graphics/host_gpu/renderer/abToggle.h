@@ -89,30 +89,39 @@ inline bool Gate(bool listed, bool env_value, bool auto_mode = false) {
 //  Measured (Silent Hill): in game rb_clear drain is 12-33 % with the GPU thread saturated (idle
 //  ~1 %) and skipping the clear readback helps (+17..59 % fps); in the intro rb_clear is even
 //  higher (44 %) but the GPU thread idles ~27 %, so skipping only moves the wait and costs fps.
-//  So: ON needs heavy rb_clear AND a saturated thread for 2 windows; OFF when it idles >= 10 %
-//  for 2 windows; after 3 on-windows a trial compares draws/s and total drain share with the last
-//  off-window and backs out (60 s lockout) if neither improved.
+//  - ON after 2 off-windows with rb_clear >= 8 % and idle < 5 % (judged only while off, so the
+//    skip's own effect never feeds back into the decision to enable it).
+//  - Trial: the mean draws/s and total drain share of on-windows 2-3 are compared with the last 2
+//    off-windows; if draws/s did not rise 5 % and drain did not fall 5 points it backs out and
+//    stays off for 60 s.
+//  - Re-probe: every 60 s while on it goes off for 2 windows and re-decides from fresh off data,
+//    so a scene change (game -> cutscene/menu) is noticed. Idle while on is not used: a faster GPU
+//    thread waiting on the guest RenderThread is the skip working, not a reason to stop.
 inline void AutoUpdate(double rb_clear, double idle, double drain, double draws_per_s) {
 	if (!AutoWanted() || Listed("KYTY_CLEAR_META_NOSYNC")) {
 		return;
 	}
 	static bool    on = false;
-	static int     hi = 0, lo = 0, on_windows = 0;
-	static double  off_dps = 0, off_drain = 0;
-	static int64_t lockout_until_us = 0;
+	static int     hi = 0, on_windows = 0;
+	static double  off_dps[2] = {0, 0}, off_drain[2] = {0, 0}, on_dps = 0, on_drain = 0;
+	static int64_t lockout_until_us = 0, on_since_us = 0;
 	const int64_t  now_us = std::chrono::duration_cast<std::chrono::microseconds>(
 	                            std::chrono::steady_clock::now().time_since_epoch())
 	                            .count();
 	auto set = [&](bool v, const char* why) {
 		on = v;
 		AutoPhase().store(v, std::memory_order_relaxed);
-		hi = lo = on_windows = 0;
+		hi = on_windows = 0;
+		on_dps = on_drain = 0;
+		on_since_us       = now_us;
 		LOGF("ClearMetaAuto: %s (%s) t_us=%" PRId64 " rb_clear=%.1f%% idle=%.1f%% drain=%.1f%% draws/s=%.0f\n",
 		     v ? "on" : "off", why, now_us, rb_clear * 100, idle * 100, drain * 100, draws_per_s);
 	};
 	if (!on) {
-		off_dps   = draws_per_s;
-		off_drain = drain;
+		off_dps[0]   = off_dps[1];
+		off_drain[0] = off_drain[1];
+		off_dps[1]   = draws_per_s;
+		off_drain[1] = drain;
 		if (now_us < lockout_until_us) {
 			return;
 		}
@@ -123,14 +132,21 @@ inline void AutoUpdate(double rb_clear, double idle, double drain, double draws_
 		return;
 	}
 	on_windows++;
-	lo = idle >= 0.10 ? lo + 1 : 0;
-	if (lo >= 2) {
-		set(false, "gpu thread idle");
+	if (on_windows >= 2 && on_windows <= 3) { // window 1 still carries the switch-over
+		on_dps += draws_per_s / 2;
+		on_drain += drain / 2;
+	}
+	if (on_windows == 3) {
+		const double base_dps   = (off_dps[0] + off_dps[1]) / 2;
+		const double base_drain = (off_drain[0] + off_drain[1]) / 2;
+		if (on_dps < base_dps * 1.05 && on_drain > base_drain - 0.05) {
+			lockout_until_us = now_us + 60'000'000;
+			set(false, "trial: no gain, locked out 60 s");
+		}
 		return;
 	}
-	if (on_windows == 3 && draws_per_s < off_dps * 1.05 && drain > off_drain - 0.05) {
-		lockout_until_us = now_us + 60'000'000;
-		set(false, "trial: no gain, locked out 60 s");
+	if (now_us - on_since_us >= 60'000'000) {
+		set(false, "periodic re-probe");
 	}
 }
 
