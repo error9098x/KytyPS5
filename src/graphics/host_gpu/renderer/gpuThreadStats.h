@@ -34,16 +34,24 @@
 #include <cstring>
 
 #include "common/logging/log.h"
+#include "graphics/host_gpu/renderer/abToggle.h"
 
 namespace Libs::Graphics::GpuThreadStats {
 
 enum class Cat : int { Other = 0, Idle, Drain, Submit, Encode, Commit, Pipeline, Prep, Bda, Rt, Cmd, Count };
 
-inline bool Enabled() {
+// KYTY_GPU_THREAD_STATS=1 logs the stats lines; KYTY_CLEAR_META_NOSYNC=auto also collects them
+// (it is driven by them, see AbToggle::AutoUpdate) but logs nothing unless the former is set.
+inline bool LogEnabled() {
 	static const bool enabled = [] {
 		const char* value = std::getenv("KYTY_GPU_THREAD_STATS");
 		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
 	}();
+	return enabled;
+}
+
+inline bool Enabled() {
+	static const bool enabled = LogEnabled() || AbToggle::AutoWanted();
 	return enabled;
 }
 
@@ -148,8 +156,18 @@ inline void MaybePrint() {
 	static_assert(std::size(site_names) == kDrainSites);
 	auto ms  = [](uint64_t ns) { return static_cast<double>(ns) / 1e6; };
 	auto pct = [&](uint64_t ns) { return 100.0 * static_cast<double>(ns) / wall; };
-	char line[1400];
 	const uint64_t idle = s.ns[static_cast<int>(Cat::Idle)];
+	AbToggle::AutoUpdate(static_cast<double>(s.drain_site_ns[3]) / wall, static_cast<double>(idle) / wall,
+	                     static_cast<double>(s.ns[static_cast<int>(Cat::Drain)]) / wall,
+	                     static_cast<double>(s.draws) * 1e9 / wall);
+	if (!LogEnabled()) {
+		s.ns.fill(0);
+		s.drain_site_ns.fill(0);
+		s.draws = s.dispatches = 0;
+		s.interval_start_ns    = now;
+		return;
+	}
+	char line[1400];
 	int n = std::snprintf(line, sizeof(line), "GpuThreadStats: dt_ms=%.0f busy=%.1f%%", wall / 1e6,
 	                      100.0 - pct(idle));
 	for (int i = 1; i < static_cast<int>(Cat::Count); i++) {
