@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/abToggle.h"
 #include "graphics/host_gpu/renderer/syncAudit.h"
 
 #include <cinttypes>
@@ -289,7 +290,9 @@ void RenderContext::PrepareBda() {
 		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
 	}();
 	const uint64_t generation = g_cpu_dirty_generation.load(std::memory_order_acquire);
-	if (skip_enabled && m_bda_synced_valid && generation == m_bda_synced_generation) {
+	static const bool skip_ab = AbToggle::Listed("KYTY_BDA_SYNC_SKIP"); // KYTY_AB_TOGGLE
+	if (AbToggle::Gate(skip_ab, skip_enabled) && m_bda_synced_valid &&
+	    generation == m_bda_synced_generation) {
 		m_fault_process_pending = true;
 		return;
 	}

@@ -23,6 +23,7 @@
 #include "libs/agc.h"
 #include "libs/errno.h"
 #include "graphics/host_gpu/renderer/gpuThreadStats.h"
+#include "graphics/host_gpu/renderer/abToggle.h"
 
 #include <algorithm>
 #include <array>
@@ -504,6 +505,7 @@ void GuestGpu::ThreadRun(void* data) {
 
 	for (;;) {
 		GpuThreadStats::MaybePrint();
+		AbToggle::Tick();
 		Submission                   submission;
 		Common::UniqueFunction<void> command;
 		bool                         has_submission = false;

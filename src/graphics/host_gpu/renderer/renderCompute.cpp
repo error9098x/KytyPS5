@@ -25,6 +25,7 @@
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 #include "graphics/host_gpu/renderer/gpuThreadStats.h"
+#include "graphics/host_gpu/renderer/abToggle.h"
 
 #include <chrono>
 #include <algorithm>
@@ -213,7 +214,8 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 		auto&          context = command.GetContext();
 		const uint64_t address = descriptor.Base48();
 		constexpr uint64_t MaxCpuFill = 16ull * 1024 * 1024;
-		if (!nosync || (address & 3u) != 0 || (size & 3u) != 0 || size > MaxCpuFill ||
+		static const bool nosync_ab = AbToggle::Listed("KYTY_CLEAR_META_NOSYNC"); // KYTY_AB_TOGGLE
+	if (!AbToggle::Gate(nosync_ab, nosync) || (address & 3u) != 0 || (size & 3u) != 0 || size > MaxCpuFill ||
 		    !context.IsMapped(address, size) ||
 		    context.GetBufferCache().IsRegionGpuModified(address, size) ||
 		    cache.IsRegionRegistered(address, size)) {

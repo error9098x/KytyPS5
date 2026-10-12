@@ -25,6 +25,7 @@
 // Header-only so the sandbox harness compiles this exact code.
 
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/host_gpu/renderer/abToggle.h"
 
 #include <array>
 #include <cstdint>
@@ -54,7 +55,8 @@ namespace Libs::Graphics::StateCache {
 // refactor: same checks, same order, same EXITs; records nothing different into Vulkan.
 [[nodiscard]] inline bool SpecReadHoistEnabled() noexcept {
 	static const bool enabled = ParseFlag(std::getenv("KYTY_SPEC_READ_HOIST"));
-	return enabled;
+	static const bool ab      = AbToggle::Listed("KYTY_SPEC_READ_HOIST"); // KYTY_AB_TOGGLE
+	return AbToggle::Gate(ab, enabled);
 }
 
 struct Stats {
