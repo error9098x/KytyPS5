@@ -210,6 +210,19 @@ static size_t EvictTiledDownloadsPerCall() {
 	}();
 	return n;
 }
+// KYTY_EVICT_TILED_MIN_AGE=<GC ticks> (with KYTY_EVICT_TILED_DOWNLOAD=1; default 0 = off): a tiled
+// download costs a GPU->guest copy and, if the image comes back, a re-creation that reads the guest
+// pages cold (M2 runs: ~500 thrash re-creations / 1.6 GB). Only images idle at least this many GC
+// ticks are downloaded (e.g. 320 vs the adaptive 32-160 for other victims), and no tiled downloads
+// happen in a 256-tick window that already saw > 4 thrash re-creations.
+static uint64_t EvictTiledMinAge() {
+	static const uint64_t n = [] {
+		const char* v = std::getenv("KYTY_EVICT_TILED_MIN_AGE");
+		const long  x = v != nullptr ? std::strtol(v, nullptr, 10) : 0;
+		return static_cast<uint64_t>(std::clamp<long>(x, 0, 1 << 20));
+	}();
+	return n;
+}
 // KYTY_EVICT_STATS=1: measure-only. Logs an EvictStats line every 2 s (cache census by eviction
 // class, LRU head blocking, frees, thrash re-creations). Works with either policy.
 static bool EvictStatsEnabled() {
@@ -2830,8 +2843,20 @@ bool TextureCache::RunSmartReclaim(uint64_t tick) {
 	const uint64_t age       = std::min(m_evict_age, tick);
 	const bool     alias     = EvictAliasEnabled();
 	const bool     tiled_dl  = EvictTiledDownloadEnabled();
-	const size_t   tiled_cap = tiled_dl ? EvictTiledDownloadsPerCall() : 0;
+	const uint64_t tiled_age = EvictTiledMinAge();
+	size_t         tiled_cap = tiled_dl ? EvictTiledDownloadsPerCall() : 0;
 	size_t         tiled_downloads = 0;
+	// ForEachItemBelow walks oldest first, so the images idle >= tiled_age are a prefix of the scan.
+	size_t tiled_prefix = std::numeric_limits<size_t>::max();
+	if (tiled_dl && tiled_age > 0) {
+		tiled_prefix = 0;
+		if (m_evict_window_thrash > 4) {
+			tiled_cap = 0;
+		} else if (tick > tiled_age) {
+			m_lru_cache.ForEachItemBelow(tick - tiled_age,
+			                             [&](ImageId) { return ++tiled_prefix >= kMaxEvictScan; });
+		}
+	}
 
 	std::vector<ImageId> victims;
 	victims.reserve(kMaxEvictCount);
@@ -2861,7 +2886,7 @@ bool TextureCache::RunSmartReclaim(uint64_t tick) {
 				if (alias && IsStaleAlias(id, *image)) {
 					break;
 				}
-				if (tiled_downloads < tiled_cap && BuildDownload(*image).valid) {
+				if (tiled_downloads < tiled_cap && scanned <= tiled_prefix && BuildDownload(*image).valid) {
 					tiled_downloads++;
 					break;
 				}
