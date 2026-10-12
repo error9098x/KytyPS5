@@ -23,6 +23,7 @@
 #include "libs/network.h"
 #include "loader/runtimeLinker.h"
 #include "loader/systemContent.h"
+#include "loader/x64InstructionEmulator.h"
 #include "loader/timer.h"
 
 #include <cstdlib>
@@ -254,6 +255,17 @@ static void Init(const Config::ConfigOptions& cfg, const std::filesystem::path& 
 
 	if (Common::File::IsFileExisting(param_json)) {
 		Loader::SystemContentLoadParamSfo(param_json);
+		// Silent Hill: The Short Message: split 256-bit store sites jump to a trampoline instead of
+		// trapping (about 128x fewer SIGILLs, RenderThread _sigtramp 16 % -> 5.7 %).
+		// KYTY_WIDE_STORE_NOTRAP=0 disables it.
+		if (std::string title_id;
+		    Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id) && title_id == "PPSA10112") {
+			Loader::X64InstructionEmulator::SetWideStoreNoTrapDefault(true);
+			if (const char* v = std::getenv("KYTY_WIDE_STORE_NOTRAP");
+			    v == nullptr || (std::strcmp(v, "0") != 0 && std::strcmp(v, "false") != 0)) {
+				Log::WriteToConsoleAndLog("WIDE_STORE_NOTRAP enabled by default for PPSA10112 (KYTY_WIDE_STORE_NOTRAP=0 disables)\n");
+			}
+		}
 		if (const auto flexible_memory_size = Loader::SystemContentGetFlexibleMemorySize();
 		    flexible_memory_size != 0) {
 			Libs::LibKernel::Memory::SetFlexibleMemorySize(flexible_memory_size);

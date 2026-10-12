@@ -39,6 +39,9 @@ struct WideStoreNoTrapZone {
 	std::vector<uint64_t> chunk_used;   // bump cursor per 1 MiB chunk of the zone
 };
 [[nodiscard]] bool WideStoreNoTrapEnabled();
+// Per-title default, used when KYTY_WIDE_STORE_NOTRAP is unset (=0/=1 always wins). Must be set
+// before the first WideStoreNoTrapEnabled() call (the result is cached).
+void SetWideStoreNoTrapDefault(bool enabled);
 // The first sentinel whose 16 MiB window starts at least min_distance past the code base, or 0.
 [[nodiscard]] uint8_t WideStoreNoTrapSentinel(uint64_t min_distance);
 // Executes a sentinel byte in the zone once through the real SIGILL path. Needs the host

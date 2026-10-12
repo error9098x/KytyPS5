@@ -972,10 +972,23 @@ constexpr std::array<uint8_t, 13> NoTrapSentinels     = {0x06, 0x07, 0x0e, 0x16,
 constexpr uint64_t                NoTrapChunk         = uint64_t {1} << 20u;
 constexpr uint64_t                NoTrapSelfTestBytes = 64;
 
+static std::atomic<bool> g_wide_store_notrap_default {false};
+
+void SetWideStoreNoTrapDefault(bool enabled) {
+	g_wide_store_notrap_default.store(enabled, std::memory_order_relaxed);
+}
+
 bool WideStoreNoTrapEnabled() {
 	static const bool enabled = [] {
-		const char* value = std::getenv("KYTY_WIDE_STORE_NOTRAP");
-		return value != nullptr && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+		if (const char* value = std::getenv("KYTY_WIDE_STORE_NOTRAP"); value != nullptr) {
+			if (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0) {
+				return true;
+			}
+			if (std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0) {
+				return false;
+			}
+		}
+		return g_wide_store_notrap_default.load(std::memory_order_relaxed);
 	}();
 	return enabled;
 }
