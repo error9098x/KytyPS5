@@ -30,6 +30,8 @@
 #include <filesystem>
 #include <string>
 #include <cstring>
+#include <span>
+#include <string_view>
 #include <iterator>
 #include <fstream>
 #include <thread>
@@ -245,6 +247,82 @@ static void ClearDebugTextureFolder() {
 	}
 }
 
+// KYTY_PRESET=compat|fast|extreme: performance presets, like per-game settings in PC/Android
+// emulator front ends. A preset only fills env vars that are unset (anything you set yourself
+// wins, including =0) and logs each value. Applied after the SFO loads (per-title entries) and
+// before any subsystem reads its flags (all are read lazily, once).
+//  compat : Mac correctness route (mesh-emulation scratch, MoltenVK settings) - no speed hacks.
+//  fast   : compat + the flags measured safe on Silent Hill and Animal Well 3/3 (the "best" set,
+//           wide-store no-trap, dev pipeline cache) + the adaptive clear-metadata skip.
+//  extreme: fast + speed over accuracy: always skip the clear-metadata readback (slower intros,
+//           possible wrong clear colours), GPU indirect draws, hoisted/union spec reads, adaptive
+//           write-fault spans, bigger fault downloads, smart texture eviction; per title, e.g.
+//           Silent Hill gets a 400 MiB Unreal texture pool (lower texture detail, less memory).
+struct PresetVar {
+	const char* name;
+	const char* value;
+};
+
+static void ApplyPreset() {
+	const char* preset = std::getenv("KYTY_PRESET");
+	if (preset == nullptr || preset[0] == '\0') {
+		return;
+	}
+	const std::string_view mode = preset;
+	const bool             extreme = mode == "extreme";
+	const bool             fast    = extreme || mode == "fast";
+	if (!fast && mode != "compat") {
+		Log::WriteToConsoleAndLog(fmt::format("KYTY_PRESET={} ignored (expected compat, fast or extreme)\n", mode));
+		return;
+	}
+	std::string title_id;
+	Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id);
+
+	// Earlier entries win (setenv without overwrite), so the more aggressive layers come first.
+	static constexpr PresetVar extreme_vars[] = {
+	    {"KYTY_CLEAR_META_NOSYNC", "1"},        {"KYTY_GPU_INDIRECT", "1"},
+	    {"KYTY_SPEC_READ_HOIST", "1"},          {"KYTY_DEPTH_READ_UNION", "1"},
+	    {"KYTY_WRITE_FAULT_SPAN", "auto"},      {"KYTY_FAULT_COALESCE_MAX_KB", "4096"},
+	    {"KYTY_EVICT_SMART", "1"},              {"KYTY_EVICT_ALIAS", "1"},
+	};
+	static constexpr PresetVar extreme_sh_vars[] = {
+	    {"KYTY_UE_STREAMING_POOL_MB", "400"},
+	};
+	static constexpr PresetVar fast_vars[] = {
+	    {"KYTY_FAULT_COALESCE", "1"},           {"KYTY_BDA_SYNC_SKIP", "1"},
+	    {"KYTY_GC_DRAIN_INTERVAL", "16"},       {"KYTY_UNMAP_FASTPATH", "1"},
+	    {"KYTY_FAULT_WAIT_ON_CALLER", "1"},     {"KYTY_BDA_DIRTY_REGIONS", "1"},
+	    {"KYTY_THREAD_QOS", "1"},               {"KYTY_FLUSH_ON_LABEL", "1"},
+	    {"KYTY_WIDE_STORE_NOTRAP", "1"},        {"KYTY_PIPELINE_CACHE_DEV", "1"},
+	    {"KYTY_CLEAR_META_NOSYNC", "auto"},
+	};
+	static constexpr PresetVar compat_vars[] = {
+	    {"KYTY_MESH_SCRATCH_HOST", "1"},        {"KYTY_MESH_SCRATCH_MB", "256"},
+	    {"KYTY_MESH_SCRATCH_DESCRIPTOR", "1"},  {"MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0"},
+	    {"MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "2"},
+	};
+	auto apply = [&](std::span<const PresetVar> vars) {
+		for (const auto& v: vars) {
+			if (const char* user = std::getenv(v.name); user != nullptr) {
+				Log::WriteToConsoleAndLog(fmt::format("Preset {}: {}={} (yours, kept)\n", mode, v.name, user));
+				continue;
+			}
+			setenv(v.name, v.value, 0);
+			Log::WriteToConsoleAndLog(fmt::format("Preset {}: {}={}\n", mode, v.name, v.value));
+		}
+	};
+	if (extreme) {
+		apply(extreme_vars);
+		if (title_id == "PPSA10112") {
+			apply(extreme_sh_vars);
+		}
+	}
+	if (fast) {
+		apply(fast_vars);
+	}
+	apply(compat_vars);
+}
+
 static void Init(const Config::ConfigOptions& cfg, const std::filesystem::path& param_json,
                  Common::Subsystems& subsystems) {
 	EXIT_IF(!Common::Thread::IsMainThread());
@@ -255,6 +333,7 @@ static void Init(const Config::ConfigOptions& cfg, const std::filesystem::path& 
 
 	if (Common::File::IsFileExisting(param_json)) {
 		Loader::SystemContentLoadParamSfo(param_json);
+		ApplyPreset();
 		// Silent Hill: The Short Message: split 256-bit store sites jump to a trampoline instead of
 		// trapping (about 128x fewer SIGILLs, RenderThread _sigtramp 16 % -> 5.7 %).
 		// KYTY_WIDE_STORE_NOTRAP=0 disables it.
