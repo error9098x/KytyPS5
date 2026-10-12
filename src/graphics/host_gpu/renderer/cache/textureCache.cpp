@@ -22,6 +22,7 @@
 #include <string>
 #include <cstdio>
 #include <algorithm>
+#include <memory>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -193,6 +194,21 @@ static bool EvictSmartEnabled() {
 static bool EvictAliasEnabled() {
 	static const bool enabled = EvictSmartEnabled() && EvictEnvFlag("KYTY_EVICT_ALIAS");
 	return enabled;
+}
+// KYTY_EVICT_TILED_DOWNLOAD=1 (only with KYTY_EVICT_SMART=1): also reclaim idle GPU-written tiled
+// images by downloading them back to guest memory (re-tiled by the tiler) before freeing them, so the
+// GPU budget becomes enforceable. At most KYTY_EVICT_TILED_DL_PER_CALL (default 2, 1..16) per pass.
+static bool EvictTiledDownloadEnabled() {
+	static const bool enabled = EvictSmartEnabled() && EvictEnvFlag("KYTY_EVICT_TILED_DOWNLOAD");
+	return enabled;
+}
+static size_t EvictTiledDownloadsPerCall() {
+	static const size_t n = [] {
+		const char* v = std::getenv("KYTY_EVICT_TILED_DL_PER_CALL");
+		const long  x = v != nullptr ? std::strtol(v, nullptr, 10) : 2;
+		return static_cast<size_t>(std::clamp<long>(x, 1, 16));
+	}();
+	return n;
 }
 // KYTY_EVICT_STATS=1: measure-only. Logs an EvictStats line every 2 s (cache census by eviction
 // class, LRU head blocking, frees, thrash re-creations). Works with either policy.
@@ -2320,7 +2336,9 @@ void TextureCache::LogInternalFrameStats(ImageId id, uint32_t mip, uint32_t laye
 	     static_cast<double>(alpha) / pixels, vertex_hash, pixel_hash);
 }
 
-bool TextureCache::DownloadImageMemory(ImageId id) {
+// allow_temporary (KYTY_EVICT_TILED_DOWNLOAD eviction only): an image larger than half the 64 MiB
+// download ring gets its own host-visible buffer, kept alive until the write-back has run.
+bool TextureCache::DownloadImageMemory(ImageId id, bool allow_temporary) {
 	auto& image = m_slot_images[id];
 	if (image.depth_id) {
 		return false;
@@ -2330,13 +2348,25 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 		return false;
 	}
 	const auto range    = image.info.data;
-	auto&      download = m_buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
-	auto [mapped, offset] =
-	    download.Map(range.size, std::max<uint64_t>(image.info.bytes_per_block, 4));
-	if (mapped == nullptr) {
-		EXIT("TextureCache: failed to map reusable download buffer\n");
+	auto&      ring     = m_buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
+	std::shared_ptr<Buffer> temporary;
+	uint8_t*                mapped = nullptr;
+	uint64_t                offset = 0;
+	if (allow_temporary && range.size > ring.Size() / 2) {
+		temporary = std::make_shared<Buffer>(m_graphics, m_scheduler, MemoryUsage::Download, 0, AllFlags,
+		                                     range.size);
+		mapped    = temporary->Mapped().data();
+		if (mapped == nullptr) {
+			return false;
+		}
+	} else {
+		std::tie(mapped, offset) = ring.Map(range.size, std::max<uint64_t>(image.info.bytes_per_block, 4));
+		if (mapped == nullptr) {
+			EXIT("TextureCache: failed to map reusable download buffer\n");
+		}
+		ring.Commit();
 	}
-	download.Commit();
+	Buffer& download = temporary ? static_cast<Buffer&>(*temporary) : static_cast<Buffer&>(ring);
 	m_buffer_cache.SettleCallerReadbacks(range.address, range.size);
 	if (!LibKernel::Memory::TryReadBacking(range.address, mapped, range.size)) {
 		return false;
@@ -2357,8 +2387,8 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 	m_scheduler.Current().Handle().pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                                               vk::PipelineStageFlagBits::eHost, {}, 0, nullptr,
 	                                               1, &barrier, 0, nullptr);
-	m_scheduler.DeferPriorityOperation([&download, range, mapped, offset] {
-		download.Invalidate(offset, range.size);
+	m_scheduler.DeferPriorityOperation([dst = &download, temporary, range, mapped, offset] {
+		dst->Invalidate(offset, range.size);
 		LibKernel::Memory::WriteBacking(range.address, mapped, range.size);
 	});
 	return true;
@@ -2727,15 +2757,20 @@ void TextureCache::MaybeLogEvictStats() {
 	     " stale_alias=%" PRIu64 "/%" PRIu64 " head40_blocked=%" PRIu64 "/%" PRIu64
 	     " scanned=%" PRIu64 " freed=%" PRIu64 "/%" PRIu64 " dl_evict=%" PRIu64
 	     " alias_free=%" PRIu64 "/%" PRIu64 " skip_tiled=%" PRIu64 " skip_other=%" PRIu64
-	     " budget_burned=%" PRIu64 " thrash=%" PRIu64 "/%" PRIu64 "\n",
-	     dt_ms, EvictSmartEnabled() ? (EvictAliasEnabled() ? "smart+alias" : "smart") : "default",
+	     " budget_burned=%" PRIu64 " thrash=%" PRIu64 "/%" PRIu64 " tiled_dl=%" PRIu64 "/%" PRIu64
+	     " tiled_dl_fail=%" PRIu64 "\n",
+	     dt_ms,
+	     EvictSmartEnabled() ? (EvictTiledDownloadEnabled() ? (EvictAliasEnabled() ? "smart+alias+tdl" : "smart+tdl")
+	                                                        : (EvictAliasEnabled() ? "smart+alias" : "smart"))
+	                         : "default",
 	     st.gc_calls, m_total_used_memory / MiB,
 	     m_evict_pending_bytes.load(std::memory_order_relaxed) / MiB, m_evict_reclaiming ? 1 : 0,
 	     EvictSmartEnabled() ? m_evict_age : uint64_t {0}, count[0], bytes[0] / MiB, count[1],
 	     bytes[1] / MiB, count[2], bytes[2] / MiB, count[3], bytes[3] / MiB, count[4], idle_tiled,
 	     idle_tiled_bytes / MiB, alias, alias_bytes / MiB, head_blocked, head, st.scanned, st.freed,
 	     st.freed_bytes / MiB, st.dl_evict, st.alias_free, st.alias_free_bytes / MiB,
-	     st.skipped_tiled, st.skipped_other, st.budget_burned, st.thrash, st.thrash_bytes / MiB);
+	     st.skipped_tiled, st.skipped_other, st.budget_burned, st.thrash, st.thrash_bytes / MiB,
+	     st.tiled_dl_evict, st.tiled_dl_bytes / MiB, st.tiled_dl_fail);
 	m_evict_stats = {};
 }
 
@@ -2794,6 +2829,9 @@ bool TextureCache::RunSmartReclaim(uint64_t tick) {
 	const uint64_t byte_goal = std::min(effective > low ? effective - low : 0, kMaxEvictBytesPerCall);
 	const uint64_t age       = std::min(m_evict_age, tick);
 	const bool     alias     = EvictAliasEnabled();
+	const bool     tiled_dl  = EvictTiledDownloadEnabled();
+	const size_t   tiled_cap = tiled_dl ? EvictTiledDownloadsPerCall() : 0;
+	size_t         tiled_downloads = 0;
 
 	std::vector<ImageId> victims;
 	victims.reserve(kMaxEvictCount);
@@ -2820,11 +2858,15 @@ bool TextureCache::RunSmartReclaim(uint64_t tick) {
 				downloads++;
 				break;
 			case EvictClass::TiledGpuSafe:
-				if (!alias || !IsStaleAlias(id, *image)) {
-					m_evict_stats.skipped_tiled++;
-					return false;
+				if (alias && IsStaleAlias(id, *image)) {
+					break;
 				}
-				break;
+				if (tiled_downloads < tiled_cap && BuildDownload(*image).valid) {
+					tiled_downloads++;
+					break;
+				}
+				m_evict_stats.skipped_tiled++;
+				return false;
 			default: m_evict_stats.skipped_other++; return false;
 		}
 		victims.push_back(id);
@@ -2852,12 +2894,23 @@ bool TextureCache::RunSmartReclaim(uint64_t tick) {
 			m_evict_stats.dl_evict++;
 		} else if (cls == EvictClass::TiledGpuSafe) {
 			// Re-check: an earlier victim in this batch may have been the newer covering image.
-			if (!alias || !IsStaleAlias(id, *owner)) {
+			if (alias && IsStaleAlias(id, *owner)) {
+				m_evict_stats.alias_free++;
+				m_evict_stats.alias_free_bytes += bytes;
+			} else if (tiled_dl) {
+				// Download + re-tile into guest memory (written back by a priority operation once the
+				// GPU work retires), then free; a later use re-creates the image from guest memory.
+				if (!DownloadImageMemory(id, true)) {
+					m_evict_stats.tiled_dl_fail++;
+					m_evict_stats.skipped_tiled++;
+					continue;
+				}
+				m_evict_stats.tiled_dl_evict++;
+				m_evict_stats.tiled_dl_bytes += bytes;
+			} else {
 				m_evict_stats.skipped_tiled++;
 				continue;
 			}
-			m_evict_stats.alias_free++;
-			m_evict_stats.alias_free_bytes += bytes;
 		} else if (cls != EvictClass::Clean && cls != EvictClass::UnsafeGpu) {
 			continue;
 		}

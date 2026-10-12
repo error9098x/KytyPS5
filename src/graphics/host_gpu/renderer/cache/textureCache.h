@@ -171,7 +171,7 @@ private:
 	void ValidateImageDesc(const ImageDesc& desc) const;
 
 	void               InvalidateCpuAliases(uint64_t address, uint64_t size);
-	[[nodiscard]] bool DownloadImageMemory(ImageId id);
+	[[nodiscard]] bool DownloadImageMemory(ImageId id, bool allow_temporary = false);
 
 	// KYTY_EVICT_SMART / KYTY_EVICT_ALIAS / KYTY_EVICT_STATS (all opt-in, see textureCache.cpp).
 	enum class EvictClass : uint8_t {
@@ -194,6 +194,7 @@ private:
 		uint64_t gc_calls = 0, scanned = 0, freed = 0, freed_bytes = 0, dl_evict = 0;
 		uint64_t alias_free = 0, alias_free_bytes = 0, skipped_tiled = 0, skipped_other = 0;
 		uint64_t thrash = 0, thrash_bytes = 0, budget_burned = 0;
+		uint64_t tiled_dl_evict = 0, tiled_dl_bytes = 0, tiled_dl_fail = 0;
 	};
 	// Bytes of GC-freed images whose native memory is released only when their tick completes.
 	std::atomic<uint64_t>                  m_evict_pending_bytes {0};
